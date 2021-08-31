@@ -1,16 +1,12 @@
 <div align="center">
 
-  <!--- FIXME: Pick an emoji and name your project! --->
-  <h1><code>🌻 opensource-template</code></h1>
+<!--- FIXME: Pick an emoji and name your project! --->
+# `🌻 opensource-template`
 
-  <!--- FIXME: Write short catchy description/tagline of project --->
-  <p>
-    <strong>Template for creating new open source repositories that follow the Embark open source guidelines</strong>
-  </p>
+<!--- FIXME: Write short catchy description/tagline of project --->
+**Template for creating new open source repositories that follow the Embark open source guidelines**
 
-  <p>
-
-  <!--- FIXME: Update crate, repo and CI workflow names here! Remove any that are not relevant --->
+<!--- FIXME: Update crate, repo and CI workflow names here! Remove any that are not relevant --->
     
 [![Embark](https://img.shields.io/badge/embark-open%20source-blueviolet.svg)](https://embark.dev)
 [![Embark](https://img.shields.io/badge/discord-ark-%237289da.svg?logo=discord)](https://discord.gg/dAuKfZS)
@@ -18,8 +14,6 @@
 [![Docs](https://docs.rs/rust-gpu/badge.svg)](https://docs.rs/rust-gpu)
 [![dependency status](https://deps.rs/repo/github/EmbarkStudios/rust-gpu/status.svg)](https://deps.rs/repo/github/EmbarkStudios/rust-gpu)
 [![Build status](https://github.com/EmbarkStudios/physx-rs/workflows/CI/badge.svg)](https://github.com/EmbarkStudios/physx-rs/actions)
-    
-  </p>
 </div>
 
 ## TEMPLATE INSTRUCTIONS
