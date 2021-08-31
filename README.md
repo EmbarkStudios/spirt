@@ -1,3 +1,9 @@
+<!-- Allow this file to not have a first line heading -->
+<!-- markdownlint-disable-file MD041 -->
+
+<!-- inline html -->
+<!-- markdownlint-disable-file MD033 -->
+
 <div align="center">
 
 <!--- FIXME: Pick an emoji and name your project! --->
