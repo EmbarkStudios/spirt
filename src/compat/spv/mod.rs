@@ -7,8 +7,11 @@ pub mod spec;
 // TODO(eddyb) have a way to generate "parsed instructions" out of the module,
 // basically whatever would be the the basis for outputting words back out.
 pub struct SpvModuleLayout {
-    // FIXME(eddyb) parse the header.
-    pub header: [u32; spec::HEADER_LEN],
+    // FIXME(eddyb) parse the version in the header.
+    pub header_version: u32,
+
+    pub original_generator_magic: u32,
+    pub original_id_bound: u32,
 }
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
@@ -218,8 +221,24 @@ impl super::Module {
         }
 
         let (header, mut spv_words) = spv_words.split_at(spec::HEADER_LEN);
-        let layout = SpvModuleLayout {
-            header: header.try_into().unwrap(),
+
+        let layout = {
+            let &[magic, version, generator_magic, id_bound, reserved_inst_schema]: &[u32; spec::HEADER_LEN] =
+                header.try_into().unwrap();
+
+            // Ensure above (this is the value after any endianness swapping).
+            assert_eq!(magic, spv_spec.magic);
+
+            if reserved_inst_schema != 0 {
+                return Err(invalid("unknown instruction schema - only 0 is supported"));
+            }
+
+            SpvModuleLayout {
+                header_version: version,
+
+                original_generator_magic: generator_magic,
+                original_id_bound: id_bound,
+            }
         };
 
         let mut top_level = vec![];
@@ -259,9 +278,9 @@ impl super::Module {
     }
 
     pub fn write_to_spv_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let mut spv_words = vec![];
-        match &self.layout {
-            super::ModuleLayout::Spv(layout) => spv_words.extend(layout.header),
+        let spv_spec = spec::Spec::get();
+        let layout = match &self.layout {
+            super::ModuleLayout::Spv(layout) => layout,
 
             #[allow(unreachable_patterns)]
             _ => {
@@ -270,7 +289,19 @@ impl super::Module {
                     "not a SPIR-V module",
                 ));
             }
-        }
+        };
+        let reserved_inst_schema = 0;
+
+        // Start with the SPIR-V module header.
+        let mut spv_words = vec![
+            spv_spec.magic,
+            layout.header_version,
+            layout.original_generator_magic,
+            // FIXME(eddyb) update this if the module has been modified.
+            layout.original_id_bound,
+            reserved_inst_schema,
+        ];
+
         for top_level in &self.top_level {
             match top_level {
                 super::TopLevel::SpvInst { opcode, operands } => {
