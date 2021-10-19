@@ -173,14 +173,19 @@ impl OperandParser<'_> {
 
 impl super::Module {
     pub fn read_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
+        // FIXME(eddyb) stop abusing `io::Error` for error reporting.
+        let invalid = |reason: &str| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed SPIR-V module ({})", reason),
+            )
+        };
+
         let spv_spec = spec::Spec::get();
 
         let mut spv_bytes = fs::read(path)?;
         if spv_bytes.len() % 4 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "malformed SPIR-V module (not a multiple of 4 bytes)",
-            ));
+            return Err(invalid("not a multiple of 4 bytes"));
         }
         let spv_words = {
             // FIXME(eddyb) find a safe wrapper crate for this.
@@ -195,10 +200,7 @@ impl super::Module {
         };
 
         if spv_words.len() < spec::HEADER_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "malformed SPIR-V module (truncated header)",
-            ));
+            return Err(invalid("truncated header"));
         }
 
         // Check the magic, and swap endianness of all words if we have to.
@@ -211,10 +213,7 @@ impl super::Module {
                     *word = word.swap_bytes();
                 }
             } else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "malformed SPIR-V module (invalid magic number)",
-                ));
+                return Err(invalid("incorrect magic number"));
             }
         }
 
@@ -228,10 +227,7 @@ impl super::Module {
             let (inst_len, opcode) = ((opcode >> 16) as usize, *opcode as u16);
 
             if spv_words.len() < inst_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "malformed SPIR-V module (truncated instruction)",
-                ));
+                return Err(invalid("truncated instruction"));
             }
 
             let (inst_words, rest) = spv_words.split_at(inst_len);
