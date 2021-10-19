@@ -76,7 +76,10 @@ impl OperandParser<'_> {
             }
 
             spec::OperandKindDef::Id => {
-                self.operands.push(super::SpvOperand::Id(kind, word));
+                self.operands.push(super::SpvOperand::Id(
+                    kind,
+                    word.try_into().map_err(|_| ())?,
+                ));
             }
 
             spec::OperandKindDef::Literal {
@@ -316,8 +319,8 @@ impl super::Module {
                         match *operand {
                             super::SpvOperand::ShortImm(_, word)
                             | super::SpvOperand::LongImmStart(_, word)
-                            | super::SpvOperand::LongImmCont(_, word)
-                            | super::SpvOperand::Id(_, word) => word,
+                            | super::SpvOperand::LongImmCont(_, word) => word,
+                            super::SpvOperand::Id(_, id) => id.get(),
                         }
                     })));
                 }

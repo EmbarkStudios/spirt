@@ -1,4 +1,5 @@
 use smallvec::SmallVec;
+use std::num::NonZeroU32;
 
 pub mod spv;
 
@@ -29,10 +30,14 @@ pub enum TopLevel {
     },
 }
 
+// FIXME(eddyb) consider moving some/all of these defitions into `spv`.
+
 pub enum SpvOperand {
     ShortImm(spv::spec::OperandKind, u32),
     LongImmStart(spv::spec::OperandKind, u32),
     LongImmCont(spv::spec::OperandKind, u32),
 
-    Id(spv::spec::OperandKind, u32),
+    Id(spv::spec::OperandKind, SpvId),
 }
+
+pub type SpvId = NonZeroU32;
