@@ -20,6 +20,10 @@ pub struct Spec {
 
 #[derive(PartialEq, Eq)]
 pub struct InstructionDef {
+    // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
+    pub has_result_type_id: bool,
+    pub has_result_id: bool,
+
     pub req_operands: ArrayVec<OperandKind, 16>,
     pub opt_operands: ArrayVec<OperandKind, 2>,
     pub rest_operands: Option<RestOperandsUnit>,
@@ -390,15 +394,46 @@ impl Spec {
             })
             .collect();
 
+        let id_result_type = operand_kinds.lookup("IdResultType").unwrap();
+        let id_result = operand_kinds.lookup("IdResult").unwrap();
+
         let instructions = indexed::KhrSegmentedVec::from_in_order_iter(
             raw_core_grammar.instructions.iter().map(|inst| {
                 let mut def = InstructionDef {
+                    has_result_type_id: false,
+                    has_result_id: false,
+
                     req_operands: ArrayVec::new(),
                     opt_operands: ArrayVec::new(),
                     rest_operands: None,
                 };
                 for o in &inst.operands {
                     let single = operand_kinds.lookup(o.kind);
+
+                    if single == Some(id_result_type) {
+                        assert!(matches!(o.quantifier, None));
+                        assert!(
+                            !def.has_result_type_id
+                                && !def.has_result_id
+                                && def.req_operands.is_empty()
+                                && def.opt_operands.is_empty()
+                                && def.rest_operands.is_none()
+                        );
+                        def.has_result_type_id = true;
+                        continue;
+                    }
+                    if single == Some(id_result) {
+                        assert!(matches!(o.quantifier, None));
+                        assert!(
+                            !def.has_result_id
+                                && def.req_operands.is_empty()
+                                && def.opt_operands.is_empty()
+                                && def.rest_operands.is_none()
+                        );
+                        def.has_result_id = true;
+                        continue;
+                    }
+
                     match o.quantifier {
                         None => {
                             assert!(def.opt_operands.is_empty() && def.rest_operands.is_none());
@@ -417,6 +452,10 @@ impl Spec {
                         }
                     }
                 }
+
+                // `IdResultType` without `IdResult` is impossible.
+                assert!(!(def.has_result_type_id && !def.has_result_id));
+
                 (inst.opcode, (inst.opname, def))
             }),
             // `merge_duplicates` closure:
@@ -444,8 +483,8 @@ impl Spec {
         };
 
         let well_known = WellKnown {
-            id_result_type: operand_kinds.lookup("IdResultType").unwrap(),
-            id_result: operand_kinds.lookup("IdResult").unwrap(),
+            id_result_type,
+            id_result,
         };
 
         Self {

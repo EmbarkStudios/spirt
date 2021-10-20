@@ -7,13 +7,23 @@ fn main() -> std::io::Result<()> {
             let (mut known, mut unknown) = (0, 0);
             for top_level in &module.top_level {
                 match top_level {
-                    spirt::compat::TopLevel::SpvInst { opcode, operands } => {
+                    spirt::compat::TopLevel::SpvInst(inst) => {
+                        eprint!("    ");
+
+                        if let Some(id) = inst.result_id {
+                            eprint!("%{}", id);
+                            if let Some(type_id) = inst.result_type_id {
+                                eprint!(": %{}", type_id);
+                            }
+                            eprint!(" = ");
+                        }
+
                         eprint!(
-                            "    {}",
-                            spv_spec.instructions.get_named(*opcode).unwrap().0
+                            "{}",
+                            spv_spec.instructions.get_named(inst.opcode).unwrap().0
                         );
                         spirt::compat::spv::OperandPrinter {
-                            operands: operands.iter(),
+                            operands: inst.operands.iter(),
                             out: std::io::stderr().lock(),
                         }
                         .all_operands()

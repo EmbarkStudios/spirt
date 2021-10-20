@@ -20,10 +20,7 @@ pub enum ModuleLayout {
 }
 
 pub enum TopLevel {
-    SpvInst {
-        opcode: u16,
-        operands: SmallVec<[SpvOperand; 4]>,
-    },
+    SpvInst(SpvInst),
     SpvUnknownInst {
         opcode: u16,
         operands: SmallVec<[u32; 8]>,
@@ -31,6 +28,15 @@ pub enum TopLevel {
 }
 
 // FIXME(eddyb) consider moving some/all of these defitions into `spv`.
+pub struct SpvInst {
+    pub opcode: u16,
+
+    // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
+    pub result_type_id: Option<SpvId>,
+    pub result_id: Option<SpvId>,
+
+    pub operands: SmallVec<[SpvOperand; 2]>,
+}
 
 pub enum SpvOperand {
     ShortImm(spv::spec::OperandKind, u32),

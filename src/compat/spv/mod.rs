@@ -20,7 +20,7 @@ struct OperandParser<'a> {
     words: iter::Copied<slice::Iter<'a, u32>>,
 
     /// Output operands.
-    operands: SmallVec<[super::SpvOperand; 4]>,
+    operands: SmallVec<[super::SpvOperand; 2]>,
 }
 
 /// Additional context for `OperandParser::operand`.
@@ -131,10 +131,17 @@ impl OperandParser<'_> {
         Ok(())
     }
 
-    fn inst_operands(
-        mut self,
-        def: &spec::InstructionDef,
-    ) -> Result<SmallVec<[super::SpvOperand; 4]>, ()> {
+    fn inst(mut self, opcode: u16, def: &spec::InstructionDef) -> Result<super::SpvInst, ()> {
+        let result_type_id = def
+            .has_result_type_id
+            .then(|| self.words.next().ok_or(())?.try_into().map_err(|_| ()))
+            .transpose()?;
+
+        let result_id = def
+            .has_result_id
+            .then(|| self.words.next().ok_or(())?.try_into().map_err(|_| ()))
+            .transpose()?;
+
         for (i, &kind) in def.req_operands.iter().enumerate() {
             self.operand(
                 kind,
@@ -173,7 +180,12 @@ impl OperandParser<'_> {
             return Err(());
         }
 
-        Ok(self.operands)
+        Ok(super::SpvInst {
+            opcode,
+            result_type_id,
+            result_id,
+            operands: self.operands,
+        })
     }
 }
 
@@ -262,8 +274,8 @@ impl super::Module {
                     operands: SmallVec::new(),
                 };
 
-                if let Ok(operands) = operand_parser.inst_operands(def) {
-                    top_level.push(super::TopLevel::SpvInst { opcode, operands });
+                if let Ok(inst) = operand_parser.inst(opcode, def) {
+                    top_level.push(super::TopLevel::SpvInst(inst));
                     continue;
                 }
             }
@@ -307,22 +319,29 @@ impl super::Module {
 
         for top_level in &self.top_level {
             match top_level {
-                super::TopLevel::SpvInst { opcode, operands } => {
-                    let opcode = u32::from(*opcode)
-                        | u32::from(u16::try_from(1 + operands.len()).map_err(|_| {
+                super::TopLevel::SpvInst(inst) => {
+                    let total_word_count = 1
+                        + (inst.result_type_id.is_some() as usize)
+                        + (inst.result_id.is_some() as usize)
+                        + inst.operands.len();
+                    let opcode = u32::from(inst.opcode)
+                        | u32::from(u16::try_from(total_word_count).map_err(|_| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "word count of SPIR-V instruction doesn't fit in 16 bits",
                             )
                         })?) << 16;
-                    spv_words.extend(iter::once(opcode).chain(operands.iter().map(|operand| {
-                        match *operand {
-                            super::SpvOperand::ShortImm(_, word)
-                            | super::SpvOperand::LongImmStart(_, word)
-                            | super::SpvOperand::LongImmCont(_, word) => word,
-                            super::SpvOperand::Id(_, id) => id.get(),
-                        }
-                    })));
+                    spv_words.extend(
+                        iter::once(opcode)
+                            .chain(inst.result_type_id.map(|id| id.get()))
+                            .chain(inst.result_id.map(|id| id.get()))
+                            .chain(inst.operands.iter().map(|operand| match *operand {
+                                super::SpvOperand::ShortImm(_, word)
+                                | super::SpvOperand::LongImmStart(_, word)
+                                | super::SpvOperand::LongImmCont(_, word) => word,
+                                super::SpvOperand::Id(_, id) => id.get(),
+                            })),
+                    );
                 }
                 super::TopLevel::SpvUnknownInst { opcode, operands } => {
                     let opcode = u32::from(*opcode)
