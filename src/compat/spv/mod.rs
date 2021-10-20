@@ -32,13 +32,45 @@ enum OperandContext {
     LastInInst,
 }
 
+enum OperandParseError {
+    /// Ran out of words while parsing an instruction's operands.
+    NotEnoughWords,
+
+    /// Extra words were left over, after parsing an instruction's operands.
+    TooManyWords,
+
+    /// An illegal ID of `0`.
+    IdZero,
+
+    /// Instruction may be valid, but contains an unexpected enumerand value.
+    UnknownEnumerand,
+
+    /// The general case of `LiteralContextDependentNumber`, TBD.
+    UnimplementedContextSensitiveLiteral,
+}
+
+impl OperandParseError {
+    /// Only returns `Some(message)` if the error is guaranteed to be caused by
+    /// an invalid SPIR-V module, and not a lack of support on our part.
+    // FIXME(eddyb) improve messages and add more contextual information.
+    fn is_unambiguously_invalid(&self) -> Option<&'static str> {
+        match *self {
+            Self::NotEnoughWords => Some("truncated instruction"),
+            Self::TooManyWords => Some("overlong instruction"),
+            Self::IdZero => Some("ID %0 is illegal"),
+
+            Self::UnknownEnumerand | Self::UnimplementedContextSensitiveLiteral => None,
+        }
+    }
+}
+
 impl OperandParser<'_> {
     fn is_exhausted(&self) -> bool {
         // FIXME(eddyb) use `self.words.is_empty()` when that is stabilized.
         self.words.len() == 0
     }
 
-    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), ()> {
+    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), OperandParseError> {
         for &kind in &enumerant.req_params {
             self.operand(kind, None)?;
         }
@@ -56,14 +88,16 @@ impl OperandParser<'_> {
         &mut self,
         kind: spec::OperandKind,
         context: Option<OperandContext>,
-    ) -> Result<(), ()> {
-        let word = self.words.next().ok_or(())?;
+    ) -> Result<(), OperandParseError> {
+        use OperandParseError as Error;
+
+        let word = self.words.next().ok_or(Error::NotEnoughWords)?;
         match kind.def() {
             spec::OperandKindDef::BitEnum { bits, .. } => {
                 self.operands.push(super::SpvOperand::ShortImm(kind, word));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
-                    let bit_def = bits.get(bit_idx).ok_or(())?;
+                    let bit_def = bits.get(bit_idx).ok_or(Error::UnknownEnumerand)?;
                     self.enumerant_params(bit_def)?;
                 }
             }
@@ -71,14 +105,17 @@ impl OperandParser<'_> {
             spec::OperandKindDef::ValueEnum { variants } => {
                 self.operands.push(super::SpvOperand::ShortImm(kind, word));
 
-                let variant_def = variants.get(word.try_into().map_err(|_| ())?).ok_or(())?;
+                let variant_def = u16::try_from(word)
+                    .ok()
+                    .and_then(|v| variants.get(v))
+                    .ok_or(Error::UnknownEnumerand)?;
                 self.enumerant_params(variant_def)?;
             }
 
             spec::OperandKindDef::Id => {
                 self.operands.push(super::SpvOperand::Id(
                     kind,
-                    word.try_into().map_err(|_| ())?,
+                    word.try_into().map_err(|_| Error::IdZero)?,
                 ));
             }
 
@@ -123,7 +160,7 @@ impl OperandParser<'_> {
                 }
                 None => {
                     // FIXME(eddyb) implement context-sensitive literals fully.
-                    return Err(());
+                    return Err(Error::UnimplementedContextSensitiveLiteral);
                 }
             },
         }
@@ -131,16 +168,27 @@ impl OperandParser<'_> {
         Ok(())
     }
 
-    fn inst(mut self, opcode: u16, def: &spec::InstructionDef) -> Result<super::SpvInst, ()> {
-        let result_type_id = def
-            .has_result_type_id
-            .then(|| self.words.next().ok_or(())?.try_into().map_err(|_| ()))
-            .transpose()?;
+    fn inst(
+        mut self,
+        opcode: u16,
+        def: &spec::InstructionDef,
+    ) -> Result<super::SpvInst, OperandParseError> {
+        use OperandParseError as Error;
 
-        let result_id = def
-            .has_result_id
-            .then(|| self.words.next().ok_or(())?.try_into().map_err(|_| ()))
-            .transpose()?;
+        let (result_type_id, result_id) = {
+            // FIXME(eddyb) should this be a method?
+            let mut id = || {
+                self.words
+                    .next()
+                    .ok_or(Error::NotEnoughWords)?
+                    .try_into()
+                    .map_err(|_| Error::IdZero)
+            };
+            (
+                def.has_result_type_id.then(|| id()).transpose()?,
+                def.has_result_id.then(|| id()).transpose()?,
+            )
+        };
 
         for (i, &kind) in def.req_operands.iter().enumerate() {
             self.operand(
@@ -177,7 +225,7 @@ impl OperandParser<'_> {
 
         // The instruction must consume its entire word count.
         if !self.is_exhausted() {
-            return Err(());
+            return Err(Error::TooManyWords);
         }
 
         Ok(super::SpvInst {
@@ -274,9 +322,16 @@ impl super::Module {
                     operands: SmallVec::new(),
                 };
 
-                if let Ok(inst) = operand_parser.inst(opcode, def) {
-                    top_level.push(super::TopLevel::SpvInst(inst));
-                    continue;
+                match operand_parser.inst(opcode, def) {
+                    Ok(inst) => {
+                        top_level.push(super::TopLevel::SpvInst(inst));
+                        continue;
+                    }
+                    Err(e) => {
+                        if let Some(message) = e.is_unambiguously_invalid() {
+                            return Err(invalid(message));
+                        }
+                    }
                 }
             }
 
