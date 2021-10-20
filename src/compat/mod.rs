@@ -44,6 +44,10 @@ pub enum SpvOperand {
     LongImmCont(spv::spec::OperandKind, u32),
 
     Id(spv::spec::OperandKind, SpvId),
+
+    // FIXME(eddyb) reduce uses of this by addressing the situations it can
+    // appear in, with dedicated IR constructs instead.
+    ForwardIdRef(spv::spec::OperandKind, SpvId),
 }
 
 pub type SpvId = NonZeroU32;

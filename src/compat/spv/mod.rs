@@ -1,4 +1,6 @@
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::path::Path;
 use std::{fs, io, iter, slice, str};
 
@@ -16,6 +18,9 @@ pub struct SpvModuleLayout {
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 struct OperandParser<'a> {
+    /// IDs defined so far in the module.
+    known_ids: &'a FxHashSet<super::SpvId>,
+
     /// Input words of an instruction.
     words: iter::Copied<slice::Iter<'a, u32>>,
 
@@ -42,6 +47,10 @@ enum OperandParseError {
     /// An illegal ID of `0`.
     IdZero,
 
+    /// An `IdResultType` ID referring to an ID not already defined.
+    // FIXME(eddyb) this could also arise through unknown `OpType` instructions.
+    UnknownResultTypeId(super::SpvId),
+
     /// Instruction may be valid, but contains an unexpected enumerand value.
     UnknownEnumerand,
 
@@ -53,11 +62,14 @@ impl OperandParseError {
     /// Only returns `Some(message)` if the error is guaranteed to be caused by
     /// an invalid SPIR-V module, and not a lack of support on our part.
     // FIXME(eddyb) improve messages and add more contextual information.
-    fn is_unambiguously_invalid(&self) -> Option<&'static str> {
+    fn is_unambiguously_invalid(&self) -> Option<Cow<'static, str>> {
         match *self {
-            Self::NotEnoughWords => Some("truncated instruction"),
-            Self::TooManyWords => Some("overlong instruction"),
-            Self::IdZero => Some("ID %0 is illegal"),
+            Self::NotEnoughWords => Some("truncated instruction".into()),
+            Self::TooManyWords => Some("overlong instruction".into()),
+            Self::IdZero => Some("ID %0 is illegal".into()),
+            Self::UnknownResultTypeId(id) => {
+                Some(format!("ID %{} used as result type before defintion", id).into())
+            }
 
             Self::UnknownEnumerand | Self::UnimplementedContextSensitiveLiteral => None,
         }
@@ -113,10 +125,12 @@ impl OperandParser<'_> {
             }
 
             spec::OperandKindDef::Id => {
-                self.operands.push(super::SpvOperand::Id(
-                    kind,
-                    word.try_into().map_err(|_| Error::IdZero)?,
-                ));
+                let id = word.try_into().map_err(|_| Error::IdZero)?;
+                self.operands.push(if self.known_ids.contains(&id) {
+                    super::SpvOperand::Id(kind, id)
+                } else {
+                    super::SpvOperand::ForwardIdRef(kind, id)
+                });
             }
 
             spec::OperandKindDef::Literal {
@@ -189,6 +203,12 @@ impl OperandParser<'_> {
                 def.has_result_id.then(|| id()).transpose()?,
             )
         };
+
+        if let Some(type_id) = result_type_id {
+            if !self.known_ids.contains(&type_id) {
+                return Err(Error::UnknownResultTypeId(type_id));
+            }
+        }
 
         for (i, &kind) in def.req_operands.iter().enumerate() {
             self.operand(
@@ -304,6 +324,8 @@ impl super::Module {
             }
         };
 
+        let mut known_ids = FxHashSet::default();
+
         let mut top_level = vec![];
         while let [opcode, ..] = spv_words {
             let (inst_len, opcode) = ((opcode >> 16) as usize, *opcode as u16);
@@ -318,18 +340,29 @@ impl super::Module {
             let operand_words = &inst_words[1..];
             if let Some(def) = spv_spec.instructions.get(opcode) {
                 let operand_parser = OperandParser {
+                    known_ids: &known_ids,
                     words: operand_words.iter().copied(),
                     operands: SmallVec::new(),
                 };
 
                 match operand_parser.inst(opcode, def) {
                     Ok(inst) => {
+                        if let Some(id) = inst.result_id {
+                            let is_new = known_ids.insert(id);
+                            if !is_new {
+                                return Err(invalid(&format!(
+                                    "ID %{} is a result of multiple instructions",
+                                    id
+                                )));
+                            }
+                        }
+
                         top_level.push(super::TopLevel::SpvInst(inst));
                         continue;
                     }
                     Err(e) => {
                         if let Some(message) = e.is_unambiguously_invalid() {
-                            return Err(invalid(message));
+                            return Err(invalid(&message));
                         }
                     }
                 }
@@ -394,7 +427,8 @@ impl super::Module {
                                 super::SpvOperand::ShortImm(_, word)
                                 | super::SpvOperand::LongImmStart(_, word)
                                 | super::SpvOperand::LongImmCont(_, word) => word,
-                                super::SpvOperand::Id(_, id) => id.get(),
+                                super::SpvOperand::Id(_, id)
+                                | super::SpvOperand::ForwardIdRef(_, id) => id.get(),
                             })),
                     );
                 }
@@ -536,6 +570,7 @@ impl<W: io::Write> OperandPrinter<'_, W> {
             super::SpvOperand::LongImmStart(kind, word) => self.literal(kind, word),
             super::SpvOperand::LongImmCont(..) => unreachable!(),
             super::SpvOperand::Id(_, id) => write!(self.out, "%{}", id),
+            super::SpvOperand::ForwardIdRef(_, id) => write!(self.out, "ForwardRef(%{})", id),
         }
     }
 
