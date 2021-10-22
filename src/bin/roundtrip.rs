@@ -1,13 +1,13 @@
 fn main() -> std::io::Result<()> {
     match &std::env::args().collect::<Vec<_>>()[..] {
         [_, in_file, out_file] => {
-            let module = spirt::compat::Module::read_from_spv_file(in_file)?;
+            let module = spirt::Module::read_from_spv_file(in_file)?;
 
-            let spv_spec = spirt::compat::spv::spec::Spec::get();
+            let spv_spec = spirt::spv::spec::Spec::get();
             let (mut known, mut unknown) = (0, 0);
             for top_level in &module.top_level {
                 match top_level {
-                    spirt::compat::TopLevel::SpvInst(inst) => {
+                    spirt::TopLevel::SpvInst(inst) => {
                         eprint!("    ");
 
                         if let Some(id) = inst.result_id {
@@ -22,7 +22,7 @@ fn main() -> std::io::Result<()> {
                             "{}",
                             spv_spec.instructions.get_named(inst.opcode).unwrap().0
                         );
-                        spirt::compat::spv::OperandPrinter {
+                        spirt::spv::OperandPrinter {
                             operands: inst.operands.iter(),
                             out: std::io::stderr().lock(),
                         }
@@ -31,7 +31,7 @@ fn main() -> std::io::Result<()> {
                         eprintln!();
                         known += 1;
                     }
-                    spirt::compat::TopLevel::SpvUnknownInst { opcode, .. } => {
+                    spirt::TopLevel::SpvUnknownInst { opcode, .. } => {
                         eprintln!(
                             "    {} ???",
                             spv_spec.instructions.get_named(*opcode).unwrap().0

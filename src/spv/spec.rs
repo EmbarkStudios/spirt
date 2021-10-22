@@ -158,7 +158,7 @@ impl Spec {
         lazy_static! {
             static ref SPEC: Spec = {
                 let raw_core_grammar: raw::CoreGrammar = serde_json::from_str(include_str!(
-                    "../../../khronos-spec/SPIRV-Headers/include/spirv/unified1/spirv.core.grammar.json"
+                    "../../khronos-spec/SPIRV-Headers/include/spirv/unified1/spirv.core.grammar.json"
                 ))
                 .unwrap();
                 Spec::from_raw(raw_core_grammar)
