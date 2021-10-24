@@ -17,15 +17,15 @@ pub struct SpvModuleLayout {
 }
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
-struct OperandParser<'a> {
+struct InstParser<'a> {
     /// IDs defined so far in the module.
     known_ids: &'a FxHashSet<super::SpvId>,
 
     /// Input words of an instruction.
     words: iter::Copied<slice::Iter<'a, u32>>,
 
-    /// Output operands.
-    operands: SmallVec<[super::SpvOperand; 2]>,
+    /// Output instruction, being parsed.
+    inst: super::SpvInst,
 }
 
 /// Additional context for `OperandParser::operand`.
@@ -37,7 +37,7 @@ enum OperandContext {
     LastInInst,
 }
 
-enum OperandParseError {
+enum InstParseError {
     /// Ran out of words while parsing an instruction's operands.
     NotEnoughWords,
 
@@ -58,7 +58,7 @@ enum OperandParseError {
     UnimplementedContextSensitiveLiteral,
 }
 
-impl OperandParseError {
+impl InstParseError {
     /// Only returns `Some(message)` if the error is guaranteed to be caused by
     /// an invalid SPIR-V module, and not a lack of support on our part.
     // FIXME(eddyb) improve messages and add more contextual information.
@@ -76,13 +76,13 @@ impl OperandParseError {
     }
 }
 
-impl OperandParser<'_> {
+impl InstParser<'_> {
     fn is_exhausted(&self) -> bool {
         // FIXME(eddyb) use `self.words.is_empty()` when that is stabilized.
         self.words.len() == 0
     }
 
-    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), OperandParseError> {
+    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), InstParseError> {
         for &kind in &enumerant.req_params {
             self.operand(kind, None)?;
         }
@@ -100,13 +100,15 @@ impl OperandParser<'_> {
         &mut self,
         kind: spec::OperandKind,
         context: Option<OperandContext>,
-    ) -> Result<(), OperandParseError> {
-        use OperandParseError as Error;
+    ) -> Result<(), InstParseError> {
+        use InstParseError as Error;
 
         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
         match kind.def() {
             spec::OperandKindDef::BitEnum { bits, .. } => {
-                self.operands.push(super::SpvOperand::ShortImm(kind, word));
+                self.inst
+                    .operands
+                    .push(super::SpvOperand::ShortImm(kind, word));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                     let bit_def = bits.get(bit_idx).ok_or(Error::UnknownEnumerand)?;
@@ -115,7 +117,9 @@ impl OperandParser<'_> {
             }
 
             spec::OperandKindDef::ValueEnum { variants } => {
-                self.operands.push(super::SpvOperand::ShortImm(kind, word));
+                self.inst
+                    .operands
+                    .push(super::SpvOperand::ShortImm(kind, word));
 
                 let variant_def = u16::try_from(word)
                     .ok()
@@ -126,7 +130,7 @@ impl OperandParser<'_> {
 
             spec::OperandKindDef::Id => {
                 let id = word.try_into().map_err(|_| Error::IdZero)?;
-                self.operands.push(if self.known_ids.contains(&id) {
+                self.inst.operands.push(if self.known_ids.contains(&id) {
                     super::SpvOperand::Id(kind, id)
                 } else {
                     super::SpvOperand::ForwardIdRef(kind, id)
@@ -136,19 +140,25 @@ impl OperandParser<'_> {
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::Word,
             } => {
-                self.operands.push(super::SpvOperand::ShortImm(kind, word));
+                self.inst
+                    .operands
+                    .push(super::SpvOperand::ShortImm(kind, word));
             }
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::NulTerminated,
             } => {
                 let has_nul = |word: u32| word.to_le_bytes().contains(&0);
                 if has_nul(word) {
-                    self.operands.push(super::SpvOperand::ShortImm(kind, word));
+                    self.inst
+                        .operands
+                        .push(super::SpvOperand::ShortImm(kind, word));
                 } else {
-                    self.operands
+                    self.inst
+                        .operands
                         .push(super::SpvOperand::LongImmStart(kind, word));
                     for word in &mut self.words {
-                        self.operands
+                        self.inst
+                            .operands
                             .push(super::SpvOperand::LongImmCont(kind, word));
                         if has_nul(word) {
                             break;
@@ -162,12 +172,16 @@ impl OperandParser<'_> {
                 // HACK(eddyb) the last operand can use up all remaining words.
                 Some(OperandContext::LastInInst) => {
                     if self.is_exhausted() {
-                        self.operands.push(super::SpvOperand::ShortImm(kind, word));
+                        self.inst
+                            .operands
+                            .push(super::SpvOperand::ShortImm(kind, word));
                     } else {
-                        self.operands
+                        self.inst
+                            .operands
                             .push(super::SpvOperand::LongImmStart(kind, word));
                         for word in &mut self.words {
-                            self.operands
+                            self.inst
+                                .operands
                                 .push(super::SpvOperand::LongImmCont(kind, word));
                         }
                     }
@@ -182,14 +196,10 @@ impl OperandParser<'_> {
         Ok(())
     }
 
-    fn inst(
-        mut self,
-        opcode: u16,
-        def: &spec::InstructionDef,
-    ) -> Result<super::SpvInst, OperandParseError> {
-        use OperandParseError as Error;
+    fn inst(mut self, def: &spec::InstructionDef) -> Result<super::SpvInst, InstParseError> {
+        use InstParseError as Error;
 
-        let (result_type_id, result_id) = {
+        {
             // FIXME(eddyb) should this be a method?
             let mut id = || {
                 self.words
@@ -198,13 +208,11 @@ impl OperandParser<'_> {
                     .try_into()
                     .map_err(|_| Error::IdZero)
             };
-            (
-                def.has_result_type_id.then(|| id()).transpose()?,
-                def.has_result_id.then(|| id()).transpose()?,
-            )
-        };
+            self.inst.result_type_id = def.has_result_type_id.then(|| id()).transpose()?;
+            self.inst.result_id = def.has_result_id.then(|| id()).transpose()?;
+        }
 
-        if let Some(type_id) = result_type_id {
+        if let Some(type_id) = self.inst.result_type_id {
             if !self.known_ids.contains(&type_id) {
                 return Err(Error::UnknownResultTypeId(type_id));
             }
@@ -248,12 +256,7 @@ impl OperandParser<'_> {
             return Err(Error::TooManyWords);
         }
 
-        Ok(super::SpvInst {
-            opcode,
-            result_type_id,
-            result_id,
-            operands: self.operands,
-        })
+        Ok(self.inst)
     }
 }
 
@@ -339,13 +342,18 @@ impl super::Module {
 
             let operand_words = &inst_words[1..];
             if let Some(def) = spv_spec.instructions.get(opcode) {
-                let operand_parser = OperandParser {
+                let parser = InstParser {
                     known_ids: &known_ids,
                     words: operand_words.iter().copied(),
-                    operands: SmallVec::new(),
+                    inst: super::SpvInst {
+                        opcode,
+                        result_type_id: None,
+                        result_id: None,
+                        operands: SmallVec::new(),
+                    },
                 };
 
-                match operand_parser.inst(opcode, def) {
+                match parser.inst(def) {
                     Ok(inst) => {
                         if let Some(id) = inst.result_id {
                             let is_new = known_ids.insert(id);
