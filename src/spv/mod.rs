@@ -32,9 +32,10 @@ struct InstParser<'a> {
 ///
 /// Used currently only to help parsing `LiteralContextDependentNumber`.
 enum OperandContext {
-    /// The operand is the last one in the instruction's definition, and cannot
-    /// be followed by more operands (other than its own parameters).
-    LastInInst,
+    /// The operand is the only one in the instruction's definition (other than
+    /// `IdResultType`/`IdResult`), and cannot be followed by more operands
+    /// (other than its own parameters).
+    SoleOperand,
 }
 
 enum InstParseError {
@@ -170,7 +171,7 @@ impl InstParser<'_> {
                 size: spec::LiteralSize::FromContextualType,
             } => match context {
                 // HACK(eddyb) the last operand can use up all remaining words.
-                Some(OperandContext::LastInInst) => {
+                Some(OperandContext::SoleOperand) => {
                     if self.is_exhausted() {
                         self.inst
                             .operands
@@ -218,14 +219,14 @@ impl InstParser<'_> {
             }
         }
 
-        for (i, &kind) in def.req_operands.iter().enumerate() {
+        for &kind in &def.req_operands {
             self.operand(
                 kind,
-                if i == def.req_operands.len() - 1
+                if def.req_operands.len() == 1
                     && def.opt_operands.is_empty()
                     && def.rest_operands.is_none()
                 {
-                    Some(OperandContext::LastInInst)
+                    Some(OperandContext::SoleOperand)
                 } else {
                     None
                 },
