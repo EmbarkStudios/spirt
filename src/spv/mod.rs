@@ -69,7 +69,7 @@ impl InstParseError {
             Self::TooManyWords => Some("overlong instruction".into()),
             Self::IdZero => Some("ID %0 is illegal".into()),
             Self::UnknownResultTypeId(id) => {
-                Some(format!("ID %{} used as result type before defintion", id).into())
+                Some(format!("ID %{} used as result type before definition", id).into())
             }
 
             Self::UnknownEnumerand | Self::UnimplementedContextSensitiveLiteral => None,
