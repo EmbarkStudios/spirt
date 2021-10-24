@@ -38,6 +38,12 @@ pub enum RestOperandsUnit {
 }
 
 pub struct WellKnown {
+    /// `OpTypeInt` instruction opcode.
+    pub op_type_int: u16,
+
+    /// `OpTypeFloat` instruction opcode.
+    pub op_type_float: u16,
+
     /// `IdResultType` operand kind.
     pub id_result_type: OperandKind,
 
@@ -483,6 +489,9 @@ impl Spec {
         };
 
         let well_known = WellKnown {
+            op_type_int: instructions.lookup("OpTypeInt").unwrap(),
+            op_type_float: instructions.lookup("OpTypeFloat").unwrap(),
+
             id_result_type,
             id_result,
         };

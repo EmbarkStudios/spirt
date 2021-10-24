@@ -1,6 +1,7 @@
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::{fs, io, iter, slice, str};
 
@@ -16,26 +17,37 @@ pub struct SpvModuleLayout {
     pub original_id_bound: u32,
 }
 
+/// Defining instruction of an ID.
+///
+/// Used currently only to help parsing `LiteralContextDependentNumber`.
+enum KnownIdDef {
+    TypeInt(NonZeroU32),
+    TypeFloat(NonZeroU32),
+    Uncategorized {
+        opcode: u16,
+        result_type_id: Option<super::SpvId>,
+    },
+}
+
+impl KnownIdDef {
+    fn result_type_id(&self) -> Option<super::SpvId> {
+        match *self {
+            Self::TypeInt(_) | Self::TypeFloat(_) => None,
+            Self::Uncategorized { result_type_id, .. } => result_type_id,
+        }
+    }
+}
+
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 struct InstParser<'a> {
     /// IDs defined so far in the module.
-    known_ids: &'a FxHashSet<super::SpvId>,
+    known_ids: &'a FxHashMap<super::SpvId, KnownIdDef>,
 
     /// Input words of an instruction.
     words: iter::Copied<slice::Iter<'a, u32>>,
 
     /// Output instruction, being parsed.
     inst: super::SpvInst,
-}
-
-/// Additional context for `OperandParser::operand`.
-///
-/// Used currently only to help parsing `LiteralContextDependentNumber`.
-enum OperandContext {
-    /// The operand is the only one in the instruction's definition (other than
-    /// `IdResultType`/`IdResult`), and cannot be followed by more operands
-    /// (other than its own parameters).
-    SoleOperand,
 }
 
 enum InstParseError {
@@ -52,11 +64,15 @@ enum InstParseError {
     // FIXME(eddyb) this could also arise through unknown `OpType` instructions.
     UnknownResultTypeId(super::SpvId),
 
+    /// The type of a `LiteralContextDependentNumber` could not be determined.
+    MissingContextSensitiveLiteralType,
+
+    /// The type of a `LiteralContextDependentNumber` was not a supported type
+    /// (one of either `OpTypeInt` or `OpTypeFloat`).
+    UnsupportedContextSensitiveLiteralType { type_opcode: u16 },
+
     /// Instruction may be valid, but contains an unexpected enumerand value.
     UnknownEnumerand,
-
-    /// The general case of `LiteralContextDependentNumber`, TBD.
-    UnimplementedContextSensitiveLiteral,
 }
 
 impl InstParseError {
@@ -71,8 +87,20 @@ impl InstParseError {
             Self::UnknownResultTypeId(id) => {
                 Some(format!("ID %{} used as result type before definition", id).into())
             }
+            Self::MissingContextSensitiveLiteralType => Some("missing type for literal".into()),
+            Self::UnsupportedContextSensitiveLiteralType { type_opcode } => Some(
+                format!(
+                    "{} is not a supported literal type",
+                    spec::Spec::get()
+                        .instructions
+                        .get_named(type_opcode)
+                        .unwrap()
+                        .0
+                )
+                .into(),
+            ),
 
-            Self::UnknownEnumerand | Self::UnimplementedContextSensitiveLiteral => None,
+            Self::UnknownEnumerand => None,
         }
     }
 }
@@ -85,23 +113,19 @@ impl InstParser<'_> {
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), InstParseError> {
         for &kind in &enumerant.req_params {
-            self.operand(kind, None)?;
+            self.operand(kind)?;
         }
 
         if let Some(rest_kind) = enumerant.rest_params {
             while !self.is_exhausted() {
-                self.operand(rest_kind, None)?;
+                self.operand(rest_kind)?;
             }
         }
 
         Ok(())
     }
 
-    fn operand(
-        &mut self,
-        kind: spec::OperandKind,
-        context: Option<OperandContext>,
-    ) -> Result<(), InstParseError> {
+    fn operand(&mut self, kind: spec::OperandKind) -> Result<(), InstParseError> {
         use InstParseError as Error;
 
         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
@@ -131,11 +155,13 @@ impl InstParser<'_> {
 
             spec::OperandKindDef::Id => {
                 let id = word.try_into().map_err(|_| Error::IdZero)?;
-                self.inst.operands.push(if self.known_ids.contains(&id) {
-                    super::SpvOperand::Id(kind, id)
-                } else {
-                    super::SpvOperand::ForwardIdRef(kind, id)
-                });
+                self.inst
+                    .operands
+                    .push(if self.known_ids.contains_key(&id) {
+                        super::SpvOperand::Id(kind, id)
+                    } else {
+                        super::SpvOperand::ForwardIdRef(kind, id)
+                    });
             }
 
             spec::OperandKindDef::Literal {
@@ -169,29 +195,50 @@ impl InstParser<'_> {
             }
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::FromContextualType,
-            } => match context {
-                // HACK(eddyb) the last operand can use up all remaining words.
-                Some(OperandContext::SoleOperand) => {
-                    if self.is_exhausted() {
-                        self.inst
-                            .operands
-                            .push(super::SpvOperand::ShortImm(kind, word));
-                    } else {
-                        self.inst
-                            .operands
-                            .push(super::SpvOperand::LongImmStart(kind, word));
-                        for word in &mut self.words {
-                            self.inst
-                                .operands
-                                .push(super::SpvOperand::LongImmCont(kind, word));
+            } => {
+                let contextual_type = self
+                    .inst
+                    .result_type_id
+                    .or_else(|| {
+                        // `OpSwitch` takes its literal type from the first operand.
+                        match self.inst.operands.get(0)? {
+                            super::SpvOperand::Id(_, id) => {
+                                self.known_ids.get(&id)?.result_type_id()
+                            }
+                            _ => None,
                         }
+                    })
+                    .and_then(|id| self.known_ids.get(&id))
+                    .ok_or(Error::MissingContextSensitiveLiteralType)?;
+
+                let extra_word_count = match *contextual_type {
+                    KnownIdDef::TypeInt(width) | KnownIdDef::TypeFloat(width) => {
+                        // HACK(eddyb) `(width + 31) / 32 - 1` but without overflow.
+                        (width.get() - 1) / 32
+                    }
+                    KnownIdDef::Uncategorized { opcode, .. } => {
+                        return Err(Error::UnsupportedContextSensitiveLiteralType {
+                            type_opcode: opcode,
+                        })
+                    }
+                };
+
+                if extra_word_count == 0 {
+                    self.inst
+                        .operands
+                        .push(super::SpvOperand::ShortImm(kind, word));
+                } else {
+                    self.inst
+                        .operands
+                        .push(super::SpvOperand::LongImmStart(kind, word));
+                    for _ in 0..extra_word_count {
+                        let word = self.words.next().ok_or(Error::NotEnoughWords)?;
+                        self.inst
+                            .operands
+                            .push(super::SpvOperand::LongImmCont(kind, word));
                     }
                 }
-                None => {
-                    // FIXME(eddyb) implement context-sensitive literals fully.
-                    return Err(Error::UnimplementedContextSensitiveLiteral);
-                }
-            },
+            }
         }
 
         Ok(())
@@ -214,39 +261,30 @@ impl InstParser<'_> {
         }
 
         if let Some(type_id) = self.inst.result_type_id {
-            if !self.known_ids.contains(&type_id) {
+            if !self.known_ids.contains_key(&type_id) {
+                // FIXME(eddyb) also check that the ID is a valid type.
                 return Err(Error::UnknownResultTypeId(type_id));
             }
         }
 
         for &kind in &def.req_operands {
-            self.operand(
-                kind,
-                if def.req_operands.len() == 1
-                    && def.opt_operands.is_empty()
-                    && def.rest_operands.is_none()
-                {
-                    Some(OperandContext::SoleOperand)
-                } else {
-                    None
-                },
-            )?;
+            self.operand(kind)?;
         }
         for &kind in &def.opt_operands {
             if self.is_exhausted() {
                 break;
             }
-            self.operand(kind, None)?;
+            self.operand(kind)?;
         }
         if let Some(rest_unit) = &def.rest_operands {
             while !self.is_exhausted() {
                 match *rest_unit {
                     spec::RestOperandsUnit::One(kind) => {
-                        self.operand(kind, None)?;
+                        self.operand(kind)?;
                     }
                     spec::RestOperandsUnit::Two([a_kind, b_kind]) => {
-                        self.operand(a_kind, None)?;
-                        self.operand(b_kind, None)?;
+                        self.operand(a_kind)?;
+                        self.operand(b_kind)?;
                     }
                 }
             }
@@ -328,11 +366,11 @@ impl super::Module {
             }
         };
 
-        let mut known_ids = FxHashSet::default();
+        let mut known_ids = FxHashMap::default();
 
         let mut top_level = vec![];
-        while let [opcode, ..] = spv_words {
-            let (inst_len, opcode) = ((opcode >> 16) as usize, *opcode as u16);
+        while let &[opcode, ..] = spv_words {
+            let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
             if spv_words.len() < inst_len {
                 return Err(invalid("truncated instruction"));
@@ -342,7 +380,9 @@ impl super::Module {
             spv_words = rest;
 
             let operand_words = &inst_words[1..];
-            if let Some(def) = spv_spec.instructions.get(opcode) {
+            if let Some((inst_name, def)) = spv_spec.instructions.get_named(opcode) {
+                let invalid = |msg| invalid(&format!("in {}: {}", inst_name, msg));
+
                 let parser = InstParser {
                     known_ids: &known_ids,
                     words: operand_words.iter().copied(),
@@ -357,8 +397,29 @@ impl super::Module {
                 match parser.inst(def) {
                     Ok(inst) => {
                         if let Some(id) = inst.result_id {
-                            let is_new = known_ids.insert(id);
-                            if !is_new {
+                            let known_id_def = if opcode == spv_spec.well_known.op_type_int {
+                                KnownIdDef::TypeInt(match inst.operands[0] {
+                                    super::SpvOperand::ShortImm(_, n) => {
+                                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            } else if opcode == spv_spec.well_known.op_type_float {
+                                KnownIdDef::TypeFloat(match inst.operands[0] {
+                                    super::SpvOperand::ShortImm(_, n) => {
+                                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                                    }
+                                    _ => unreachable!(),
+                                })
+                            } else {
+                                KnownIdDef::Uncategorized {
+                                    opcode,
+                                    result_type_id: inst.result_type_id,
+                                }
+                            };
+
+                            let old = known_ids.insert(id, known_id_def);
+                            if old.is_some() {
                                 return Err(invalid(&format!(
                                     "ID %{} is a result of multiple instructions",
                                     id
