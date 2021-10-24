@@ -21,10 +21,6 @@ pub enum ModuleLayout {
 
 pub enum TopLevel {
     SpvInst(SpvInst),
-    SpvUnknownInst {
-        opcode: u16,
-        operands: SmallVec<[u32; 8]>,
-    },
 }
 
 // FIXME(eddyb) consider moving some/all of these defitions into `spv`.

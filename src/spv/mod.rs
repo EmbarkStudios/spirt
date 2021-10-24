@@ -60,8 +60,10 @@ enum InstParseError {
     /// An illegal ID of `0`.
     IdZero,
 
+    /// Unsupported enumerand value.
+    UnsupportedEnumerand(spec::OperandKind, u32),
+
     /// An `IdResultType` ID referring to an ID not already defined.
-    // FIXME(eddyb) this could also arise through unknown `OpType` instructions.
     UnknownResultTypeId(super::SpvId),
 
     /// The type of a `LiteralContextDependentNumber` could not be determined.
@@ -70,37 +72,45 @@ enum InstParseError {
     /// The type of a `LiteralContextDependentNumber` was not a supported type
     /// (one of either `OpTypeInt` or `OpTypeFloat`).
     UnsupportedContextSensitiveLiteralType { type_opcode: u16 },
-
-    /// Instruction may be valid, but contains an unexpected enumerand value.
-    UnknownEnumerand,
 }
 
 impl InstParseError {
-    /// Only returns `Some(message)` if the error is guaranteed to be caused by
-    /// an invalid SPIR-V module, and not a lack of support on our part.
     // FIXME(eddyb) improve messages and add more contextual information.
-    fn is_unambiguously_invalid(&self) -> Option<Cow<'static, str>> {
+    fn message(&self) -> Cow<'static, str> {
         match *self {
-            Self::NotEnoughWords => Some("truncated instruction".into()),
-            Self::TooManyWords => Some("overlong instruction".into()),
-            Self::IdZero => Some("ID %0 is illegal".into()),
-            Self::UnknownResultTypeId(id) => {
-                Some(format!("ID %{} used as result type before definition", id).into())
-            }
-            Self::MissingContextSensitiveLiteralType => Some("missing type for literal".into()),
-            Self::UnsupportedContextSensitiveLiteralType { type_opcode } => Some(
-                format!(
-                    "{} is not a supported literal type",
-                    spec::Spec::get()
-                        .instructions
-                        .get_named(type_opcode)
-                        .unwrap()
-                        .0
-                )
-                .into(),
-            ),
+            Self::NotEnoughWords => "truncated instruction".into(),
+            Self::TooManyWords => "overlong instruction".into(),
+            Self::IdZero => "ID %0 is illegal".into(),
+            Self::UnsupportedEnumerand(kind, word) => {
+                let (name, def) = kind.name_and_def();
+                match def {
+                    spec::OperandKindDef::BitEnum { bits, .. } => {
+                        let unsupported = spec::BitIdx::of_all_set_bits(word)
+                            .filter(|&bit_idx| bits.get(bit_idx).is_none())
+                            .fold(0u32, |x, i| x | (1 << i.0));
+                        format!("unsupported {} bit-pattern 0x{:08x}", name, unsupported).into()
+                    }
 
-            Self::UnknownEnumerand => None,
+                    spec::OperandKindDef::ValueEnum { .. } => {
+                        format!("unsupported {} value {}", name, word).into()
+                    }
+
+                    _ => unreachable!(),
+                }
+            }
+            Self::UnknownResultTypeId(id) => {
+                format!("ID %{} used as result type before definition", id).into()
+            }
+            Self::MissingContextSensitiveLiteralType => "missing type for literal".into(),
+            Self::UnsupportedContextSensitiveLiteralType { type_opcode } => format!(
+                "{} is not a supported literal type",
+                spec::Spec::get()
+                    .instructions
+                    .get_named(type_opcode)
+                    .unwrap()
+                    .0
+            )
+            .into(),
         }
     }
 }
@@ -136,7 +146,9 @@ impl InstParser<'_> {
                     .push(super::SpvOperand::ShortImm(kind, word));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
-                    let bit_def = bits.get(bit_idx).ok_or(Error::UnknownEnumerand)?;
+                    let bit_def = bits
+                        .get(bit_idx)
+                        .ok_or(Error::UnsupportedEnumerand(kind, word))?;
                     self.enumerant_params(bit_def)?;
                 }
             }
@@ -149,7 +161,7 @@ impl InstParser<'_> {
                 let variant_def = u16::try_from(word)
                     .ok()
                     .and_then(|v| variants.get(v))
-                    .ok_or(Error::UnknownEnumerand)?;
+                    .ok_or(Error::UnsupportedEnumerand(kind, word))?;
                 self.enumerant_params(variant_def)?;
             }
 
@@ -372,6 +384,13 @@ impl super::Module {
         while let &[opcode, ..] = spv_words {
             let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
+            let (inst_name, def) = spv_spec
+                .instructions
+                .get_named(opcode)
+                .ok_or_else(|| invalid(&format!("unsupported opcode {}", opcode)))?;
+
+            let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
+
             if spv_words.len() < inst_len {
                 return Err(invalid("truncated instruction"));
             }
@@ -379,69 +398,51 @@ impl super::Module {
             let (inst_words, rest) = spv_words.split_at(inst_len);
             spv_words = rest;
 
-            let operand_words = &inst_words[1..];
-            if let Some((inst_name, def)) = spv_spec.instructions.get_named(opcode) {
-                let invalid = |msg| invalid(&format!("in {}: {}", inst_name, msg));
+            let parser = InstParser {
+                known_ids: &known_ids,
+                words: inst_words[1..].iter().copied(),
+                inst: super::SpvInst {
+                    opcode,
+                    result_type_id: None,
+                    result_id: None,
+                    operands: SmallVec::new(),
+                },
+            };
 
-                let parser = InstParser {
-                    known_ids: &known_ids,
-                    words: operand_words.iter().copied(),
-                    inst: super::SpvInst {
+            let inst = parser.inst(def).map_err(|e| invalid(&e.message()))?;
+
+            if let Some(id) = inst.result_id {
+                let known_id_def = if opcode == spv_spec.well_known.op_type_int {
+                    KnownIdDef::TypeInt(match inst.operands[0] {
+                        super::SpvOperand::ShortImm(_, n) => {
+                            n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                        }
+                        _ => unreachable!(),
+                    })
+                } else if opcode == spv_spec.well_known.op_type_float {
+                    KnownIdDef::TypeFloat(match inst.operands[0] {
+                        super::SpvOperand::ShortImm(_, n) => {
+                            n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                        }
+                        _ => unreachable!(),
+                    })
+                } else {
+                    KnownIdDef::Uncategorized {
                         opcode,
-                        result_type_id: None,
-                        result_id: None,
-                        operands: SmallVec::new(),
-                    },
+                        result_type_id: inst.result_type_id,
+                    }
                 };
 
-                match parser.inst(def) {
-                    Ok(inst) => {
-                        if let Some(id) = inst.result_id {
-                            let known_id_def = if opcode == spv_spec.well_known.op_type_int {
-                                KnownIdDef::TypeInt(match inst.operands[0] {
-                                    super::SpvOperand::ShortImm(_, n) => {
-                                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
-                                    }
-                                    _ => unreachable!(),
-                                })
-                            } else if opcode == spv_spec.well_known.op_type_float {
-                                KnownIdDef::TypeFloat(match inst.operands[0] {
-                                    super::SpvOperand::ShortImm(_, n) => {
-                                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
-                                    }
-                                    _ => unreachable!(),
-                                })
-                            } else {
-                                KnownIdDef::Uncategorized {
-                                    opcode,
-                                    result_type_id: inst.result_type_id,
-                                }
-                            };
-
-                            let old = known_ids.insert(id, known_id_def);
-                            if old.is_some() {
-                                return Err(invalid(&format!(
-                                    "ID %{} is a result of multiple instructions",
-                                    id
-                                )));
-                            }
-                        }
-
-                        top_level.push(super::TopLevel::SpvInst(inst));
-                        continue;
-                    }
-                    Err(e) => {
-                        if let Some(message) = e.is_unambiguously_invalid() {
-                            return Err(invalid(&message));
-                        }
-                    }
+                let old = known_ids.insert(id, known_id_def);
+                if old.is_some() {
+                    return Err(invalid(&format!(
+                        "ID %{} is a result of multiple instructions",
+                        id
+                    )));
                 }
             }
 
-            top_level.push(super::TopLevel::SpvUnknownInst {
-                opcode,
-                operands: operand_words.into(),
-            });
+            top_level.push(super::TopLevel::SpvInst(inst));
         }
 
         Ok(Self {
@@ -501,16 +502,6 @@ impl super::Module {
                                 | super::SpvOperand::ForwardIdRef(_, id) => id.get(),
                             })),
                     );
-                }
-                super::TopLevel::SpvUnknownInst { opcode, operands } => {
-                    let opcode = u32::from(*opcode)
-                        | u32::from(u16::try_from(1 + operands.len()).map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "word count of SPIR-V instruction doesn't fit in 16 bits",
-                            )
-                        })?) << 16;
-                    spv_words.extend(iter::once(opcode).chain(operands.iter().copied()));
                 }
             }
         }
