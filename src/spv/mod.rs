@@ -15,6 +15,9 @@ pub struct SpvModuleLayout {
 
     pub original_generator_magic: u32,
     pub original_id_bound: u32,
+
+    // FIXME(eddyb) this could be an `IndexSet` if not for duplicates.
+    pub capabilities: Vec<u32>,
 }
 
 /// Defining instruction of an ID.
@@ -359,7 +362,7 @@ impl super::Module {
 
         let (header, mut spv_words) = spv_words.split_at(spec::HEADER_LEN);
 
-        let layout = {
+        let mut layout = {
             let &[magic, version, generator_magic, id_bound, reserved_inst_schema]: &[u32; spec::HEADER_LEN] =
                 header.try_into().unwrap();
 
@@ -375,8 +378,17 @@ impl super::Module {
 
                 original_generator_magic: generator_magic,
                 original_id_bound: id_bound,
+
+                capabilities: vec![],
             }
         };
+
+        #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+        enum Seq {
+            Capability,
+            Other,
+        }
+        let mut seq = None;
 
         let mut known_ids = FxHashMap::default();
 
@@ -442,7 +454,27 @@ impl super::Module {
                 }
             }
 
-            top_level.push(super::TopLevel::SpvInst(inst));
+            let next_seq = if opcode == spv_spec.well_known.op_capability {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                match inst.operands[..] {
+                    [super::SpvOperand::ShortImm(kind, cap)] => {
+                        assert!(kind == spv_spec.well_known.capability);
+                        layout.capabilities.push(cap);
+                    }
+                    _ => unreachable!(),
+                }
+                Seq::Capability
+            } else {
+                top_level.push(super::TopLevel::SpvInst(inst));
+                Seq::Other
+            };
+            if !(seq <= Some(next_seq)) {
+                return Err(invalid(&format!(
+                    "out of order: {:?} instructions must precede {:?} instructions",
+                    next_seq, seq
+                )));
+            }
+            seq = Some(next_seq);
         }
 
         Ok(Self {
@@ -450,7 +482,25 @@ impl super::Module {
             top_level,
         })
     }
+}
 
+impl SpvModuleLayout {
+    pub fn capability_insts(&self) -> impl Iterator<Item = super::SpvInst> + '_ {
+        let spec::WellKnown {
+            op_capability,
+            capability,
+            ..
+        } = spec::Spec::get().well_known;
+        self.capabilities.iter().map(move |&cap| super::SpvInst {
+            opcode: op_capability,
+            result_type_id: None,
+            result_id: None,
+            operands: iter::once(super::SpvOperand::ShortImm(capability, cap)).collect(),
+        })
+    }
+}
+
+impl super::Module {
     pub fn write_to_spv_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let spv_spec = spec::Spec::get();
         let layout = match &self.layout {
@@ -475,36 +525,43 @@ impl super::Module {
             layout.original_id_bound,
             reserved_inst_schema,
         ];
+        let mut push_inst = |inst: &super::SpvInst| -> io::Result<()> {
+            let total_word_count = 1
+                + (inst.result_type_id.is_some() as usize)
+                + (inst.result_id.is_some() as usize)
+                + inst.operands.len();
+            let opcode = u32::from(inst.opcode)
+                | u32::from(u16::try_from(total_word_count).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "word count of SPIR-V instruction doesn't fit in 16 bits",
+                    )
+                })?) << 16;
+            spv_words.extend(
+                iter::once(opcode)
+                    .chain(inst.result_type_id.map(|id| id.get()))
+                    .chain(inst.result_id.map(|id| id.get()))
+                    .chain(inst.operands.iter().map(|operand| match *operand {
+                        super::SpvOperand::ShortImm(_, word)
+                        | super::SpvOperand::LongImmStart(_, word)
+                        | super::SpvOperand::LongImmCont(_, word) => word,
+                        super::SpvOperand::Id(_, id) | super::SpvOperand::ForwardIdRef(_, id) => {
+                            id.get()
+                        }
+                    })),
+            );
+            Ok(())
+        };
 
+        for cap_inst in layout.capability_insts() {
+            push_inst(&cap_inst)?;
+        }
         for top_level in &self.top_level {
             match top_level {
-                super::TopLevel::SpvInst(inst) => {
-                    let total_word_count = 1
-                        + (inst.result_type_id.is_some() as usize)
-                        + (inst.result_id.is_some() as usize)
-                        + inst.operands.len();
-                    let opcode = u32::from(inst.opcode)
-                        | u32::from(u16::try_from(total_word_count).map_err(|_| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "word count of SPIR-V instruction doesn't fit in 16 bits",
-                            )
-                        })?) << 16;
-                    spv_words.extend(
-                        iter::once(opcode)
-                            .chain(inst.result_type_id.map(|id| id.get()))
-                            .chain(inst.result_id.map(|id| id.get()))
-                            .chain(inst.operands.iter().map(|operand| match *operand {
-                                super::SpvOperand::ShortImm(_, word)
-                                | super::SpvOperand::LongImmStart(_, word)
-                                | super::SpvOperand::LongImmCont(_, word) => word,
-                                super::SpvOperand::Id(_, id)
-                                | super::SpvOperand::ForwardIdRef(_, id) => id.get(),
-                            })),
-                    );
-                }
+                super::TopLevel::SpvInst(inst) => push_inst(inst)?,
             }
         }
+
         let spv_bytes = {
             // FIXME(eddyb) find a safe wrapper crate for this.
             fn u32_slice_to_u8_slice(xs: &[u32]) -> &[u8] {
