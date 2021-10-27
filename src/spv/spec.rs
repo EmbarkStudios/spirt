@@ -413,50 +413,51 @@ impl Spec {
                     opt_operands: ArrayVec::new(),
                     rest_operands: None,
                 };
+
+                #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+                enum Seq {
+                    IdResultType,
+                    IdResult,
+                    Required,
+                    Optional,
+                    Rest,
+                }
+                let mut seq = None;
+
                 for o in &inst.operands {
                     let single = operand_kinds.lookup(o.kind);
 
-                    if single == Some(id_result_type) {
-                        assert!(matches!(o.quantifier, None));
-                        assert!(
-                            !def.has_result_type_id
-                                && !def.has_result_id
-                                && def.req_operands.is_empty()
-                                && def.opt_operands.is_empty()
-                                && def.rest_operands.is_none()
-                        );
-                        def.has_result_type_id = true;
-                        continue;
-                    }
-                    if single == Some(id_result) {
-                        assert!(matches!(o.quantifier, None));
-                        assert!(
-                            !def.has_result_id
-                                && def.req_operands.is_empty()
-                                && def.opt_operands.is_empty()
-                                && def.rest_operands.is_none()
-                        );
-                        def.has_result_id = true;
-                        continue;
-                    }
-
-                    match o.quantifier {
+                    let next_seq = match o.quantifier {
+                        _ if single == Some(id_result_type) => {
+                            assert!(matches!(o.quantifier, None));
+                            assert!(!def.has_result_type_id);
+                            def.has_result_type_id = true;
+                            Seq::IdResultType
+                        }
+                        _ if single == Some(id_result) => {
+                            assert!(matches!(o.quantifier, None));
+                            assert!(!def.has_result_id);
+                            def.has_result_id = true;
+                            Seq::IdResult
+                        }
                         None => {
-                            assert!(def.opt_operands.is_empty() && def.rest_operands.is_none());
                             def.req_operands.push(single.unwrap());
+                            Seq::Required
                         }
                         Some(raw::Quantifier::Optional) => {
-                            assert!(def.rest_operands.is_none());
                             def.opt_operands.push(single.unwrap());
+                            Seq::Optional
                         }
                         Some(raw::Quantifier::Rest) => {
-                            assert!(def.rest_operands.is_none());
                             def.rest_operands = Some(match single {
                                 Some(kind) => RestOperandsUnit::One(kind),
                                 None => RestOperandsUnit::Two(operand_kind_pairs_by_name[o.kind]),
                             });
+                            Seq::Rest
                         }
-                    }
+                    };
+                    assert!(seq <= Some(next_seq), "{:?} -> {:?}", next_seq, seq);
+                    seq = Some(next_seq);
                 }
 
                 // `IdResultType` without `IdResult` is impossible.
