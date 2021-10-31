@@ -4,7 +4,7 @@ fn main() -> std::io::Result<()> {
             let module = spirt::Module::read_from_spv_file(in_file)?;
 
             let print_operands = |operands: &[_]| {
-                spirt::spv::OperandPrinter {
+                spirt::spv::print::OperandPrinter {
                     operands: operands.iter(),
                     out: std::io::stderr().lock(),
                 }
