@@ -1,3 +1,5 @@
+//! Pretty-printing SPIR-V operands.
+
 use crate::spv::spec;
 use smallvec::SmallVec;
 use std::{io, slice, str};

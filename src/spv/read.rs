@@ -1,10 +1,13 @@
+//! Low-level parsing of SPIR-V binary form.
+
 use crate::spv::spec;
+use owning_ref::{VecRef, VecRefMut};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::{fs, io, iter, slice, str};
+use std::{fs, io, iter, mem, slice};
 
 /// Defining instruction of an ID.
 ///
@@ -300,23 +303,35 @@ impl InstParser<'_> {
     }
 }
 
-impl crate::Module {
-    pub fn read_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
-        // FIXME(eddyb) stop abusing `io::Error` for error reporting.
-        let invalid = |reason: &str| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("malformed SPIR-V module ({})", reason),
-            )
-        };
+pub struct ModuleParser {
+    /// Copy of the header words (for convenience).
+    // FIXME(eddyb) add a `spec::Header` or `spv::Header` struct with named fields.
+    pub header: [u32; spec::HEADER_LEN],
 
+    /// Remaining (instructions') words in the module.
+    words: VecRef<u8, [u32]>,
+
+    /// IDs defined so far in the module.
+    known_ids: FxHashMap<crate::SpvId, KnownIdDef>,
+}
+
+// FIXME(eddyb) stop abusing `io::Error` for error reporting.
+fn invalid(reason: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("malformed SPIR-V module ({})", reason),
+    )
+}
+
+impl ModuleParser {
+    pub fn read_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
 
-        let mut spv_bytes = fs::read(path)?;
+        let spv_bytes = VecRefMut::new(fs::read(path)?);
         if spv_bytes.len() % 4 != 0 {
             return Err(invalid("not a multiple of 4 bytes"));
         }
-        let spv_words = {
+        let mut spv_words = {
             // FIXME(eddyb) find a safe wrapper crate for this.
             fn u8_slice_to_u32_slice_mut(xs: &mut [u8]) -> &mut [u32] {
                 unsafe {
@@ -325,7 +340,7 @@ impl crate::Module {
                     out
                 }
             }
-            u8_slice_to_u32_slice_mut(&mut spv_bytes)
+            spv_bytes.map_mut(u8_slice_to_u32_slice_mut)
         };
 
         if spv_words.len() < spec::HEADER_LEN {
@@ -346,126 +361,92 @@ impl crate::Module {
             }
         }
 
-        let (header, mut spv_words) = spv_words.split_at(spec::HEADER_LEN);
+        Ok(Self {
+            header: spv_words[..spec::HEADER_LEN].try_into().unwrap(),
+            words: spv_words.map(|words| &words[spec::HEADER_LEN..]),
 
-        let mut layout = {
-            let &[magic, version, generator_magic, id_bound, reserved_inst_schema]: &[u32; spec::HEADER_LEN] =
-                header.try_into().unwrap();
+            known_ids: FxHashMap::default(),
+        })
+    }
+}
 
-            // Ensure above (this is the value after any endianness swapping).
-            assert_eq!(magic, spv_spec.magic);
+impl Iterator for ModuleParser {
+    type Item = io::Result<crate::SpvInst>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let spv_spec = spec::Spec::get();
 
-            if reserved_inst_schema != 0 {
-                return Err(invalid("unknown instruction schema - only 0 is supported"));
-            }
+        let &opcode = self.words.get(0)?;
 
-            super::SpvModuleLayout {
-                header_version: version,
+        let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
-                original_generator_magic: generator_magic,
-                original_id_bound: id_bound,
-
-                capabilities: vec![],
-            }
+        let (inst_name, def) = match spv_spec.instructions.get_named(opcode) {
+            Some((name, def)) => (name, def),
+            None => return Some(Err(invalid(&format!("unsupported opcode {}", opcode)))),
         };
 
-        #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
-        enum Seq {
-            Capability,
-            Other,
+        let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
+
+        if self.words.len() < inst_len {
+            return Some(Err(invalid("truncated instruction")));
         }
-        let mut seq = None;
 
-        let mut known_ids = FxHashMap::default();
+        let parser = InstParser {
+            known_ids: &self.known_ids,
+            words: self.words[1..inst_len].iter().copied(),
+            inst: crate::SpvInst {
+                opcode,
+                result_type_id: None,
+                result_id: None,
+                operands: SmallVec::new(),
+            },
+        };
 
-        let mut top_level = vec![];
-        while let &[opcode, ..] = spv_words {
-            let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
+        let inst = match parser.inst(def) {
+            Ok(inst) => inst,
+            Err(e) => return Some(Err(invalid(&e.message()))),
+        };
 
-            let (inst_name, def) = spv_spec
-                .instructions
-                .get_named(opcode)
-                .ok_or_else(|| invalid(&format!("unsupported opcode {}", opcode)))?;
-
-            let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
-
-            if spv_words.len() < inst_len {
-                return Err(invalid("truncated instruction"));
-            }
-
-            let (inst_words, rest) = spv_words.split_at(inst_len);
-            spv_words = rest;
-
-            let parser = InstParser {
-                known_ids: &known_ids,
-                words: inst_words[1..].iter().copied(),
-                inst: crate::SpvInst {
-                    opcode,
-                    result_type_id: None,
-                    result_id: None,
-                    operands: SmallVec::new(),
-                },
-            };
-
-            let inst = parser.inst(def).map_err(|e| invalid(&e.message()))?;
-
-            if let Some(id) = inst.result_id {
-                let known_id_def = if opcode == spv_spec.well_known.op_type_int {
-                    KnownIdDef::TypeInt(match inst.operands[0] {
-                        crate::SpvOperand::ShortImm(_, n) => {
-                            n.try_into().map_err(|_| invalid("Width cannot be 0"))?
-                        }
-                        _ => unreachable!(),
-                    })
-                } else if opcode == spv_spec.well_known.op_type_float {
-                    KnownIdDef::TypeFloat(match inst.operands[0] {
-                        crate::SpvOperand::ShortImm(_, n) => {
-                            n.try_into().map_err(|_| invalid("Width cannot be 0"))?
-                        }
-                        _ => unreachable!(),
-                    })
-                } else {
-                    KnownIdDef::Uncategorized {
-                        opcode,
-                        result_type_id: inst.result_type_id,
-                    }
-                };
-
-                let old = known_ids.insert(id, known_id_def);
-                if old.is_some() {
-                    return Err(invalid(&format!(
-                        "ID %{} is a result of multiple instructions",
-                        id
-                    )));
-                }
-            }
-
-            let next_seq = if opcode == spv_spec.well_known.op_capability {
-                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                match inst.operands[..] {
-                    [crate::SpvOperand::ShortImm(kind, cap)] => {
-                        assert!(kind == spv_spec.well_known.capability);
-                        layout.capabilities.push(cap);
+        // HACK(eddyb) `Option::map` allows using `?` for `Result` in the closure.
+        let maybe_known_id_result = inst.result_id.map(|id| {
+            let known_id_def = if opcode == spv_spec.well_known.op_type_int {
+                KnownIdDef::TypeInt(match inst.operands[0] {
+                    crate::SpvOperand::ShortImm(_, n) => {
+                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
-                }
-                Seq::Capability
+                })
+            } else if opcode == spv_spec.well_known.op_type_float {
+                KnownIdDef::TypeFloat(match inst.operands[0] {
+                    crate::SpvOperand::ShortImm(_, n) => {
+                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                    }
+                    _ => unreachable!(),
+                })
             } else {
-                top_level.push(crate::TopLevel::SpvInst(inst));
-                Seq::Other
+                KnownIdDef::Uncategorized {
+                    opcode,
+                    result_type_id: inst.result_type_id,
+                }
             };
-            if !(seq <= Some(next_seq)) {
+
+            let old = self.known_ids.insert(id, known_id_def);
+            if old.is_some() {
                 return Err(invalid(&format!(
-                    "out of order: {:?} instructions must precede {:?} instructions",
-                    next_seq, seq
+                    "ID %{} is a result of multiple instructions",
+                    id
                 )));
             }
-            seq = Some(next_seq);
+
+            Ok(())
+        });
+        if let Some(Err(e)) = maybe_known_id_result {
+            return Some(Err(e));
         }
 
-        Ok(Self {
-            layout: crate::ModuleLayout::Spv(layout),
-            top_level,
-        })
+        let empty_placeholder_vec_ref = VecRef::new(vec![]).map(|_| &[][..]);
+        self.words = mem::replace(&mut self.words, empty_placeholder_vec_ref)
+            .map(|words| &words[inst_len..]);
+
+        Some(Ok(inst))
     }
 }

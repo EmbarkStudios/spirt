@@ -1,7 +1,7 @@
 fn main() -> std::io::Result<()> {
     match &std::env::args().collect::<Vec<_>>()[..] {
         [_, in_file, out_file] => {
-            let module = spirt::Module::read_from_spv_file(in_file)?;
+            let module = spirt::Module::lower_from_spv_file(in_file)?;
 
             let print_operands = |operands: &[_]| {
                 spirt::spv::print::OperandPrinter {
@@ -57,7 +57,7 @@ fn main() -> std::io::Result<()> {
                 }
             }
 
-            module.write_to_spv_file(out_file)
+            module.lift_to_spv_file(out_file)
         }
         args => {
             eprintln!("Usage: {} IN OUT", args[0]);
