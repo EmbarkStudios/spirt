@@ -1,6 +1,6 @@
 //! Low-level parsing of SPIR-V binary form.
 
-use crate::spv::spec;
+use crate::spv::{self, spec};
 use owning_ref::{VecRef, VecRefMut};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -17,12 +17,12 @@ enum KnownIdDef {
     TypeFloat(NonZeroU32),
     Uncategorized {
         opcode: u16,
-        result_type_id: Option<crate::SpvId>,
+        result_type_id: Option<spv::Id>,
     },
 }
 
 impl KnownIdDef {
-    fn result_type_id(&self) -> Option<crate::SpvId> {
+    fn result_type_id(&self) -> Option<spv::Id> {
         match *self {
             Self::TypeInt(_) | Self::TypeFloat(_) => None,
             Self::Uncategorized { result_type_id, .. } => result_type_id,
@@ -33,13 +33,13 @@ impl KnownIdDef {
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 struct InstParser<'a> {
     /// IDs defined so far in the module.
-    known_ids: &'a FxHashMap<crate::SpvId, KnownIdDef>,
+    known_ids: &'a FxHashMap<spv::Id, KnownIdDef>,
 
     /// Input words of an instruction.
     words: iter::Copied<slice::Iter<'a, u32>>,
 
     /// Output instruction, being parsed.
-    inst: crate::SpvInst,
+    inst: spv::Inst,
 }
 
 enum InstParseError {
@@ -56,7 +56,7 @@ enum InstParseError {
     UnsupportedEnumerand(spec::OperandKind, u32),
 
     /// An `IdResultType` ID referring to an ID not already defined.
-    UnknownResultTypeId(crate::SpvId),
+    UnknownResultTypeId(spv::Id),
 
     /// The type of a `LiteralContextDependentNumber` could not be determined.
     MissingContextSensitiveLiteralType,
@@ -133,9 +133,7 @@ impl InstParser<'_> {
         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
         match kind.def() {
             spec::OperandKindDef::BitEnum { bits, .. } => {
-                self.inst
-                    .operands
-                    .push(crate::SpvOperand::ShortImm(kind, word));
+                self.inst.operands.push(spv::Operand::ShortImm(kind, word));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                     let bit_def = bits
@@ -146,9 +144,7 @@ impl InstParser<'_> {
             }
 
             spec::OperandKindDef::ValueEnum { variants } => {
-                self.inst
-                    .operands
-                    .push(crate::SpvOperand::ShortImm(kind, word));
+                self.inst.operands.push(spv::Operand::ShortImm(kind, word));
 
                 let variant_def = u16::try_from(word)
                     .ok()
@@ -162,35 +158,31 @@ impl InstParser<'_> {
                 self.inst
                     .operands
                     .push(if self.known_ids.contains_key(&id) {
-                        crate::SpvOperand::Id(kind, id)
+                        spv::Operand::Id(kind, id)
                     } else {
-                        crate::SpvOperand::ForwardIdRef(kind, id)
+                        spv::Operand::ForwardIdRef(kind, id)
                     });
             }
 
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::Word,
             } => {
-                self.inst
-                    .operands
-                    .push(crate::SpvOperand::ShortImm(kind, word));
+                self.inst.operands.push(spv::Operand::ShortImm(kind, word));
             }
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::NulTerminated,
             } => {
                 let has_nul = |word: u32| word.to_le_bytes().contains(&0);
                 if has_nul(word) {
-                    self.inst
-                        .operands
-                        .push(crate::SpvOperand::ShortImm(kind, word));
+                    self.inst.operands.push(spv::Operand::ShortImm(kind, word));
                 } else {
                     self.inst
                         .operands
-                        .push(crate::SpvOperand::LongImmStart(kind, word));
+                        .push(spv::Operand::LongImmStart(kind, word));
                     for word in &mut self.words {
                         self.inst
                             .operands
-                            .push(crate::SpvOperand::LongImmCont(kind, word));
+                            .push(spv::Operand::LongImmCont(kind, word));
                         if has_nul(word) {
                             break;
                         }
@@ -206,9 +198,7 @@ impl InstParser<'_> {
                     .or_else(|| {
                         // `OpSwitch` takes its literal type from the first operand.
                         match self.inst.operands.get(0)? {
-                            crate::SpvOperand::Id(_, id) => {
-                                self.known_ids.get(&id)?.result_type_id()
-                            }
+                            spv::Operand::Id(_, id) => self.known_ids.get(&id)?.result_type_id(),
                             _ => None,
                         }
                     })
@@ -228,18 +218,16 @@ impl InstParser<'_> {
                 };
 
                 if extra_word_count == 0 {
-                    self.inst
-                        .operands
-                        .push(crate::SpvOperand::ShortImm(kind, word));
+                    self.inst.operands.push(spv::Operand::ShortImm(kind, word));
                 } else {
                     self.inst
                         .operands
-                        .push(crate::SpvOperand::LongImmStart(kind, word));
+                        .push(spv::Operand::LongImmStart(kind, word));
                     for _ in 0..extra_word_count {
                         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
                         self.inst
                             .operands
-                            .push(crate::SpvOperand::LongImmCont(kind, word));
+                            .push(spv::Operand::LongImmCont(kind, word));
                     }
                 }
             }
@@ -248,7 +236,7 @@ impl InstParser<'_> {
         Ok(())
     }
 
-    fn inst(mut self, def: &spec::InstructionDef) -> Result<crate::SpvInst, InstParseError> {
+    fn inst(mut self, def: &spec::InstructionDef) -> Result<spv::Inst, InstParseError> {
         use InstParseError as Error;
 
         {
@@ -312,7 +300,7 @@ pub struct ModuleParser {
     words: VecRef<u8, [u32]>,
 
     /// IDs defined so far in the module.
-    known_ids: FxHashMap<crate::SpvId, KnownIdDef>,
+    known_ids: FxHashMap<spv::Id, KnownIdDef>,
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -371,7 +359,7 @@ impl ModuleParser {
 }
 
 impl Iterator for ModuleParser {
-    type Item = io::Result<crate::SpvInst>;
+    type Item = io::Result<spv::Inst>;
     fn next(&mut self) -> Option<Self::Item> {
         let spv_spec = spec::Spec::get();
 
@@ -393,7 +381,7 @@ impl Iterator for ModuleParser {
         let parser = InstParser {
             known_ids: &self.known_ids,
             words: self.words[1..inst_len].iter().copied(),
-            inst: crate::SpvInst {
+            inst: spv::Inst {
                 opcode,
                 result_type_id: None,
                 result_id: None,
@@ -410,14 +398,14 @@ impl Iterator for ModuleParser {
         let maybe_known_id_result = inst.result_id.map(|id| {
             let known_id_def = if opcode == spv_spec.well_known.op_type_int {
                 KnownIdDef::TypeInt(match inst.operands[0] {
-                    crate::SpvOperand::ShortImm(_, n) => {
+                    spv::Operand::ShortImm(_, n) => {
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
             } else if opcode == spv_spec.well_known.op_type_float {
                 KnownIdDef::TypeFloat(match inst.operands[0] {
-                    crate::SpvOperand::ShortImm(_, n) => {
+                    spv::Operand::ShortImm(_, n) => {
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),

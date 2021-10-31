@@ -1,6 +1,6 @@
 //! SPIR-V to SPIR-T lowering.
 
-use crate::spv::spec;
+use crate::spv::{self, spec};
 use std::io;
 use std::path::Path;
 
@@ -34,7 +34,7 @@ impl crate::Module {
                 return Err(invalid("unknown instruction schema - only 0 is supported"));
             }
 
-            super::SpvModuleLayout {
+            spv::ModuleLayout {
                 header_version: version,
 
                 original_generator_magic: generator_magic,
@@ -63,7 +63,7 @@ impl crate::Module {
             let next_seq = if opcode == spv_spec.well_known.op_capability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 match inst.operands[..] {
-                    [crate::SpvOperand::ShortImm(kind, cap)] => {
+                    [spv::Operand::ShortImm(kind, cap)] => {
                         assert!(kind == spv_spec.well_known.capability);
                         layout.capabilities.push(cap);
                     }

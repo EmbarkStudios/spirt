@@ -23,7 +23,7 @@ fn main() -> std::io::Result<()> {
                         eprintln!("  Capabilities:");
                         for &cap in &layout.capabilities {
                             eprint!("    ");
-                            print_operands(&[spirt::SpvOperand::ShortImm(
+                            print_operands(&[spirt::spv::Operand::ShortImm(
                                 spv_spec.well_known.capability,
                                 cap,
                             )]);

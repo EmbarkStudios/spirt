@@ -1,21 +1,21 @@
 //! SPIR-T to SPIR-V lifting.
 
-use crate::spv::spec;
+use crate::spv::{self, spec};
 use std::path::Path;
 use std::{io, iter};
 
-impl super::SpvModuleLayout {
-    pub fn capability_insts(&self) -> impl Iterator<Item = crate::SpvInst> + '_ {
+impl spv::ModuleLayout {
+    pub fn capability_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
         let spec::WellKnown {
             op_capability,
             capability,
             ..
         } = spec::Spec::get().well_known;
-        self.capabilities.iter().map(move |&cap| crate::SpvInst {
+        self.capabilities.iter().map(move |&cap| spv::Inst {
             opcode: op_capability,
             result_type_id: None,
             result_id: None,
-            operands: iter::once(crate::SpvOperand::ShortImm(capability, cap)).collect(),
+            operands: iter::once(spv::Operand::ShortImm(capability, cap)).collect(),
         })
     }
 }

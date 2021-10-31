@@ -1,6 +1,6 @@
 //! Low-level emission of SPIR-V binary form.
 
-use crate::spv::spec;
+use crate::spv::{self, spec};
 use std::path::Path;
 use std::{fs, io, iter};
 
@@ -18,7 +18,7 @@ impl ModuleEmitter {
         }
     }
 
-    pub fn push_inst(&mut self, inst: &crate::SpvInst) -> io::Result<()> {
+    pub fn push_inst(&mut self, inst: &spv::Inst) -> io::Result<()> {
         let total_word_count = 1
             + (inst.result_type_id.is_some() as usize)
             + (inst.result_id.is_some() as usize)
@@ -35,12 +35,10 @@ impl ModuleEmitter {
                 .chain(inst.result_type_id.map(|id| id.get()))
                 .chain(inst.result_id.map(|id| id.get()))
                 .chain(inst.operands.iter().map(|operand| match *operand {
-                    crate::SpvOperand::ShortImm(_, word)
-                    | crate::SpvOperand::LongImmStart(_, word)
-                    | crate::SpvOperand::LongImmCont(_, word) => word,
-                    crate::SpvOperand::Id(_, id) | crate::SpvOperand::ForwardIdRef(_, id) => {
-                        id.get()
-                    }
+                    spv::Operand::ShortImm(_, word)
+                    | spv::Operand::LongImmStart(_, word)
+                    | spv::Operand::LongImmCont(_, word) => word,
+                    spv::Operand::Id(_, id) | spv::Operand::ForwardIdRef(_, id) => id.get(),
                 })),
         );
         Ok(())
