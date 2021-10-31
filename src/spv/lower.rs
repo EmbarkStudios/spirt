@@ -1,6 +1,7 @@
 //! SPIR-V to SPIR-T lowering.
 
 use crate::spv::{self, spec};
+use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 
@@ -54,7 +55,7 @@ impl crate::Module {
                 original_generator_magic: generator_magic,
                 original_id_bound: id_bound,
 
-                capabilities: vec![],
+                capabilities: BTreeSet::new(),
             }
         };
 
@@ -79,7 +80,7 @@ impl crate::Module {
                 match inst.operands[..] {
                     [spv::Operand::ShortImm(kind, cap)] => {
                         assert!(kind == spv_spec.well_known.capability);
-                        dialect.capabilities.push(cap);
+                        dialect.capabilities.insert(cap);
                     }
                     _ => unreachable!(),
                 }

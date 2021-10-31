@@ -1,4 +1,5 @@
 use smallvec::SmallVec;
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
 pub mod lift;
@@ -16,8 +17,7 @@ pub struct Dialect {
     // FIXME(eddyb) always recompute this from the module.
     pub original_id_bound: u32,
 
-    // FIXME(eddyb) this could be an `IndexSet` if not for duplicates.
-    pub capabilities: Vec<u32>,
+    pub capabilities: BTreeSet<u32>,
 }
 
 pub struct Inst {
