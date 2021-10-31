@@ -14,14 +14,16 @@ fn main() -> std::io::Result<()> {
 
             let spv_spec = spirt::spv::spec::Spec::get();
 
-            match &module.layout {
-                spirt::ModuleLayout::Spv(layout) => {
-                    let v = layout.header_version;
-                    eprintln!("SPIR-V {}.{} module:", v >> 16, (v >> 8) & 0xff);
+            match &module.dialect {
+                spirt::ModuleDialect::Spv(dialect) => {
+                    eprintln!(
+                        "SPIR-V {}.{} module:",
+                        dialect.version_major, dialect.version_minor
+                    );
 
-                    if !layout.capabilities.is_empty() {
+                    if !dialect.capabilities.is_empty() {
                         eprintln!("  Capabilities:");
-                        for &cap in &layout.capabilities {
+                        for &cap in &dialect.capabilities {
                             eprint!("    ");
                             print_operands(&[spirt::spv::Operand::ShortImm(
                                 spv_spec.well_known.capability,

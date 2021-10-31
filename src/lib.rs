@@ -4,16 +4,15 @@ pub mod spv;
 // * a "context" containing type/const definitions
 //   (or just intern them globally/thread-locally?)
 // * globals (variables/fns) that can be grouped into "modules"
-//   (which also have format-specifically layouts and whatnot)
+//   (which also have e.g. individual dialects)
 pub struct Module {
-    /// Non-semantic information, mostly used for perfect round-tripping.
-    pub layout: ModuleLayout,
+    pub dialect: ModuleDialect,
 
     pub top_level: Vec<TopLevel>,
 }
 
-pub enum ModuleLayout {
-    Spv(spv::ModuleLayout),
+pub enum ModuleDialect {
+    Spv(spv::Dialect),
 }
 
 pub enum TopLevel {

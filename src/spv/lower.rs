@@ -24,18 +24,32 @@ impl crate::Module {
     ) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
 
-        let mut layout = {
+        let mut dialect = {
             let [magic, version, generator_magic, id_bound, reserved_inst_schema] = parser.header;
 
-            // Ensure above (this is the value after any endianness swapping).
+            // Ensured above (this is the value after any endianness swapping).
             assert_eq!(magic, spv_spec.magic);
 
-            if reserved_inst_schema != 0 {
-                return Err(invalid("unknown instruction schema - only 0 is supported"));
+            let [version_reserved_hi, version_major, version_minor, version_reserved_lo] =
+                version.to_be_bytes();
+
+            if (version_reserved_lo, version_reserved_hi) != (0, 0) {
+                return Err(invalid(&format!(
+                    "version 0x{:08x} is not in expected (0.major.minor.0) form",
+                    version
+                )));
             }
 
-            spv::ModuleLayout {
-                header_version: version,
+            if reserved_inst_schema != 0 {
+                return Err(invalid(&format!(
+                    "unknown instruction schema {} - only 0 is supported",
+                    reserved_inst_schema
+                )));
+            }
+
+            spv::Dialect {
+                version_major,
+                version_minor,
 
                 original_generator_magic: generator_magic,
                 original_id_bound: id_bound,
@@ -65,7 +79,7 @@ impl crate::Module {
                 match inst.operands[..] {
                     [spv::Operand::ShortImm(kind, cap)] => {
                         assert!(kind == spv_spec.well_known.capability);
-                        layout.capabilities.push(cap);
+                        dialect.capabilities.push(cap);
                     }
                     _ => unreachable!(),
                 }
@@ -84,7 +98,7 @@ impl crate::Module {
         }
 
         Ok(Self {
-            layout: crate::ModuleLayout::Spv(layout),
+            dialect: crate::ModuleDialect::Spv(dialect),
             top_level,
         })
     }

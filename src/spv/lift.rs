@@ -4,7 +4,7 @@ use crate::spv::{self, spec};
 use std::path::Path;
 use std::{io, iter};
 
-impl spv::ModuleLayout {
+impl spv::Dialect {
     pub fn capability_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
         let spec::WellKnown {
             op_capability,
@@ -28,9 +28,11 @@ impl crate::Module {
     pub fn lift_to_spv_module_emitter(&self) -> io::Result<crate::spv::write::ModuleEmitter> {
         let spv_spec = spec::Spec::get();
 
-        let layout = match &self.layout {
-            crate::ModuleLayout::Spv(layout) => layout,
+        let dialect = match &self.dialect {
+            crate::ModuleDialect::Spv(dialect) => dialect,
 
+            // FIXME(eddyb) support by computing some valid "minimum viable"
+            // `spv::Dialect`, or by taking it as additional input.
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(io::Error::new(
@@ -42,16 +44,16 @@ impl crate::Module {
         let reserved_inst_schema = 0;
         let header = [
             spv_spec.magic,
-            layout.header_version,
-            layout.original_generator_magic,
+            (u32::from(dialect.version_major) << 16) | (u32::from(dialect.version_minor) << 8),
+            dialect.original_generator_magic,
             // FIXME(eddyb) update this if the module has been modified.
-            layout.original_id_bound,
+            dialect.original_id_bound,
             reserved_inst_schema,
         ];
 
         let mut emitter = crate::spv::write::ModuleEmitter::with_header(header);
 
-        for cap_inst in layout.capability_insts() {
+        for cap_inst in dialect.capability_insts() {
             emitter.push_inst(&cap_inst)?;
         }
         for top_level in &self.top_level {
