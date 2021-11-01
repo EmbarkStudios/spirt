@@ -53,7 +53,7 @@ impl<W: io::Write> OperandPrinter<'_, W> {
         write!(self.out, "{}(", name)?;
 
         if kind == spec::Spec::get().well_known.literal_string {
-            // FIXME(eddyb) deduplicate with `super::extract_literal_string`.
+            // FIXME(eddyb) deduplicate with `spv::extract_literal_string`.
             let bytes: SmallVec<[u8; 64]> = words
                 .into_iter()
                 .flat_map(u32::to_le_bytes)

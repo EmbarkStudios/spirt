@@ -15,14 +15,10 @@ fn invalid(reason: &str) -> io::Error {
 
 impl crate::Module {
     pub fn lower_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::lower_from_spv_module_parser(crate::spv::read::ModuleParser::read_from_spv_file(
-            path,
-        )?)
+        Self::lower_from_spv_module_parser(spv::read::ModuleParser::read_from_spv_file(path)?)
     }
 
-    pub fn lower_from_spv_module_parser(
-        mut parser: crate::spv::read::ModuleParser,
-    ) -> io::Result<Self> {
+    pub fn lower_from_spv_module_parser(mut parser: spv::read::ModuleParser) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
 
         let mut dialect = {
@@ -89,7 +85,7 @@ impl crate::Module {
                 Seq::Capability
             } else if opcode == spv_spec.well_known.op_extension {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let ext = super::extract_literal_string(&inst.operands)
+                let ext = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
                 dialect.extensions.insert(ext);
                 Seq::Extension

@@ -25,7 +25,7 @@ impl spv::Dialect {
             opcode: op_extension,
             result_type_id: None,
             result_id: None,
-            operands: super::encode_literal_string(ext).collect(),
+            operands: spv::encode_literal_string(ext).collect(),
         })
     }
 }
@@ -35,7 +35,7 @@ impl crate::Module {
         self.lift_to_spv_module_emitter()?.write_to_spv_file(path)
     }
 
-    pub fn lift_to_spv_module_emitter(&self) -> io::Result<crate::spv::write::ModuleEmitter> {
+    pub fn lift_to_spv_module_emitter(&self) -> io::Result<spv::write::ModuleEmitter> {
         let spv_spec = spec::Spec::get();
 
         let dialect = match &self.dialect {
@@ -61,7 +61,7 @@ impl crate::Module {
             reserved_inst_schema,
         ];
 
-        let mut emitter = crate::spv::write::ModuleEmitter::with_header(header);
+        let mut emitter = spv::write::ModuleEmitter::with_header(header);
 
         for cap_inst in dialect.capability_insts() {
             emitter.push_inst(&cap_inst)?;
