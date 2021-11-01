@@ -39,7 +39,9 @@ impl<W: io::Write> OperandPrinter<'_, W> {
         // HACK(eddyb) easier to buffer these than to deal with iterators.
         let mut words = SmallVec::<[u32; 16]>::new();
         words.push(first_word);
-        while let Some(&spv::Operand::LongImmCont(cont_kind, word)) = self.operands.clone().next() {
+        while let Some(&spv::Operand::Imm(spv::Imm::LongCont(cont_kind, word))) =
+            self.operands.clone().next()
+        {
             self.operands.next();
             assert!(kind == cont_kind);
             words.push(word);
@@ -76,7 +78,7 @@ impl<W: io::Write> OperandPrinter<'_, W> {
     fn operand(&mut self) -> io::Result<()> {
         let operand = self.operands.next().unwrap();
         match *operand {
-            spv::Operand::ShortImm(kind, word) => {
+            spv::Operand::Imm(spv::Imm::Short(kind, word)) => {
                 let (name, def) = kind.name_and_def();
                 match def {
                     spec::OperandKindDef::BitEnum { empty_name, bits } => {
@@ -109,8 +111,8 @@ impl<W: io::Write> OperandPrinter<'_, W> {
                     spec::OperandKindDef::Literal { .. } => self.literal(kind, word),
                 }
             }
-            spv::Operand::LongImmStart(kind, word) => self.literal(kind, word),
-            spv::Operand::LongImmCont(..) => unreachable!(),
+            spv::Operand::Imm(spv::Imm::LongStart(kind, word)) => self.literal(kind, word),
+            spv::Operand::Imm(spv::Imm::LongCont(..)) => unreachable!(),
             spv::Operand::Id(_, id) => write!(self.out, "%{}", id),
             spv::Operand::ForwardIdRef(_, id) => write!(self.out, "ForwardRef(%{})", id),
         }

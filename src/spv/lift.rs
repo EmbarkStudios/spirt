@@ -15,7 +15,7 @@ impl spv::Dialect {
             opcode: op_capability,
             result_type_id: None,
             result_id: None,
-            operands: iter::once(spv::Operand::ShortImm(capability, cap)).collect(),
+            operands: iter::once(spv::Operand::Imm(spv::Imm::Short(capability, cap))).collect(),
         })
     }
 

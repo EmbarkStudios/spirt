@@ -80,7 +80,7 @@ impl crate::Module {
             let next_seq = if opcode == spv_spec.well_known.op_capability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 match inst.operands[..] {
-                    [spv::Operand::ShortImm(kind, cap)] => {
+                    [spv::Operand::Imm(spv::Imm::Short(kind, cap))] => {
                         assert!(kind == spv_spec.well_known.capability);
                         dialect.capabilities.insert(cap);
                     }

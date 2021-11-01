@@ -133,7 +133,9 @@ impl InstParser<'_> {
         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
         match kind.def() {
             spec::OperandKindDef::BitEnum { bits, .. } => {
-                self.inst.operands.push(spv::Operand::ShortImm(kind, word));
+                self.inst
+                    .operands
+                    .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                     let bit_def = bits
@@ -144,7 +146,9 @@ impl InstParser<'_> {
             }
 
             spec::OperandKindDef::ValueEnum { variants } => {
-                self.inst.operands.push(spv::Operand::ShortImm(kind, word));
+                self.inst
+                    .operands
+                    .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
 
                 let variant_def = u16::try_from(word)
                     .ok()
@@ -167,22 +171,26 @@ impl InstParser<'_> {
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::Word,
             } => {
-                self.inst.operands.push(spv::Operand::ShortImm(kind, word));
+                self.inst
+                    .operands
+                    .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
             }
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::NulTerminated,
             } => {
                 let has_nul = |word: u32| word.to_le_bytes().contains(&0);
                 if has_nul(word) {
-                    self.inst.operands.push(spv::Operand::ShortImm(kind, word));
+                    self.inst
+                        .operands
+                        .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
                 } else {
                     self.inst
                         .operands
-                        .push(spv::Operand::LongImmStart(kind, word));
+                        .push(spv::Operand::Imm(spv::Imm::LongStart(kind, word)));
                     for word in &mut self.words {
                         self.inst
                             .operands
-                            .push(spv::Operand::LongImmCont(kind, word));
+                            .push(spv::Operand::Imm(spv::Imm::LongCont(kind, word)));
                         if has_nul(word) {
                             break;
                         }
@@ -218,16 +226,18 @@ impl InstParser<'_> {
                 };
 
                 if extra_word_count == 0 {
-                    self.inst.operands.push(spv::Operand::ShortImm(kind, word));
+                    self.inst
+                        .operands
+                        .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
                 } else {
                     self.inst
                         .operands
-                        .push(spv::Operand::LongImmStart(kind, word));
+                        .push(spv::Operand::Imm(spv::Imm::LongStart(kind, word)));
                     for _ in 0..extra_word_count {
                         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
                         self.inst
                             .operands
-                            .push(spv::Operand::LongImmCont(kind, word));
+                            .push(spv::Operand::Imm(spv::Imm::LongCont(kind, word)));
                     }
                 }
             }
@@ -398,14 +408,14 @@ impl Iterator for ModuleParser {
         let maybe_known_id_result = inst.result_id.map(|id| {
             let known_id_def = if opcode == spv_spec.well_known.op_type_int {
                 KnownIdDef::TypeInt(match inst.operands[0] {
-                    spv::Operand::ShortImm(_, n) => {
+                    spv::Operand::Imm(spv::Imm::Short(_, n)) => {
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
             } else if opcode == spv_spec.well_known.op_type_float {
                 KnownIdDef::TypeFloat(match inst.operands[0] {
-                    spv::Operand::ShortImm(_, n) => {
+                    spv::Operand::Imm(spv::Imm::Short(_, n)) => {
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),

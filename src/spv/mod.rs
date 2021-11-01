@@ -34,9 +34,10 @@ pub struct Inst {
 }
 
 pub enum Operand {
-    ShortImm(spec::OperandKind, u32),
-    LongImmStart(spec::OperandKind, u32),
-    LongImmCont(spec::OperandKind, u32),
+    // FIXME(eddyb) this is a bit wasteful because we don't have to fit the
+    // `OperandKind` of `Imm` in between the discriminant and the `u32`, but
+    // hopefully `Operand` isn't that size-sensitive.
+    Imm(Imm),
 
     Id(spec::OperandKind, Id),
 
@@ -48,21 +49,28 @@ pub enum Operand {
     ForwardIdRef(spec::OperandKind, Id),
 }
 
+pub enum Imm {
+    Short(spec::OperandKind, u32),
+    LongStart(spec::OperandKind, u32),
+    LongCont(spec::OperandKind, u32),
+}
+
 pub type Id = NonZeroU32;
 
 // FIXME(eddyb) pick a "small string" crate, and fine-tune its inline size,
 // instead of allocating a whole `String`.
-/// Given a single `LiteralString` (encoded as one `ShortImm` or a `LongImmStart`
-/// followed by some number of `LongImmCont` - will panic otherwise), returns a
+/// Given a single `LiteralString` (as one `Imm::Short` or a `Imm::LongStart`
+/// followed by some number of `Imm::LongCont` - will panic otherwise), returns a
 /// Rust `String` if the literal is valid UTF-8, or the validation error otherwise.
 fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error> {
     let spv_spec = spec::Spec::get();
 
     let mut words = match *operands {
-        [Operand::ShortImm(kind, first_word)] | [Operand::LongImmStart(kind, first_word), ..] => {
+        [Operand::Imm(Imm::Short(kind, first_word))]
+        | [Operand::Imm(Imm::LongStart(kind, first_word)), ..] => {
             assert!(kind == spv_spec.well_known.literal_string);
             iter::once(first_word).chain(operands[1..].iter().map(|operand| match *operand {
-                Operand::LongImmCont(kind, word) => {
+                Operand::Imm(Imm::LongCont(kind, word)) => {
                     assert!(kind == spv_spec.well_known.literal_string);
                     word
                 }
@@ -109,9 +117,9 @@ fn encode_literal_string(s: &str) -> impl Iterator<Item = Operand> + '_ {
         .map(move |(i, word)| {
             let kind = spv_spec.well_known.literal_string;
             match (i, total_words) {
-                (0, 1) => Operand::ShortImm(kind, word),
-                (0, _) => Operand::LongImmStart(kind, word),
-                (_, _) => Operand::LongImmCont(kind, word),
+                (0, 1) => Operand::Imm(Imm::Short(kind, word)),
+                (0, _) => Operand::Imm(Imm::LongStart(kind, word)),
+                (_, _) => Operand::Imm(Imm::LongCont(kind, word)),
             }
         })
 }

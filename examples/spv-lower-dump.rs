@@ -27,10 +27,10 @@ fn main() -> std::io::Result<()> {
                             // HACK(eddyb) this is one shorter because
                             // `print_operands` always prints a space first.
                             eprint!("   ");
-                            print_operands(&[spirt::spv::Operand::ShortImm(
+                            print_operands(&[spirt::spv::Operand::Imm(spirt::spv::Imm::Short(
                                 spv_spec.well_known.capability,
                                 cap,
-                            )]);
+                            ))]);
                             eprintln!();
                         }
                     }

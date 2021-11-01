@@ -35,9 +35,9 @@ impl ModuleEmitter {
                 .chain(inst.result_type_id.map(|id| id.get()))
                 .chain(inst.result_id.map(|id| id.get()))
                 .chain(inst.operands.iter().map(|operand| match *operand {
-                    spv::Operand::ShortImm(_, word)
-                    | spv::Operand::LongImmStart(_, word)
-                    | spv::Operand::LongImmCont(_, word) => word,
+                    spv::Operand::Imm(spv::Imm::Short(_, word))
+                    | spv::Operand::Imm(spv::Imm::LongStart(_, word))
+                    | spv::Operand::Imm(spv::Imm::LongCont(_, word)) => word,
                     spv::Operand::Id(_, id) | spv::Operand::ForwardIdRef(_, id) => id.get(),
                 })),
         );
