@@ -21,6 +21,9 @@ pub struct Dialect {
 
     pub capabilities: BTreeSet<u32>,
     pub extensions: BTreeSet<String>,
+
+    pub addressing_model: u32,
+    pub memory_model: u32,
 }
 
 pub struct Inst {

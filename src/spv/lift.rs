@@ -126,6 +126,23 @@ impl crate::Module {
                 operands: spv::encode_literal_string(name).collect(),
             })?;
         }
+        emitter.push_inst(&spv::Inst {
+            opcode: spv_spec.well_known.op_memory_model,
+            result_type_id: None,
+            result_id: None,
+            operands: [
+                spv::Operand::Imm(spv::Imm::Short(
+                    spv_spec.well_known.addressing_model,
+                    dialect.addressing_model,
+                )),
+                spv::Operand::Imm(spv::Imm::Short(
+                    spv_spec.well_known.memory_model,
+                    dialect.memory_model,
+                )),
+            ]
+            .into_iter()
+            .collect(),
+        })?;
         for top_level in &self.top_level {
             let inst = match top_level {
                 crate::TopLevel::Misc(misc) => spv::Inst {

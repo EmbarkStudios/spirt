@@ -47,6 +47,9 @@ pub struct WellKnown {
     /// `OpExtInstImport` instruction opcode.
     pub op_ext_inst_import: u16,
 
+    /// `OpMemoryModel` instruction opcode.
+    pub op_memory_model: u16,
+
     /// `OpTypeInt` instruction opcode.
     pub op_type_int: u16,
 
@@ -55,6 +58,12 @@ pub struct WellKnown {
 
     /// `Capability` operand kind.
     pub capability: OperandKind,
+
+    /// `AddressingModel` operand kind.
+    pub addressing_model: OperandKind,
+
+    /// `MemoryModel` operand kind.
+    pub memory_model: OperandKind,
 
     /// `LiteralString` operand kind.
     pub literal_string: OperandKind,
@@ -511,10 +520,13 @@ impl Spec {
             op_capability: instructions.lookup("OpCapability").unwrap(),
             op_extension: instructions.lookup("OpExtension").unwrap(),
             op_ext_inst_import: instructions.lookup("OpExtInstImport").unwrap(),
+            op_memory_model: instructions.lookup("OpMemoryModel").unwrap(),
             op_type_int: instructions.lookup("OpTypeInt").unwrap(),
             op_type_float: instructions.lookup("OpTypeFloat").unwrap(),
 
             capability: operand_kinds.lookup("Capability").unwrap(),
+            addressing_model: operand_kinds.lookup("AddressingModel").unwrap(),
+            memory_model: operand_kinds.lookup("MemoryModel").unwrap(),
             literal_string: operand_kinds.lookup("LiteralString").unwrap(),
             id_ref: operand_kinds.lookup("IdRef").unwrap(),
             id_result_type,

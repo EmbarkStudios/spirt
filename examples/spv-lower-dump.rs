@@ -40,6 +40,28 @@ fn main() -> std::io::Result<()> {
                             eprintln!("    {}", ext);
                         }
                     }
+
+                    // HACK(eddyb) this lacks a space because
+                    // `print_operands` always prints a space first.
+                    eprint!("  Addressing model:");
+                    print_operands(&[spirt::spv::print::PrintOperand::Imm(
+                        spirt::spv::Imm::Short(
+                            spv_spec.well_known.addressing_model,
+                            dialect.addressing_model,
+                        ),
+                    )]);
+                    eprintln!();
+
+                    // HACK(eddyb) this lacks a space because
+                    // `print_operands` always prints a space first.
+                    eprint!("  Memory model:");
+                    print_operands(&[spirt::spv::print::PrintOperand::Imm(
+                        spirt::spv::Imm::Short(
+                            spv_spec.well_known.memory_model,
+                            dialect.memory_model,
+                        ),
+                    )]);
+                    eprintln!();
                 }
             }
 

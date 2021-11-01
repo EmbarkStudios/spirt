@@ -62,6 +62,9 @@ impl crate::Module {
 
                 capabilities: BTreeSet::new(),
                 extensions: BTreeSet::new(),
+
+                addressing_model: 0,
+                memory_model: 0,
             }
         };
 
@@ -70,10 +73,12 @@ impl crate::Module {
             Capability,
             Extension,
             ExtInstImport,
+            MemoryModel,
             Other,
         }
         let mut seq = None;
 
+        let mut has_memory_model = false;
         let mut id_defs = FxHashMap::default();
         let mut top_level = vec![];
         while let Some(inst) = parser.next().transpose()? {
@@ -114,6 +119,27 @@ impl crate::Module {
                 id_defs.insert(id, IdDef::SpvExtInstImport(Rc::new(name)));
 
                 Seq::ExtInstImport
+            } else if opcode == spv_spec.well_known.op_memory_model {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                let (addressing_model, memory_model) = match inst.operands[..] {
+                    [spv::Operand::Imm(spv::Imm::Short(am_kind, am)), spv::Operand::Imm(spv::Imm::Short(mm_kind, mm))] =>
+                    {
+                        assert!(am_kind == spv_spec.well_known.addressing_model);
+                        assert!(mm_kind == spv_spec.well_known.memory_model);
+                        (am, mm)
+                    }
+                    _ => unreachable!(),
+                };
+
+                if has_memory_model {
+                    return Err(invalid("duplicate OpMemoryModel"));
+                }
+                has_memory_model = true;
+
+                dialect.addressing_model = addressing_model;
+                dialect.memory_model = memory_model;
+
+                Seq::MemoryModel
             } else {
                 top_level.push(crate::TopLevel::Misc(crate::Misc {
                     kind: crate::MiscKind::SpvInst {
@@ -150,6 +176,10 @@ impl crate::Module {
                 )));
             }
             seq = Some(next_seq);
+        }
+
+        if !has_memory_model {
+            return Err(invalid("missing OpMemoryModel"));
         }
 
         Ok(Self {
