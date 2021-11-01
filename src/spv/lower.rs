@@ -56,12 +56,14 @@ impl crate::Module {
                 original_id_bound: id_bound,
 
                 capabilities: BTreeSet::new(),
+                extensions: BTreeSet::new(),
             }
         };
 
         #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
         enum Seq {
             Capability,
+            Extension,
             Other,
         }
         let mut seq = None;
@@ -85,6 +87,12 @@ impl crate::Module {
                     _ => unreachable!(),
                 }
                 Seq::Capability
+            } else if opcode == spv_spec.well_known.op_extension {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                let ext = super::extract_literal_string(&inst.operands)
+                    .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+                dialect.extensions.insert(ext);
+                Seq::Extension
             } else {
                 top_level.push(crate::TopLevel::SpvInst(inst));
                 Seq::Other

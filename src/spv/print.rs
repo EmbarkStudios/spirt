@@ -50,9 +50,8 @@ impl<W: io::Write> OperandPrinter<'_, W> {
 
         write!(self.out, "{}(", name)?;
 
-        // HACK(eddyb) this shouldn't compare the `name` - but it's already here,
-        // and this isn't exactly high-performance code anyway.
-        if name == "LiteralString" {
+        if kind == spec::Spec::get().well_known.literal_string {
+            // FIXME(eddyb) deduplicate with `super::extract_literal_string`.
             let bytes: SmallVec<[u8; 64]> = words
                 .into_iter()
                 .flat_map(u32::to_le_bytes)

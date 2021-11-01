@@ -18,6 +18,16 @@ impl spv::Dialect {
             operands: iter::once(spv::Operand::ShortImm(capability, cap)).collect(),
         })
     }
+
+    pub fn extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+        let spec::WellKnown { op_extension, .. } = spec::Spec::get().well_known;
+        self.extensions.iter().map(move |ext| spv::Inst {
+            opcode: op_extension,
+            result_type_id: None,
+            result_id: None,
+            operands: super::encode_literal_string(ext).collect(),
+        })
+    }
 }
 
 impl crate::Module {
@@ -55,6 +65,9 @@ impl crate::Module {
 
         for cap_inst in dialect.capability_insts() {
             emitter.push_inst(&cap_inst)?;
+        }
+        for ext_inst in dialect.extension_insts() {
+            emitter.push_inst(&ext_inst)?;
         }
         for top_level in &self.top_level {
             match top_level {

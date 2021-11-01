@@ -1,6 +1,8 @@
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
+use std::iter;
 use std::num::NonZeroU32;
+use std::string::FromUtf8Error;
 
 pub mod lift;
 pub mod lower;
@@ -18,6 +20,7 @@ pub struct Dialect {
     pub original_id_bound: u32,
 
     pub capabilities: BTreeSet<u32>,
+    pub extensions: BTreeSet<String>,
 }
 
 pub struct Inst {
@@ -46,3 +49,69 @@ pub enum Operand {
 }
 
 pub type Id = NonZeroU32;
+
+// FIXME(eddyb) pick a "small string" crate, and fine-tune its inline size,
+// instead of allocating a whole `String`.
+/// Given a single `LiteralString` (encoded as one `ShortImm` or a `LongImmStart`
+/// followed by some number of `LongImmCont` - will panic otherwise), returns a
+/// Rust `String` if the literal is valid UTF-8, or the validation error otherwise.
+fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error> {
+    let spv_spec = spec::Spec::get();
+
+    let mut words = match *operands {
+        [Operand::ShortImm(kind, first_word)] | [Operand::LongImmStart(kind, first_word), ..] => {
+            assert!(kind == spv_spec.well_known.literal_string);
+            iter::once(first_word).chain(operands[1..].iter().map(|operand| match *operand {
+                Operand::LongImmCont(kind, word) => {
+                    assert!(kind == spv_spec.well_known.literal_string);
+                    word
+                }
+                _ => unreachable!(),
+            }))
+        }
+        _ => unreachable!(),
+    };
+
+    let mut bytes = Vec::with_capacity(operands.len() * 4);
+    while let Some(word) = words.next() {
+        for byte in word.to_le_bytes() {
+            if byte == 0 {
+                assert!(words.next().is_none());
+                return String::from_utf8(bytes);
+            }
+            bytes.push(byte);
+        }
+    }
+    unreachable!("missing \\0 terminator in LiteralString");
+}
+
+// FIXME(eddyb) this shouldn't just panic when `s.contains('\0')`.
+fn encode_literal_string(s: &str) -> impl Iterator<Item = Operand> + '_ {
+    let spv_spec = spec::Spec::get();
+
+    let bytes = s.as_bytes();
+
+    // FIXME(eddyb) replace with `array_chunks` once that is stabilized.
+    let full_words = bytes
+        .chunks_exact(4)
+        .map(|w| <[u8; 4]>::try_from(w).unwrap());
+
+    let leftover_bytes = &bytes[full_words.len() * 4..];
+    let mut last_word = [0; 4];
+    last_word[..leftover_bytes.len()].copy_from_slice(leftover_bytes);
+
+    let total_words = full_words.len() + 1;
+
+    full_words
+        .chain(iter::once(last_word))
+        .map(u32::from_le_bytes)
+        .enumerate()
+        .map(move |(i, word)| {
+            let kind = spv_spec.well_known.literal_string;
+            match (i, total_words) {
+                (0, 1) => Operand::ShortImm(kind, word),
+                (0, _) => Operand::LongImmStart(kind, word),
+                (_, _) => Operand::LongImmCont(kind, word),
+            }
+        })
+}

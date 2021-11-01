@@ -24,12 +24,21 @@ fn main() -> std::io::Result<()> {
                     if !dialect.capabilities.is_empty() {
                         eprintln!("  Capabilities:");
                         for &cap in &dialect.capabilities {
-                            eprint!("    ");
+                            // HACK(eddyb) this is one shorter because
+                            // `print_operands` always prints a space first.
+                            eprint!("   ");
                             print_operands(&[spirt::spv::Operand::ShortImm(
                                 spv_spec.well_known.capability,
                                 cap,
                             )]);
                             eprintln!();
+                        }
+                    }
+
+                    if !dialect.extensions.is_empty() {
+                        eprintln!("  Extensions:");
+                        for ext in &dialect.extensions {
+                            eprintln!("    {}", ext);
                         }
                     }
                 }
