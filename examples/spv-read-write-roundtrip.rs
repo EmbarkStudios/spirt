@@ -37,7 +37,29 @@ fn main() -> std::io::Result<()> {
                     "{}",
                     spv_spec.instructions.get_named(inst.opcode).unwrap().0
                 );
-                print_operands(&inst.operands);
+
+                // FIXME(eddyb) try to make this a bit more ergonomic.
+                print_operands(
+                    &inst
+                        .operands
+                        .iter()
+                        .map(|operand| match *operand {
+                            spirt::spv::Operand::Imm(imm) => {
+                                spirt::spv::print::PrintOperand::Imm(imm)
+                            }
+                            spirt::spv::Operand::Id(_, id) => {
+                                spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
+                            }
+                            spirt::spv::Operand::ForwardIdRef(_, id) => {
+                                spirt::spv::print::PrintOperand::IdLike(format!(
+                                    "ForwardRef(%{})",
+                                    id
+                                ))
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
                 eprintln!();
 
                 emitter.push_inst(&inst).unwrap();

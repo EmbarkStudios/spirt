@@ -27,10 +27,9 @@ fn main() -> std::io::Result<()> {
                             // HACK(eddyb) this is one shorter because
                             // `print_operands` always prints a space first.
                             eprint!("   ");
-                            print_operands(&[spirt::spv::Operand::Imm(spirt::spv::Imm::Short(
-                                spv_spec.well_known.capability,
-                                cap,
-                            ))]);
+                            print_operands(&[spirt::spv::print::PrintOperand::Imm(
+                                spirt::spv::Imm::Short(spv_spec.well_known.capability, cap),
+                            )]);
                             eprintln!();
                         }
                     }
@@ -72,16 +71,17 @@ fn main() -> std::io::Result<()> {
                         };
                         eprint!("{}", name);
 
-                        // HACK(eddyb) this prints SPIR-T inputs by converting
-                        // to SPIR-V operands first, not really a solution.
+                        // FIXME(eddyb) try to make this a bit more ergonomic.
                         print_operands(
                             &misc
                                 .inputs
                                 .iter()
                                 .map(|input| match *input {
-                                    spirt::MiscInput::SpvImm(imm) => spirt::spv::Operand::Imm(imm),
+                                    spirt::MiscInput::SpvImm(imm) => {
+                                        spirt::spv::print::PrintOperand::Imm(imm)
+                                    }
                                     spirt::MiscInput::SpvUntrackedId(id) => {
-                                        spirt::spv::Operand::Id(spv_spec.well_known.id_ref, id)
+                                        spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
                                     }
                                 })
                                 .collect::<Vec<_>>(),

@@ -4,10 +4,18 @@ use crate::spv::{self, spec};
 use smallvec::SmallVec;
 use std::{io, slice, str};
 
+// HACK(eddyb) using a different type than `spv::Operand` for flexibility.
+pub enum PrintOperand {
+    Imm(spv::Imm),
+
+    // FIXME(eddyb) this should probably not be made this expensive.
+    IdLike(String),
+}
+
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 pub struct OperandPrinter<'a, W> {
     /// Input operands to print from (may be grouped e.g. into literals).
-    pub operands: slice::Iter<'a, spv::Operand>,
+    pub operands: slice::Iter<'a, PrintOperand>,
 
     /// Output sink to print into.
     // FIXME(eddyb) printing to a string first might be better?
@@ -39,7 +47,7 @@ impl<W: io::Write> OperandPrinter<'_, W> {
         // HACK(eddyb) easier to buffer these than to deal with iterators.
         let mut words = SmallVec::<[u32; 16]>::new();
         words.push(first_word);
-        while let Some(&spv::Operand::Imm(spv::Imm::LongCont(cont_kind, word))) =
+        while let Some(&PrintOperand::Imm(spv::Imm::LongCont(cont_kind, word))) =
             self.operands.clone().next()
         {
             self.operands.next();
@@ -78,7 +86,7 @@ impl<W: io::Write> OperandPrinter<'_, W> {
     fn operand(&mut self) -> io::Result<()> {
         let operand = self.operands.next().unwrap();
         match *operand {
-            spv::Operand::Imm(spv::Imm::Short(kind, word)) => {
+            PrintOperand::Imm(spv::Imm::Short(kind, word)) => {
                 let (name, def) = kind.name_and_def();
                 match def {
                     spec::OperandKindDef::BitEnum { empty_name, bits } => {
@@ -111,16 +119,16 @@ impl<W: io::Write> OperandPrinter<'_, W> {
                     spec::OperandKindDef::Literal { .. } => self.literal(kind, word),
                 }
             }
-            spv::Operand::Imm(spv::Imm::LongStart(kind, word)) => self.literal(kind, word),
-            spv::Operand::Imm(spv::Imm::LongCont(..)) => unreachable!(),
-            spv::Operand::Id(_, id) => write!(self.out, "%{}", id),
-            spv::Operand::ForwardIdRef(_, id) => write!(self.out, "ForwardRef(%{})", id),
+            PrintOperand::Imm(spv::Imm::LongStart(kind, word)) => self.literal(kind, word),
+            PrintOperand::Imm(spv::Imm::LongCont(..)) => unreachable!(),
+            PrintOperand::IdLike(ref s) => write!(self.out, "{}", s),
         }
     }
 
     pub fn all_operands(mut self) -> io::Result<()> {
         // FIXME(eddyb) use `!self.operands.is_empty()` when that is stabilized.
         while self.operands.len() != 0 {
+            // FIXME(eddyb) maybe don't print this at the very start?
             write!(self.out, " ")?;
             self.operand()?;
         }
