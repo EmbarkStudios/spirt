@@ -90,7 +90,27 @@ impl crate::Module {
                 dialect.extensions.insert(ext);
                 Seq::Extension
             } else {
-                top_level.push(crate::TopLevel::SpvInst(inst));
+                top_level.push(crate::TopLevel::Misc(crate::Misc {
+                    kind: crate::MiscKind::SpvInst {
+                        opcode: inst.opcode,
+                    },
+                    output: inst
+                        .result_id
+                        .map(|result_id| crate::MiscOutput::SpvResult {
+                            result_type_id: inst.result_type_id,
+                            result_id,
+                        }),
+                    inputs: inst
+                        .operands
+                        .iter()
+                        .map(|operand| match *operand {
+                            spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
+                            spv::Operand::Id(_, id) | spv::Operand::ForwardIdRef(_, id) => {
+                                crate::MiscInput::SpvUntrackedId(id)
+                            }
+                        })
+                        .collect(),
+                }));
                 Seq::Other
             };
             if !(seq <= Some(next_seq)) {

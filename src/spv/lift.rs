@@ -70,9 +70,30 @@ impl crate::Module {
             emitter.push_inst(&ext_inst)?;
         }
         for top_level in &self.top_level {
-            match top_level {
-                crate::TopLevel::SpvInst(inst) => emitter.push_inst(inst)?,
-            }
+            let inst = match top_level {
+                crate::TopLevel::Misc(misc) => spv::Inst {
+                    opcode: match misc.kind {
+                        crate::MiscKind::SpvInst { opcode } => opcode,
+                    },
+                    result_type_id: misc.output.as_ref().and_then(|output| match *output {
+                        crate::MiscOutput::SpvResult { result_type_id, .. } => result_type_id,
+                    }),
+                    result_id: misc.output.as_ref().map(|output| match *output {
+                        crate::MiscOutput::SpvResult { result_id, .. } => result_id,
+                    }),
+                    operands: misc
+                        .inputs
+                        .iter()
+                        .map(|input| match *input {
+                            crate::MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                            crate::MiscInput::SpvUntrackedId(id) => {
+                                spv::Operand::Id(spv_spec.well_known.id_ref, id)
+                            }
+                        })
+                        .collect(),
+                },
+            };
+            emitter.push_inst(&inst)?;
         }
 
         Ok(emitter)

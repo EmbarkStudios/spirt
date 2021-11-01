@@ -49,6 +49,9 @@ pub enum Operand {
     ForwardIdRef(spec::OperandKind, Id),
 }
 
+// FIXME(eddyb) consider replacing with a `struct` e.g.:
+// `{ first: bool, last: bool, kind: OperandKind, word: u32 }`
+#[derive(Copy, Clone)]
 pub enum Imm {
     Short(spec::OperandKind, u32),
     LongStart(spec::OperandKind, u32),

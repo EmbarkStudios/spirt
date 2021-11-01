@@ -47,22 +47,45 @@ fn main() -> std::io::Result<()> {
             eprintln!("  All other instructions:");
             for top_level in &module.top_level {
                 match top_level {
-                    spirt::TopLevel::SpvInst(inst) => {
+                    spirt::TopLevel::Misc(misc) => {
                         eprint!("    ");
 
-                        if let Some(id) = inst.result_id {
-                            eprint!("%{}", id);
-                            if let Some(type_id) = inst.result_type_id {
-                                eprint!(": %{}", type_id);
+                        if let Some(output) = &misc.output {
+                            match *output {
+                                spirt::MiscOutput::SpvResult {
+                                    result_type_id,
+                                    result_id,
+                                } => {
+                                    eprint!("%{}", result_id);
+                                    if let Some(type_id) = result_type_id {
+                                        eprint!(": %{}", type_id);
+                                    }
+                                    eprint!(" = ");
+                                }
                             }
-                            eprint!(" = ");
                         }
 
-                        eprint!(
-                            "{}",
-                            spv_spec.instructions.get_named(inst.opcode).unwrap().0
+                        let name = match misc.kind {
+                            spirt::MiscKind::SpvInst { opcode } => {
+                                spv_spec.instructions.get_named(opcode).unwrap().0
+                            }
+                        };
+                        eprint!("{}", name);
+
+                        // HACK(eddyb) this prints SPIR-T inputs by converting
+                        // to SPIR-V operands first, not really a solution.
+                        print_operands(
+                            &misc
+                                .inputs
+                                .iter()
+                                .map(|input| match *input {
+                                    spirt::MiscInput::SpvImm(imm) => spirt::spv::Operand::Imm(imm),
+                                    spirt::MiscInput::SpvUntrackedId(id) => {
+                                        spirt::spv::Operand::Id(spv_spec.well_known.id_ref, id)
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
                         );
-                        print_operands(&inst.operands);
                         eprintln!();
                     }
                 }

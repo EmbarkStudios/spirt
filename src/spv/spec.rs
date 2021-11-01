@@ -56,6 +56,9 @@ pub struct WellKnown {
     /// `LiteralString` operand kind.
     pub literal_string: OperandKind,
 
+    /// `IdRef` operand kind.
+    pub id_ref: OperandKind,
+
     /// `IdResultType` operand kind.
     pub id_result_type: OperandKind,
 
@@ -509,6 +512,7 @@ impl Spec {
 
             capability: operand_kinds.lookup("Capability").unwrap(),
             literal_string: operand_kinds.lookup("LiteralString").unwrap(),
+            id_ref: operand_kinds.lookup("IdRef").unwrap(),
             id_result_type,
             id_result,
         };
