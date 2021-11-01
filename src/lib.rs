@@ -1,4 +1,5 @@
 use smallvec::SmallVec;
+use std::rc::Rc;
 
 pub mod spv;
 
@@ -49,4 +50,7 @@ pub enum MiscInput {
 
     // FIXME(eddyb) get rid of this by tracking all entities SPIR-V uses ID for.
     SpvUntrackedId(spv::Id),
+
+    // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
+    SpvExtInstImport(Rc<String>),
 }

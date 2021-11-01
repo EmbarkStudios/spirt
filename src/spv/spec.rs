@@ -44,6 +44,9 @@ pub struct WellKnown {
     /// `OpExtension` instruction opcode.
     pub op_extension: u16,
 
+    /// `OpExtInstImport` instruction opcode.
+    pub op_ext_inst_import: u16,
+
     /// `OpTypeInt` instruction opcode.
     pub op_type_int: u16,
 
@@ -507,6 +510,7 @@ impl Spec {
         let well_known = WellKnown {
             op_capability: instructions.lookup("OpCapability").unwrap(),
             op_extension: instructions.lookup("OpExtension").unwrap(),
+            op_ext_inst_import: instructions.lookup("OpExtInstImport").unwrap(),
             op_type_int: instructions.lookup("OpTypeInt").unwrap(),
             op_type_float: instructions.lookup("OpTypeFloat").unwrap(),
 

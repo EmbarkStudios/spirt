@@ -1,9 +1,17 @@
 //! SPIR-V to SPIR-T lowering.
 
 use crate::spv::{self, spec};
+use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::io;
+use std::num::NonZeroU32;
 use std::path::Path;
+use std::rc::Rc;
+
+/// SPIR-T definition of a SPIR-V ID.
+enum IdDef {
+    SpvExtInstImport(Rc<String>),
+}
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
 fn invalid(reason: &str) -> io::Error {
@@ -49,7 +57,8 @@ impl crate::Module {
                 version_minor,
 
                 original_generator_magic: generator_magic,
-                original_id_bound: id_bound,
+                original_id_bound: NonZeroU32::new(id_bound)
+                    .ok_or_else(|| invalid("ID bound 0"))?,
 
                 capabilities: BTreeSet::new(),
                 extensions: BTreeSet::new(),
@@ -60,10 +69,12 @@ impl crate::Module {
         enum Seq {
             Capability,
             Extension,
+            ExtInstImport,
             Other,
         }
         let mut seq = None;
 
+        let mut id_defs = FxHashMap::default();
         let mut top_level = vec![];
         while let Some(inst) = parser.next().transpose()? {
             let opcode = inst.opcode;
@@ -75,20 +86,34 @@ impl crate::Module {
 
             let next_seq = if opcode == spv_spec.well_known.op_capability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                match inst.operands[..] {
+                let cap = match inst.operands[..] {
                     [spv::Operand::Imm(spv::Imm::Short(kind, cap))] => {
                         assert!(kind == spv_spec.well_known.capability);
-                        dialect.capabilities.insert(cap);
+                        cap
                     }
                     _ => unreachable!(),
-                }
+                };
+
+                dialect.capabilities.insert(cap);
+
                 Seq::Capability
             } else if opcode == spv_spec.well_known.op_extension {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let ext = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+
                 dialect.extensions.insert(ext);
+
                 Seq::Extension
+            } else if opcode == spv_spec.well_known.op_ext_inst_import {
+                assert!(inst.result_type_id.is_none());
+                let id = inst.result_id.unwrap();
+                let name = spv::extract_literal_string(&inst.operands)
+                    .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+
+                id_defs.insert(id, IdDef::SpvExtInstImport(Rc::new(name)));
+
+                Seq::ExtInstImport
             } else {
                 top_level.push(crate::TopLevel::Misc(crate::Misc {
                     kind: crate::MiscKind::SpvInst {
@@ -106,7 +131,12 @@ impl crate::Module {
                         .map(|operand| match *operand {
                             spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
                             spv::Operand::Id(_, id) | spv::Operand::ForwardIdRef(_, id) => {
-                                crate::MiscInput::SpvUntrackedId(id)
+                                match id_defs.get(&id) {
+                                    Some(IdDef::SpvExtInstImport(name)) => {
+                                        crate::MiscInput::SpvExtInstImport(name.clone())
+                                    }
+                                    _ => crate::MiscInput::SpvUntrackedId(id),
+                                }
                             }
                         })
                         .collect(),

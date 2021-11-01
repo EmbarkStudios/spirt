@@ -17,7 +17,7 @@ pub struct Dialect {
 
     pub original_generator_magic: u32,
     // FIXME(eddyb) always recompute this from the module.
-    pub original_id_bound: u32,
+    pub original_id_bound: NonZeroU32,
 
     pub capabilities: BTreeSet<u32>,
     pub extensions: BTreeSet<String>,

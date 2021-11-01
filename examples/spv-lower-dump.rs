@@ -83,6 +83,12 @@ fn main() -> std::io::Result<()> {
                                     spirt::MiscInput::SpvUntrackedId(id) => {
                                         spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
                                     }
+                                    spirt::MiscInput::SpvExtInstImport(ref name) => {
+                                        spirt::spv::print::PrintOperand::IdLike(format!(
+                                            "%(OpExtInstImport {:?})",
+                                            name
+                                        ))
+                                    }
                                 })
                                 .collect::<Vec<_>>(),
                         );
