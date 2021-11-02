@@ -69,15 +69,15 @@ pub type Id = NonZeroU32;
 /// followed by some number of `Imm::LongCont` - will panic otherwise), returns a
 /// Rust `String` if the literal is valid UTF-8, or the validation error otherwise.
 fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error> {
-    let spv_spec = spec::Spec::get();
+    let wk = &spec::Spec::get().well_known;
 
     let mut words = match *operands {
         [Operand::Imm(Imm::Short(kind, first_word))]
         | [Operand::Imm(Imm::LongStart(kind, first_word)), ..] => {
-            assert!(kind == spv_spec.well_known.literal_string);
+            assert!(kind == wk.LiteralString);
             iter::once(first_word).chain(operands[1..].iter().map(|operand| match *operand {
                 Operand::Imm(Imm::LongCont(kind, word)) => {
-                    assert!(kind == spv_spec.well_known.literal_string);
+                    assert!(kind == wk.LiteralString);
                     word
                 }
                 _ => unreachable!(),
@@ -101,7 +101,7 @@ fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error>
 
 // FIXME(eddyb) this shouldn't just panic when `s.contains('\0')`.
 fn encode_literal_string(s: &str) -> impl Iterator<Item = Operand> + '_ {
-    let spv_spec = spec::Spec::get();
+    let wk = &spec::Spec::get().well_known;
 
     let bytes = s.as_bytes();
 
@@ -121,7 +121,7 @@ fn encode_literal_string(s: &str) -> impl Iterator<Item = Operand> + '_ {
         .map(u32::from_le_bytes)
         .enumerate()
         .map(move |(i, word)| {
-            let kind = spv_spec.well_known.literal_string;
+            let kind = wk.LiteralString;
             match (i, total_words) {
                 (0, 1) => Operand::Imm(Imm::Short(kind, word)),
                 (0, _) => Operand::Imm(Imm::LongStart(kind, word)),

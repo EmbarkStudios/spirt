@@ -37,45 +37,51 @@ pub enum RestOperandsUnit {
     Two([OperandKind; 2]),
 }
 
-pub struct WellKnown {
-    /// `OpCapability` instruction opcode.
-    pub op_capability: u16,
+macro_rules! def_well_known {
+    ($($group:ident: $ty:ty = [$($entry:ident),+ $(,)?]),+ $(,)?) => {
+        // FIXME(eddyb) decide whether to split this type into one per-group.
+        #[allow(non_snake_case)]
+        pub struct WellKnown {
+            $($(pub $entry: $ty,)+)+
+        }
 
-    /// `OpExtension` instruction opcode.
-    pub op_extension: u16,
+        #[allow(non_camel_case_types)]
+        struct PerWellKnownGroup<$($group),+> {
+            $($group: $group),+
+        }
 
-    /// `OpExtInstImport` instruction opcode.
-    pub op_ext_inst_import: u16,
+        impl WellKnown {
+            fn lookup_with(lookup_fns: PerWellKnownGroup<$(impl Fn(&'static str) -> $ty),+>) -> Self {
+                Self {
+                    $($($entry: (lookup_fns.$group)(stringify!($entry)),)+)+
+                }
+            }
+        }
+    };
+}
 
-    /// `OpMemoryModel` instruction opcode.
-    pub op_memory_model: u16,
+def_well_known! {
+    opcode: u16 = [
+        OpCapability,
+        OpExtension,
+        OpExtInstImport,
 
-    /// `OpTypeInt` instruction opcode.
-    pub op_type_int: u16,
+        OpMemoryModel,
 
-    /// `OpTypeFloat` instruction opcode.
-    pub op_type_float: u16,
+        OpTypeInt,
+        OpTypeFloat,
+    ],
+    operand_kind: OperandKind = [
+        Capability,
+        AddressingModel,
+        MemoryModel,
 
-    /// `Capability` operand kind.
-    pub capability: OperandKind,
+        LiteralString,
 
-    /// `AddressingModel` operand kind.
-    pub addressing_model: OperandKind,
-
-    /// `MemoryModel` operand kind.
-    pub memory_model: OperandKind,
-
-    /// `LiteralString` operand kind.
-    pub literal_string: OperandKind,
-
-    /// `IdRef` operand kind.
-    pub id_ref: OperandKind,
-
-    /// `IdResultType` operand kind.
-    pub id_result_type: OperandKind,
-
-    /// `IdResult` operand kind.
-    pub id_result: OperandKind,
+        IdRef,
+        IdResultType,
+        IdResult,
+    ],
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -516,22 +522,12 @@ impl Spec {
             storage: instructions,
         };
 
-        let well_known = WellKnown {
-            op_capability: instructions.lookup("OpCapability").unwrap(),
-            op_extension: instructions.lookup("OpExtension").unwrap(),
-            op_ext_inst_import: instructions.lookup("OpExtInstImport").unwrap(),
-            op_memory_model: instructions.lookup("OpMemoryModel").unwrap(),
-            op_type_int: instructions.lookup("OpTypeInt").unwrap(),
-            op_type_float: instructions.lookup("OpTypeFloat").unwrap(),
-
-            capability: operand_kinds.lookup("Capability").unwrap(),
-            addressing_model: operand_kinds.lookup("AddressingModel").unwrap(),
-            memory_model: operand_kinds.lookup("MemoryModel").unwrap(),
-            literal_string: operand_kinds.lookup("LiteralString").unwrap(),
-            id_ref: operand_kinds.lookup("IdRef").unwrap(),
-            id_result_type,
-            id_result,
-        };
+        // FIXME(eddyb) if this is computed earlier, `IdResultType` and `IdResult`
+        // wouldn't be looked up twice - but for now, this is mildly cleaner.
+        let well_known = WellKnown::lookup_with(PerWellKnownGroup {
+            opcode: |name| instructions.lookup(name).unwrap(),
+            operand_kind: |name| operand_kinds.lookup(name).unwrap(),
+        });
 
         Self {
             magic: raw_core_grammar.magic_number,

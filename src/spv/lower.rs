@@ -28,6 +28,7 @@ impl crate::Module {
 
     pub fn lower_from_spv_module_parser(mut parser: spv::read::ModuleParser) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
+        let wk = &spv_spec.well_known;
 
         let mut dialect = {
             let [magic, version, generator_magic, id_bound, reserved_inst_schema] = parser.header;
@@ -89,11 +90,11 @@ impl crate::Module {
                 invalid(&format!("in {}: {}", inst_name, msg))
             };
 
-            let next_seq = if opcode == spv_spec.well_known.op_capability {
+            let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let cap = match inst.operands[..] {
                     [spv::Operand::Imm(spv::Imm::Short(kind, cap))] => {
-                        assert!(kind == spv_spec.well_known.capability);
+                        assert!(kind == wk.Capability);
                         cap
                     }
                     _ => unreachable!(),
@@ -102,7 +103,7 @@ impl crate::Module {
                 dialect.capabilities.insert(cap);
 
                 Seq::Capability
-            } else if opcode == spv_spec.well_known.op_extension {
+            } else if opcode == wk.OpExtension {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let ext = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
@@ -110,7 +111,7 @@ impl crate::Module {
                 dialect.extensions.insert(ext);
 
                 Seq::Extension
-            } else if opcode == spv_spec.well_known.op_ext_inst_import {
+            } else if opcode == wk.OpExtInstImport {
                 assert!(inst.result_type_id.is_none());
                 let id = inst.result_id.unwrap();
                 let name = spv::extract_literal_string(&inst.operands)
@@ -119,13 +120,12 @@ impl crate::Module {
                 id_defs.insert(id, IdDef::SpvExtInstImport(Rc::new(name)));
 
                 Seq::ExtInstImport
-            } else if opcode == spv_spec.well_known.op_memory_model {
+            } else if opcode == wk.OpMemoryModel {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (addressing_model, memory_model) = match inst.operands[..] {
                     [spv::Operand::Imm(spv::Imm::Short(am_kind, am)), spv::Operand::Imm(spv::Imm::Short(mm_kind, mm))] =>
                     {
-                        assert!(am_kind == spv_spec.well_known.addressing_model);
-                        assert!(mm_kind == spv_spec.well_known.memory_model);
+                        assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
                         (am, mm)
                     }
                     _ => unreachable!(),

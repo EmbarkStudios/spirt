@@ -60,7 +60,7 @@ impl<W: io::Write> OperandPrinter<'_, W> {
 
         write!(self.out, "{}(", name)?;
 
-        if kind == spec::Spec::get().well_known.literal_string {
+        if kind == spec::Spec::get().well_known.LiteralString {
             // FIXME(eddyb) deduplicate with `spv::extract_literal_string`.
             let bytes: SmallVec<[u8; 64]> = words
                 .into_iter()

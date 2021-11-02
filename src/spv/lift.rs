@@ -8,23 +8,19 @@ use std::{io, iter};
 
 impl spv::Dialect {
     pub fn capability_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
-        let spec::WellKnown {
-            op_capability,
-            capability,
-            ..
-        } = spec::Spec::get().well_known;
+        let wk = &spec::Spec::get().well_known;
         self.capabilities.iter().map(move |&cap| spv::Inst {
-            opcode: op_capability,
+            opcode: wk.OpCapability,
             result_type_id: None,
             result_id: None,
-            operands: iter::once(spv::Operand::Imm(spv::Imm::Short(capability, cap))).collect(),
+            operands: iter::once(spv::Operand::Imm(spv::Imm::Short(wk.Capability, cap))).collect(),
         })
     }
 
     pub fn extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
-        let spec::WellKnown { op_extension, .. } = spec::Spec::get().well_known;
+        let wk = &spec::Spec::get().well_known;
         self.extensions.iter().map(move |ext| spv::Inst {
-            opcode: op_extension,
+            opcode: wk.OpExtension,
             result_type_id: None,
             result_id: None,
             operands: spv::encode_literal_string(ext).collect(),
@@ -39,6 +35,7 @@ impl crate::Module {
 
     pub fn lift_to_spv_module_emitter(&self) -> io::Result<spv::write::ModuleEmitter> {
         let spv_spec = spec::Spec::get();
+        let wk = &spv_spec.well_known;
 
         let dialect = match &self.dialect {
             crate::ModuleDialect::Spv(dialect) => dialect,
@@ -120,25 +117,22 @@ impl crate::Module {
         }
         for (name, &id) in &ext_inst_import_ids {
             emitter.push_inst(&spv::Inst {
-                opcode: spv_spec.well_known.op_ext_inst_import,
+                opcode: wk.OpExtInstImport,
                 result_type_id: None,
                 result_id: Some(id),
                 operands: spv::encode_literal_string(name).collect(),
             })?;
         }
         emitter.push_inst(&spv::Inst {
-            opcode: spv_spec.well_known.op_memory_model,
+            opcode: wk.OpMemoryModel,
             result_type_id: None,
             result_id: None,
             operands: [
                 spv::Operand::Imm(spv::Imm::Short(
-                    spv_spec.well_known.addressing_model,
+                    wk.AddressingModel,
                     dialect.addressing_model,
                 )),
-                spv::Operand::Imm(spv::Imm::Short(
-                    spv_spec.well_known.memory_model,
-                    dialect.memory_model,
-                )),
+                spv::Operand::Imm(spv::Imm::Short(wk.MemoryModel, dialect.memory_model)),
             ]
             .into_iter()
             .collect(),
@@ -160,13 +154,10 @@ impl crate::Module {
                         .iter()
                         .map(|input| match *input {
                             crate::MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                            crate::MiscInput::SpvUntrackedId(id) => {
-                                spv::Operand::Id(spv_spec.well_known.id_ref, id)
+                            crate::MiscInput::SpvUntrackedId(id) => spv::Operand::Id(wk.IdRef, id),
+                            crate::MiscInput::SpvExtInstImport(ref name) => {
+                                spv::Operand::Id(wk.IdRef, ext_inst_import_ids[name])
                             }
-                            crate::MiscInput::SpvExtInstImport(ref name) => spv::Operand::Id(
-                                spv_spec.well_known.id_ref,
-                                ext_inst_import_ids[name],
-                            ),
                         })
                         .collect(),
                 },

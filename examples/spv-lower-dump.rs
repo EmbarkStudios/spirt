@@ -13,6 +13,7 @@ fn main() -> std::io::Result<()> {
             };
 
             let spv_spec = spirt::spv::spec::Spec::get();
+            let wk = &spv_spec.well_known;
 
             match &module.dialect {
                 spirt::ModuleDialect::Spv(dialect) => {
@@ -28,7 +29,7 @@ fn main() -> std::io::Result<()> {
                             // `print_operands` always prints a space first.
                             eprint!("   ");
                             print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                                spirt::spv::Imm::Short(spv_spec.well_known.capability, cap),
+                                spirt::spv::Imm::Short(wk.Capability, cap),
                             )]);
                             eprintln!();
                         }
@@ -45,10 +46,7 @@ fn main() -> std::io::Result<()> {
                     // `print_operands` always prints a space first.
                     eprint!("  Addressing model:");
                     print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                        spirt::spv::Imm::Short(
-                            spv_spec.well_known.addressing_model,
-                            dialect.addressing_model,
-                        ),
+                        spirt::spv::Imm::Short(wk.AddressingModel, dialect.addressing_model),
                     )]);
                     eprintln!();
 
@@ -56,10 +54,7 @@ fn main() -> std::io::Result<()> {
                     // `print_operands` always prints a space first.
                     eprint!("  Memory model:");
                     print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                        spirt::spv::Imm::Short(
-                            spv_spec.well_known.memory_model,
-                            dialect.memory_model,
-                        ),
+                        spirt::spv::Imm::Short(wk.MemoryModel, dialect.memory_model),
                     )]);
                     eprintln!();
                 }

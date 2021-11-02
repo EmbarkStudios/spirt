@@ -372,6 +372,7 @@ impl Iterator for ModuleParser {
     type Item = io::Result<spv::Inst>;
     fn next(&mut self) -> Option<Self::Item> {
         let spv_spec = spec::Spec::get();
+        let wk = &spv_spec.well_known;
 
         let &opcode = self.words.get(0)?;
 
@@ -406,14 +407,14 @@ impl Iterator for ModuleParser {
 
         // HACK(eddyb) `Option::map` allows using `?` for `Result` in the closure.
         let maybe_known_id_result = inst.result_id.map(|id| {
-            let known_id_def = if opcode == spv_spec.well_known.op_type_int {
+            let known_id_def = if opcode == wk.OpTypeInt {
                 KnownIdDef::TypeInt(match inst.operands[0] {
                     spv::Operand::Imm(spv::Imm::Short(_, n)) => {
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
-            } else if opcode == spv_spec.well_known.op_type_float {
+            } else if opcode == wk.OpTypeFloat {
                 KnownIdDef::TypeFloat(match inst.operands[0] {
                     spv::Operand::Imm(spv::Imm::Short(_, n)) => {
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
