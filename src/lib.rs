@@ -1,4 +1,5 @@
 use smallvec::SmallVec;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 pub mod spv;
@@ -31,6 +32,16 @@ pub struct Misc {
     // FIXME(eddyb) maybe split inputs into "params" and "value inputs"?
     // (would "params" only contain immediates, or also e.g. types?)
     pub inputs: SmallVec<[MiscInput; 2]>,
+
+    // FIXME(eddyb) intern attr sets instead of just using `Rc`.
+    // FIXME(eddyb) use `BTreeMap<Attr, AttrValue>` and split some of the params
+    // between the `Attr` and `AttrValue` based on specified uniquness.
+    // FIXME(eddyb) don't put debuginfo in here, but rather at use sites
+    // (for e.g. types, with component types also having the debuginfo
+    // bundled at the use site of the composite type) in order to allow
+    // deduplicating definitions that only differ in debuginfo, in SPIR-T,
+    // and still lift SPIR-V with duplicate definitions, out of that.
+    pub attrs: Option<Rc<BTreeSet<Attr>>>,
 }
 
 pub enum MiscKind {
@@ -53,4 +64,21 @@ pub enum MiscInput {
 
     // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
     SpvExtInstImport(Rc<String>),
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum Attr {
+    // FIXME(eddyb) de-special-case this by recomputing the interface IDs.
+    SpvEntryPoint {
+        params: SmallVec<[spv::Imm; 2]>,
+        interface_ids: SmallVec<[spv::Id; 4]>,
+    },
+
+    SpvAnnotation {
+        // FIXME(eddyb) determine this based on the annotation.
+        opcode: u16,
+        // FIXME(eddyb) this cannot represent IDs - is that desirable?
+        // (for now we don't support `Op{ExecutionMode,Decorate}Id`)
+        params: SmallVec<[spv::Imm; 2]>,
+    },
 }

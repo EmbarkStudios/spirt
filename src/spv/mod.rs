@@ -54,7 +54,7 @@ pub enum Operand {
 
 // FIXME(eddyb) consider replacing with a `struct` e.g.:
 // `{ first: bool, last: bool, kind: OperandKind, word: u32 }`
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Imm {
     Short(spec::OperandKind, u32),
     LongStart(spec::OperandKind, u32),

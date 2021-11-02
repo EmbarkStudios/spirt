@@ -68,6 +68,19 @@ def_well_known! {
 
         OpMemoryModel,
 
+        OpEntryPoint,
+        OpExecutionMode,
+        OpExecutionModeId,
+
+        OpName,
+        OpMemberName,
+
+        OpDecorate,
+        OpMemberDecorate,
+        OpDecorateId,
+        OpDecorateString,
+        OpMemberDecorateString,
+
         OpTypeInt,
         OpTypeFloat,
     ],
@@ -84,7 +97,7 @@ def_well_known! {
     ],
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OperandKind(u8);
 
 impl indexed::FlatIdx for OperandKind {

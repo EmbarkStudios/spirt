@@ -110,6 +110,55 @@ fn main() -> std::io::Result<()> {
                                 .collect::<Vec<_>>(),
                         );
                         eprintln!();
+
+                        if let Some(attrs) = &misc.attrs {
+                            for attr in attrs.iter() {
+                                eprint!("      ");
+                                match attr {
+                                    spirt::Attr::SpvEntryPoint {
+                                        params,
+                                        interface_ids,
+                                    } => {
+                                        eprint!("OpEntryPoint");
+
+                                        // FIXME(eddyb) try to make this a bit more ergonomic.
+                                        print_operands(
+                                            &params
+                                                .iter()
+                                                .map(|&imm| {
+                                                    spirt::spv::print::PrintOperand::Imm(imm)
+                                                })
+                                                .chain(interface_ids.iter().map(|&id| {
+                                                    spirt::spv::print::PrintOperand::IdLike(
+                                                        format!("%{}", id),
+                                                    )
+                                                }))
+                                                .collect::<Vec<_>>(),
+                                        );
+                                        eprintln!();
+                                    }
+                                    spirt::Attr::SpvAnnotation { opcode, params } => {
+                                        let name =
+                                            spv_spec.instructions.get_named(*opcode).unwrap().0;
+                                        eprint!("{}", name);
+
+                                        // FIXME(eddyb) try to make this a bit more ergonomic.
+                                        print_operands(
+                                            &params
+                                                .iter()
+                                                .map(|&imm| {
+                                                    spirt::spv::print::PrintOperand::Imm(imm)
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        );
+                                        eprintln!();
+                                    }
+                                }
+                            }
+                        }
+
+                        // HACK(eddyb) this makes attr attachment more obvious.
+                        eprintln!();
                     }
                 }
             }

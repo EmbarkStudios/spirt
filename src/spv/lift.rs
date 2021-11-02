@@ -137,6 +137,94 @@ impl crate::Module {
             .into_iter()
             .collect(),
         })?;
+
+        // Collect the various sources of attributes.
+        let mut entry_point_insts = vec![];
+        let mut execution_mode_insts = vec![];
+        let mut debug_name_insts = vec![];
+        let mut decoration_insts = vec![];
+
+        let mut push_attr = |target_id, attr: &crate::Attr| match attr {
+            crate::Attr::SpvEntryPoint {
+                params,
+                interface_ids,
+            } => {
+                entry_point_insts.push(spv::Inst {
+                    opcode: wk.OpEntryPoint,
+                    result_type_id: None,
+                    result_id: None,
+                    operands: [
+                        spv::Operand::Imm(params[0]),
+                        spv::Operand::ForwardIdRef(wk.IdRef, target_id),
+                    ]
+                    .into_iter()
+                    .chain(params[1..].iter().map(|&imm| spv::Operand::Imm(imm)))
+                    .chain(
+                        interface_ids
+                            .iter()
+                            .map(|&id| spv::Operand::ForwardIdRef(wk.IdRef, id)),
+                    )
+                    .collect(),
+                });
+            }
+            crate::Attr::SpvAnnotation { opcode, params } => {
+                let inst = spv::Inst {
+                    opcode: *opcode,
+                    result_type_id: None,
+                    result_id: None,
+                    operands: iter::once(spv::Operand::ForwardIdRef(wk.IdRef, target_id))
+                        .chain(params.iter().map(|&imm| spv::Operand::Imm(imm)))
+                        .collect(),
+                };
+
+                if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
+                    execution_mode_insts.push(inst);
+                } else if [wk.OpName, wk.OpMemberName].contains(&opcode) {
+                    debug_name_insts.push(inst);
+                } else {
+                    decoration_insts.push(inst);
+                }
+            }
+        };
+        for top_level in &self.top_level {
+            match top_level {
+                crate::TopLevel::Misc(misc) => {
+                    if let Some(attrs) = &misc.attrs {
+                        let target_id = match misc.output {
+                            Some(crate::MiscOutput::SpvResult { result_id, .. }) => result_id,
+                            None => unreachable!(
+                                "FIXME: it shouldn't be possible to attach \
+                                attributes to instructions without an output"
+                            ),
+                        };
+                        for attr in attrs.iter() {
+                            push_attr(target_id, attr);
+                        }
+                    }
+                }
+            }
+        }
+
+        // FIXME(eddyb) maybe make a helper for `push_inst` with an iterator?
+        for entry_point_inst in entry_point_insts {
+            emitter.push_inst(&entry_point_inst)?;
+        }
+        for execution_mode_inst in execution_mode_insts {
+            emitter.push_inst(&execution_mode_inst)?;
+        }
+
+        // TODO(eddyb) this is where `OpString`s and `OpSource*`s should go.
+
+        for debug_name_inst in debug_name_insts {
+            emitter.push_inst(&debug_name_inst)?;
+        }
+
+        // TODO(eddyb) this is where `OpModuleProcessed`s should go.
+
+        for decoration_inst in decoration_insts {
+            emitter.push_inst(&decoration_inst)?;
+        }
+
         for top_level in &self.top_level {
             let inst = match top_level {
                 crate::TopLevel::Misc(misc) => spv::Inst {

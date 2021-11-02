@@ -2,11 +2,12 @@
 
 use crate::spv::{self, spec};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::collections::BTreeSet;
-use std::io;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
+use std::{io, iter};
 
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
@@ -75,11 +76,14 @@ impl crate::Module {
             Extension,
             ExtInstImport,
             MemoryModel,
+            EntryPoint,
+            ExecutionMode,
             Other,
         }
         let mut seq = None;
 
         let mut has_memory_model = false;
+        let mut pending_attrs = FxHashMap::<spv::Id, BTreeSet<_>>::default();
         let mut id_defs = FxHashMap::default();
         let mut top_level = vec![];
         while let Some(inst) = parser.next().transpose()? {
@@ -140,6 +144,84 @@ impl crate::Module {
                 dialect.memory_model = memory_model;
 
                 Seq::MemoryModel
+            } else if opcode == wk.OpEntryPoint {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+
+                let target_id = match inst.operands[1] {
+                    spv::Operand::ForwardIdRef(kind, id) | spv::Operand::Id(kind, id) => {
+                        assert!(kind == wk.IdRef);
+                        id
+                    }
+                    _ => unreachable!(),
+                };
+
+                let mut params = SmallVec::new();
+                let mut interface_ids = SmallVec::new();
+                for operand in iter::once(&inst.operands[0]).chain(&inst.operands[2..]) {
+                    match *operand {
+                        spv::Operand::Imm(imm) => {
+                            assert!(interface_ids.is_empty());
+                            params.push(imm);
+                        }
+                        spv::Operand::ForwardIdRef(kind, id) | spv::Operand::Id(kind, id) => {
+                            assert!(kind == wk.IdRef);
+                            interface_ids.push(id);
+                        }
+                    }
+                }
+
+                pending_attrs
+                    .entry(target_id)
+                    .or_default()
+                    .insert(crate::Attr::SpvEntryPoint {
+                        params,
+                        interface_ids,
+                    });
+
+                Seq::EntryPoint
+            } else if [
+                wk.OpExecutionMode,
+                wk.OpExecutionModeId, // FIXME(eddyb) not actually supported
+                wk.OpName,
+                wk.OpMemberName,
+                wk.OpDecorate,
+                wk.OpMemberDecorate,
+                wk.OpDecorateId, // FIXME(eddyb) not actually supported
+                wk.OpDecorateString,
+                wk.OpMemberDecorateString,
+            ]
+            .contains(&opcode)
+            {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+
+                let target_id = match inst.operands[0] {
+                    spv::Operand::ForwardIdRef(kind, id) | spv::Operand::Id(kind, id) => {
+                        assert!(kind == wk.IdRef);
+                        id
+                    }
+                    _ => unreachable!(),
+                };
+                let params = inst.operands[1..]
+                    .iter()
+                    .map(|operand| match *operand {
+                        spv::Operand::Imm(imm) => Ok(imm),
+                        spv::Operand::ForwardIdRef(..) | spv::Operand::Id(..) => {
+                            Err(invalid("unsupported decoration with ID"))
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+                pending_attrs
+                    .entry(target_id)
+                    .or_default()
+                    .insert(crate::Attr::SpvAnnotation { opcode, params });
+
+                if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
+                    Seq::ExecutionMode
+                } else {
+                    // FIXME(eddyb) separate out early debug instructions to allow
+                    // this to be accurate.
+                    Seq::Other
+                }
             } else {
                 top_level.push(crate::TopLevel::Misc(crate::Misc {
                     kind: crate::MiscKind::SpvInst {
@@ -166,7 +248,12 @@ impl crate::Module {
                             }
                         })
                         .collect(),
+                    attrs: inst
+                        .result_id
+                        .and_then(|id| pending_attrs.remove(&id))
+                        .map(Rc::new),
                 }));
+
                 Seq::Other
             };
             if !(seq <= Some(next_seq)) {
@@ -180,6 +267,11 @@ impl crate::Module {
 
         if !has_memory_model {
             return Err(invalid("missing OpMemoryModel"));
+        }
+
+        if !pending_attrs.is_empty() {
+            let ids = pending_attrs.keys().collect::<BTreeSet<_>>();
+            return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
         }
 
         Ok(Self {
