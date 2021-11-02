@@ -53,6 +53,7 @@ impl crate::Module {
 
         // Collect uses scattered throughout the module, that require def IDs.
         let mut ext_inst_imports = BTreeSet::new();
+        let mut debug_strings = BTreeSet::new();
         for top_level in &self.top_level {
             match top_level {
                 crate::TopLevel::Misc(misc) => {
@@ -61,6 +62,9 @@ impl crate::Module {
                             crate::MiscInput::SpvImm(_) | crate::MiscInput::SpvUntrackedId(_) => {}
                             crate::MiscInput::SpvExtInstImport(name) => {
                                 ext_inst_imports.insert(name.clone());
+                            }
+                            crate::MiscInput::SpvDebugString(name) => {
+                                debug_strings.insert(name.clone());
                             }
                         }
                     }
@@ -90,6 +94,8 @@ impl crate::Module {
             .into_iter()
             .map(|name| (name, alloc_id()))
             .collect();
+        let debug_string_ids: BTreeMap<_, _> =
+            debug_strings.into_iter().map(|s| (s, alloc_id())).collect();
 
         if id_bound_overflowed {
             return Err(io::Error::new(
@@ -213,7 +219,16 @@ impl crate::Module {
             emitter.push_inst(&execution_mode_inst)?;
         }
 
-        // TODO(eddyb) this is where `OpString`s and `OpSource*`s should go.
+        for (s, &id) in &debug_string_ids {
+            emitter.push_inst(&spv::Inst {
+                opcode: wk.OpString,
+                result_type_id: None,
+                result_id: Some(id),
+                operands: spv::encode_literal_string(s).collect(),
+            })?;
+        }
+
+        // TODO(eddyb) this is where `OpSource*`s should go.
 
         for debug_name_inst in debug_name_insts {
             emitter.push_inst(&debug_name_inst)?;
@@ -245,6 +260,9 @@ impl crate::Module {
                             crate::MiscInput::SpvUntrackedId(id) => spv::Operand::Id(wk.IdRef, id),
                             crate::MiscInput::SpvExtInstImport(ref name) => {
                                 spv::Operand::Id(wk.IdRef, ext_inst_import_ids[name])
+                            }
+                            crate::MiscInput::SpvDebugString(ref s) => {
+                                spv::Operand::Id(wk.IdRef, debug_string_ids[s])
                             }
                         })
                         .collect(),

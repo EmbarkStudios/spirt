@@ -12,6 +12,7 @@ use std::{io, iter};
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
     SpvExtInstImport(Rc<String>),
+    SpvDebugString(Rc<String>),
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -78,6 +79,7 @@ impl crate::Module {
             MemoryModel,
             EntryPoint,
             ExecutionMode,
+            DebugStringAndSource,
             Other,
         }
         let mut seq = None;
@@ -144,6 +146,17 @@ impl crate::Module {
                 dialect.memory_model = memory_model;
 
                 Seq::MemoryModel
+            } else if opcode == wk.OpString {
+                assert!(inst.result_type_id.is_none());
+                let id = inst.result_id.unwrap();
+                let s = spv::extract_literal_string(&inst.operands)
+                    .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+
+                id_defs.insert(id, IdDef::SpvDebugString(Rc::new(s)));
+
+                // NOTE(eddyb) debug instructions are handled earlier in the code
+                // for organizatory purposes, see `Seq` for the in-module order.
+                Seq::DebugStringAndSource
             } else if opcode == wk.OpEntryPoint {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
@@ -243,7 +256,10 @@ impl crate::Module {
                                     Some(IdDef::SpvExtInstImport(name)) => {
                                         crate::MiscInput::SpvExtInstImport(name.clone())
                                     }
-                                    _ => crate::MiscInput::SpvUntrackedId(id),
+                                    Some(IdDef::SpvDebugString(s)) => {
+                                        crate::MiscInput::SpvDebugString(s.clone())
+                                    }
+                                    None => crate::MiscInput::SpvUntrackedId(id),
                                 }
                             }
                         })

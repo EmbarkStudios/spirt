@@ -106,6 +106,12 @@ fn main() -> std::io::Result<()> {
                                             name
                                         ))
                                     }
+                                    spirt::MiscInput::SpvDebugString(ref s) => {
+                                        spirt::spv::print::PrintOperand::IdLike(format!(
+                                            "%(OpString {:?})",
+                                            s
+                                        ))
+                                    }
                                 })
                                 .collect::<Vec<_>>(),
                         );

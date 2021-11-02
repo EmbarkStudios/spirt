@@ -72,6 +72,7 @@ def_well_known! {
         OpExecutionMode,
         OpExecutionModeId,
 
+        OpString,
         OpName,
         OpMemberName,
 

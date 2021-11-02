@@ -64,6 +64,10 @@ pub enum MiscInput {
 
     // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
     SpvExtInstImport(Rc<String>),
+
+    // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
+    // FIXME(eddyb) remove by limiting usage to non-instructions.
+    SpvDebugString(Rc<String>),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
