@@ -161,7 +161,7 @@ impl crate::Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
                 let target_id = match inst.operands[1] {
-                    spv::Operand::ForwardIdRef(kind, id) | spv::Operand::Id(kind, id) => {
+                    spv::Operand::Id(kind, id) => {
                         assert!(kind == wk.IdRef);
                         id
                     }
@@ -176,7 +176,7 @@ impl crate::Module {
                             assert!(interface_ids.is_empty());
                             params.push(imm);
                         }
-                        spv::Operand::ForwardIdRef(kind, id) | spv::Operand::Id(kind, id) => {
+                        spv::Operand::Id(kind, id) => {
                             assert!(kind == wk.IdRef);
                             interface_ids.push(id);
                         }
@@ -208,7 +208,7 @@ impl crate::Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
                 let target_id = match inst.operands[0] {
-                    spv::Operand::ForwardIdRef(kind, id) | spv::Operand::Id(kind, id) => {
+                    spv::Operand::Id(kind, id) => {
                         assert!(kind == wk.IdRef);
                         id
                     }
@@ -218,9 +218,7 @@ impl crate::Module {
                     .iter()
                     .map(|operand| match *operand {
                         spv::Operand::Imm(imm) => Ok(imm),
-                        spv::Operand::ForwardIdRef(..) | spv::Operand::Id(..) => {
-                            Err(invalid("unsupported decoration with ID"))
-                        }
+                        spv::Operand::Id(..) => Err(invalid("unsupported decoration with ID")),
                     })
                     .collect::<Result<_, _>>()?;
                 pending_attrs
@@ -251,17 +249,15 @@ impl crate::Module {
                         .iter()
                         .map(|operand| match *operand {
                             spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
-                            spv::Operand::Id(_, id) | spv::Operand::ForwardIdRef(_, id) => {
-                                match id_defs.get(&id) {
-                                    Some(IdDef::SpvExtInstImport(name)) => {
-                                        crate::MiscInput::SpvExtInstImport(name.clone())
-                                    }
-                                    Some(IdDef::SpvDebugString(s)) => {
-                                        crate::MiscInput::SpvDebugString(s.clone())
-                                    }
-                                    None => crate::MiscInput::SpvUntrackedId(id),
+                            spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                                Some(IdDef::SpvExtInstImport(name)) => {
+                                    crate::MiscInput::SpvExtInstImport(name.clone())
                                 }
-                            }
+                                Some(IdDef::SpvDebugString(s)) => {
+                                    crate::MiscInput::SpvDebugString(s.clone())
+                                }
+                                None => crate::MiscInput::SpvUntrackedId(id),
+                            },
                         })
                         .collect(),
                     attrs: inst

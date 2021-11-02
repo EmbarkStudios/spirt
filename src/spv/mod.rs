@@ -33,6 +33,7 @@ pub struct Inst {
     pub result_type_id: Option<Id>,
     pub result_id: Option<Id>,
 
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
     pub operands: SmallVec<[Operand; 2]>,
 }
 
@@ -43,13 +44,6 @@ pub enum Operand {
     Imm(Imm),
 
     Id(spec::OperandKind, Id),
-
-    // FIXME(eddyb) reduce uses of this by addressing the situations it can
-    // appear in, with dedicated IR constructs instead.
-    // FIXME(eddyb) if SPIR-T won't use this directly, is there a point in even
-    // distinguishing between forward and other references? lowering would still
-    // need to track that on its own anyway.
-    ForwardIdRef(spec::OperandKind, Id),
 }
 
 // FIXME(eddyb) consider replacing with a `struct` e.g.:

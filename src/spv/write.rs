@@ -38,7 +38,7 @@ impl ModuleEmitter {
                     spv::Operand::Imm(spv::Imm::Short(_, word))
                     | spv::Operand::Imm(spv::Imm::LongStart(_, word))
                     | spv::Operand::Imm(spv::Imm::LongCont(_, word)) => word,
-                    spv::Operand::Id(_, id) | spv::Operand::ForwardIdRef(_, id) => id.get(),
+                    spv::Operand::Id(_, id) => id.get(),
                 })),
         );
         Ok(())

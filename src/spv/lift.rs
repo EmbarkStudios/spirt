@@ -161,14 +161,14 @@ impl crate::Module {
                     result_id: None,
                     operands: [
                         spv::Operand::Imm(params[0]),
-                        spv::Operand::ForwardIdRef(wk.IdRef, target_id),
+                        spv::Operand::Id(wk.IdRef, target_id),
                     ]
                     .into_iter()
                     .chain(params[1..].iter().map(|&imm| spv::Operand::Imm(imm)))
                     .chain(
                         interface_ids
                             .iter()
-                            .map(|&id| spv::Operand::ForwardIdRef(wk.IdRef, id)),
+                            .map(|&id| spv::Operand::Id(wk.IdRef, id)),
                     )
                     .collect(),
                 });
@@ -178,7 +178,7 @@ impl crate::Module {
                     opcode: *opcode,
                     result_type_id: None,
                     result_id: None,
-                    operands: iter::once(spv::Operand::ForwardIdRef(wk.IdRef, target_id))
+                    operands: iter::once(spv::Operand::Id(wk.IdRef, target_id))
                         .chain(params.iter().map(|&imm| spv::Operand::Imm(imm)))
                         .collect(),
                 };

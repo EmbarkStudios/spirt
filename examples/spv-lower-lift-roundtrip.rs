@@ -55,12 +55,6 @@ fn main() -> std::io::Result<()> {
                             spirt::spv::Operand::Id(_, id) => {
                                 spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
                             }
-                            spirt::spv::Operand::ForwardIdRef(_, id) => {
-                                spirt::spv::print::PrintOperand::IdLike(format!(
-                                    "ForwardRef(%{})",
-                                    id
-                                ))
-                            }
                         })
                         .collect::<Vec<_>>(),
                 );

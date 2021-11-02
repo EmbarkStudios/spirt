@@ -159,13 +159,7 @@ impl InstParser<'_> {
 
             spec::OperandKindDef::Id => {
                 let id = word.try_into().map_err(|_| Error::IdZero)?;
-                self.inst
-                    .operands
-                    .push(if self.known_ids.contains_key(&id) {
-                        spv::Operand::Id(kind, id)
-                    } else {
-                        spv::Operand::ForwardIdRef(kind, id)
-                    });
+                self.inst.operands.push(spv::Operand::Id(kind, id));
             }
 
             spec::OperandKindDef::Literal {
