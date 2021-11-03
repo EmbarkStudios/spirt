@@ -73,8 +73,12 @@ def_well_known! {
         OpExecutionModeId,
 
         OpString,
+        OpSource,
+        OpSourceContinued,
+        OpSourceExtension,
         OpName,
         OpMemberName,
+        OpModuleProcessed,
 
         OpDecorate,
         OpMemberDecorate,
@@ -89,7 +93,9 @@ def_well_known! {
         Capability,
         AddressingModel,
         MemoryModel,
+        SourceLanguage,
 
+        LiteralInteger,
         LiteralString,
 
         IdRef,

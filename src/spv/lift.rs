@@ -28,6 +28,28 @@ impl spv::Dialect {
     }
 }
 
+impl spv::ModuleDebugInfo {
+    pub fn source_extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+        let wk = &spec::Spec::get().well_known;
+        self.source_extensions.iter().map(move |ext| spv::Inst {
+            opcode: wk.OpSourceExtension,
+            result_type_id: None,
+            result_id: None,
+            operands: spv::encode_literal_string(ext).collect(),
+        })
+    }
+
+    pub fn module_processed_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+        let wk = &spec::Spec::get().well_known;
+        self.module_processes.iter().map(move |proc| spv::Inst {
+            opcode: wk.OpModuleProcessed,
+            result_type_id: None,
+            result_id: None,
+            operands: spv::encode_literal_string(proc).collect(),
+        })
+    }
+}
+
 impl crate::Module {
     pub fn lift_to_spv_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
         self.lift_to_spv_module_emitter()?.write_to_spv_file(path)
@@ -37,8 +59,10 @@ impl crate::Module {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
-        let dialect = match &self.dialect {
-            crate::ModuleDialect::Spv(dialect) => dialect,
+        let (dialect, debug_info) = match (&self.dialect, &self.debug_info) {
+            (crate::ModuleDialect::Spv(dialect), crate::ModuleDebugInfo::Spv(debug_info)) => {
+                (dialect, debug_info)
+            }
 
             // FIXME(eddyb) support by computing some valid "minimum viable"
             // `spv::Dialect`, or by taking it as additional input.
@@ -70,6 +94,10 @@ impl crate::Module {
                     }
                 }
             }
+        }
+        for sources in debug_info.source_languages.values() {
+            // The file operand of `OpSource` has to point to an `OpString`.
+            debug_strings.extend(sources.file_contents.keys().cloned());
         }
 
         // FIXME(eddyb) recompute this based on the module.
@@ -108,7 +136,7 @@ impl crate::Module {
         let header = [
             spv_spec.magic,
             (u32::from(dialect.version_major) << 16) | (u32::from(dialect.version_minor) << 8),
-            dialect.original_generator_magic,
+            debug_info.original_generator_magic.map_or(0, |x| x.get()),
             id_bound.get(),
             reserved_inst_schema,
         ];
@@ -227,14 +255,70 @@ impl crate::Module {
                 operands: spv::encode_literal_string(s).collect(),
             })?;
         }
+        for (lang, sources) in &debug_info.source_languages {
+            let lang_operands = || {
+                [
+                    spv::Operand::Imm(spv::Imm::Short(wk.SourceLanguage, lang.lang)),
+                    spv::Operand::Imm(spv::Imm::Short(wk.LiteralInteger, lang.version)),
+                ]
+                .into_iter()
+            };
+            if sources.file_contents.is_empty() {
+                emitter.push_inst(&spv::Inst {
+                    opcode: wk.OpSource,
+                    result_type_id: None,
+                    result_id: None,
+                    operands: lang_operands().collect(),
+                })?;
+            } else {
+                for (file, contents) in &sources.file_contents {
+                    // The maximum word count is `2**16 - 1`, the first word is
+                    // taken up by the opcode & word count, and one extra byte is
+                    // taken up by the nil byte at the end of the LiteralString.
+                    const MAX_OP_SOURCE_CONT_CONTENTS_LEN: usize = (0xffff - 1) * 4 - 1;
 
-        // TODO(eddyb) this is where `OpSource*`s should go.
+                    // `OpSource` has 3 more operands than `OpSourceContinued`,
+                    // and each of them take up exactly one word.
+                    const MAX_OP_SOURCE_CONTENTS_LEN: usize =
+                        MAX_OP_SOURCE_CONT_CONTENTS_LEN - 3 * 4;
 
+                    let (contents_initial, mut contents_rest) =
+                        contents.split_at(contents.len().min(MAX_OP_SOURCE_CONTENTS_LEN));
+
+                    emitter.push_inst(&spv::Inst {
+                        opcode: wk.OpSource,
+                        result_type_id: None,
+                        result_id: None,
+                        operands: lang_operands()
+                            .chain([spv::Operand::Id(wk.IdRef, debug_string_ids[file])])
+                            .chain(spv::encode_literal_string(contents_initial))
+                            .collect(),
+                    })?;
+
+                    while !contents_rest.is_empty() {
+                        let (cont_chunk, rest) = contents_rest
+                            .split_at(contents_rest.len().min(MAX_OP_SOURCE_CONT_CONTENTS_LEN));
+                        contents_rest = rest;
+
+                        emitter.push_inst(&spv::Inst {
+                            opcode: wk.OpSourceContinued,
+                            result_type_id: None,
+                            result_id: None,
+                            operands: spv::encode_literal_string(cont_chunk).collect(),
+                        })?;
+                    }
+                }
+            }
+        }
+        for ext_inst in debug_info.source_extension_insts() {
+            emitter.push_inst(&ext_inst)?;
+        }
         for debug_name_inst in debug_name_insts {
             emitter.push_inst(&debug_name_inst)?;
         }
-
-        // TODO(eddyb) this is where `OpModuleProcessed`s should go.
+        for mod_proc_inst in debug_info.module_processed_insts() {
+            emitter.push_inst(&mod_proc_inst)?;
+        }
 
         for decoration_inst in decoration_insts {
             emitter.push_inst(&decoration_inst)?;

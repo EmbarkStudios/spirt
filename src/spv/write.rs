@@ -18,6 +18,7 @@ impl ModuleEmitter {
         }
     }
 
+    // FIXME(eddyb) sanity-check the operands against the definition of `inst.opcode`.
     pub fn push_inst(&mut self, inst: &spv::Inst) -> io::Result<()> {
         let total_word_count = 1
             + (inst.result_type_id.is_some() as usize)

@@ -3,7 +3,7 @@
 use crate::spv::{self, spec};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
@@ -28,11 +28,11 @@ impl crate::Module {
         Self::lower_from_spv_module_parser(spv::read::ModuleParser::read_from_spv_file(path)?)
     }
 
-    pub fn lower_from_spv_module_parser(mut parser: spv::read::ModuleParser) -> io::Result<Self> {
+    pub fn lower_from_spv_module_parser(parser: spv::read::ModuleParser) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
-        let mut dialect = {
+        let (mut dialect, mut debug_info) = {
             let [magic, version, generator_magic, id_bound, reserved_inst_schema] = parser.header;
 
             // Ensured above (this is the value after any endianness swapping).
@@ -55,20 +55,28 @@ impl crate::Module {
                 )));
             }
 
-            spv::Dialect {
-                version_major,
-                version_minor,
+            (
+                spv::Dialect {
+                    version_major,
+                    version_minor,
 
-                original_generator_magic: generator_magic,
-                original_id_bound: NonZeroU32::new(id_bound)
-                    .ok_or_else(|| invalid("ID bound 0"))?,
+                    original_id_bound: NonZeroU32::new(id_bound)
+                        .ok_or_else(|| invalid("ID bound 0"))?,
 
-                capabilities: BTreeSet::new(),
-                extensions: BTreeSet::new(),
+                    capabilities: BTreeSet::new(),
+                    extensions: BTreeSet::new(),
 
-                addressing_model: 0,
-                memory_model: 0,
-            }
+                    addressing_model: 0,
+                    memory_model: 0,
+                },
+                spv::ModuleDebugInfo {
+                    original_generator_magic: NonZeroU32::new(generator_magic),
+
+                    source_languages: BTreeMap::new(),
+                    source_extensions: vec![],
+                    module_processes: vec![],
+                },
+            )
         };
 
         #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
@@ -80,6 +88,9 @@ impl crate::Module {
             EntryPoint,
             ExecutionMode,
             DebugStringAndSource,
+            DebugName,
+            DebugModuleProcessed,
+            Decoration,
             Other,
         }
         let mut seq = None;
@@ -88,7 +99,8 @@ impl crate::Module {
         let mut pending_attrs = FxHashMap::<spv::Id, BTreeSet<_>>::default();
         let mut id_defs = FxHashMap::default();
         let mut top_level = vec![];
-        while let Some(inst) = parser.next().transpose()? {
+        let mut spv_insts = parser.peekable();
+        while let Some(inst) = spv_insts.next().transpose()? {
             let opcode = inst.opcode;
 
             let invalid = |msg: &str| {
@@ -157,6 +169,87 @@ impl crate::Module {
                 // NOTE(eddyb) debug instructions are handled earlier in the code
                 // for organizatory purposes, see `Seq` for the in-module order.
                 Seq::DebugStringAndSource
+            } else if opcode == wk.OpSource {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                let (lang, version) = match inst.operands[..] {
+                    [spv::Operand::Imm(spv::Imm::Short(l_kind, lang)), spv::Operand::Imm(spv::Imm::Short(v_kind, version)), ..] =>
+                    {
+                        assert!(l_kind == wk.SourceLanguage && v_kind == wk.LiteralInteger);
+                        (lang, version)
+                    }
+                    _ => unreachable!(),
+                };
+
+                let debug_sources = debug_info
+                    .source_languages
+                    .entry(spv::DebugSourceLang { lang, version })
+                    .or_default();
+
+                match inst.operands[2..] {
+                    [spv::Operand::Id(fp_kind, file_path_id), ref contents @ ..] => {
+                        assert!(fp_kind == wk.IdRef);
+                        let file_path = match id_defs.get(&file_path_id) {
+                            Some(IdDef::SpvDebugString(s)) => s.clone(),
+                            _ => {
+                                return Err(invalid(&format!(
+                                    "%{} is not an OpString",
+                                    file_path_id
+                                )));
+                            }
+                        };
+                        let mut contents = if contents.is_empty() {
+                            String::new()
+                        } else {
+                            spv::extract_literal_string(contents)
+                                .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?
+                        };
+
+                        // Absorb all following `OpSourceContinued` into `contents`.
+                        while let Some(Ok(cont_inst)) = spv_insts.peek() {
+                            if cont_inst.opcode != wk.OpSourceContinued {
+                                break;
+                            }
+                            let cont_inst = spv_insts.next().unwrap().unwrap();
+
+                            assert!(
+                                cont_inst.result_type_id.is_none() && cont_inst.result_id.is_none()
+                            );
+                            let cont_contents = spv::extract_literal_string(&cont_inst.operands)
+                                .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+                            contents += &cont_contents;
+                        }
+
+                        debug_sources.file_contents.insert(file_path, contents);
+                    }
+                    [] => {}
+                    _ => unreachable!(),
+                }
+
+                // NOTE(eddyb) debug instructions are handled earlier in the code
+                // for organizatory purposes, see `Seq` for the in-module order.
+                Seq::DebugStringAndSource
+            } else if opcode == wk.OpSourceContinued {
+                return Err(invalid("must follow OpSource"));
+            } else if opcode == wk.OpSourceExtension {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                let ext = spv::extract_literal_string(&inst.operands)
+                    .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+
+                debug_info.source_extensions.push(ext);
+
+                // NOTE(eddyb) debug instructions are handled earlier in the code
+                // for organizatory purposes, see `Seq` for the in-module order.
+                Seq::DebugStringAndSource
+            } else if opcode == wk.OpModuleProcessed {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                let proc = spv::extract_literal_string(&inst.operands)
+                    .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+
+                debug_info.module_processes.push(proc);
+
+                // NOTE(eddyb) debug instructions are handled earlier in the code
+                // for organizatory purposes, see `Seq` for the in-module order.
+                Seq::DebugModuleProcessed
             } else if opcode == wk.OpEntryPoint {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
@@ -228,10 +321,10 @@ impl crate::Module {
 
                 if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
                     Seq::ExecutionMode
+                } else if [wk.OpName, wk.OpMemberName].contains(&opcode) {
+                    Seq::DebugName
                 } else {
-                    // FIXME(eddyb) separate out early debug instructions to allow
-                    // this to be accurate.
-                    Seq::Other
+                    Seq::Decoration
                 }
             } else {
                 top_level.push(crate::TopLevel::Misc(crate::Misc {
@@ -288,6 +381,7 @@ impl crate::Module {
 
         Ok(Self {
             dialect: crate::ModuleDialect::Spv(dialect),
+            debug_info: crate::ModuleDebugInfo::Spv(debug_info),
             top_level,
         })
     }

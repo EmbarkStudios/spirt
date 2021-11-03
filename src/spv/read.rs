@@ -403,14 +403,16 @@ impl Iterator for ModuleParser {
         let maybe_known_id_result = inst.result_id.map(|id| {
             let known_id_def = if opcode == wk.OpTypeInt {
                 KnownIdDef::TypeInt(match inst.operands[0] {
-                    spv::Operand::Imm(spv::Imm::Short(_, n)) => {
+                    spv::Operand::Imm(spv::Imm::Short(kind, n)) => {
+                        assert!(kind == wk.LiteralInteger);
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
             } else if opcode == wk.OpTypeFloat {
                 KnownIdDef::TypeFloat(match inst.operands[0] {
-                    spv::Operand::Imm(spv::Imm::Short(_, n)) => {
+                    spv::Operand::Imm(spv::Imm::Short(kind, n)) => {
+                        assert!(kind == wk.LiteralInteger);
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),

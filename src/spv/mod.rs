@@ -1,7 +1,8 @@
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 use std::num::NonZeroU32;
+use std::rc::Rc;
 use std::string::FromUtf8Error;
 
 pub mod lift;
@@ -15,7 +16,6 @@ pub struct Dialect {
     pub version_major: u8,
     pub version_minor: u8,
 
-    pub original_generator_magic: u32,
     // FIXME(eddyb) always recompute this from the module.
     pub original_id_bound: NonZeroU32,
 
@@ -24,6 +24,25 @@ pub struct Dialect {
 
     pub addressing_model: u32,
     pub memory_model: u32,
+}
+
+pub struct ModuleDebugInfo {
+    pub original_generator_magic: Option<NonZeroU32>,
+
+    pub source_languages: BTreeMap<DebugSourceLang, DebugSources>,
+    pub source_extensions: Vec<String>,
+    pub module_processes: Vec<String>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct DebugSourceLang {
+    pub lang: u32,
+    pub version: u32,
+}
+
+#[derive(Default)]
+pub struct DebugSources {
+    pub file_contents: BTreeMap<Rc<String>, String>,
 }
 
 pub struct Inst {
