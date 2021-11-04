@@ -215,7 +215,7 @@ impl InstParser<'_> {
                     KnownIdDef::Uncategorized { opcode, .. } => {
                         return Err(Error::UnsupportedContextSensitiveLiteralType {
                             type_opcode: opcode,
-                        })
+                        });
                     }
                 };
 

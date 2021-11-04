@@ -33,13 +33,23 @@ impl crate::Module {
         let wk = &spv_spec.well_known;
 
         let (mut dialect, mut debug_info) = {
-            let [magic, version, generator_magic, id_bound, reserved_inst_schema] = parser.header;
+            let [
+                magic,
+                version,
+                generator_magic,
+                id_bound,
+                reserved_inst_schema,
+            ] = parser.header;
 
             // Ensured above (this is the value after any endianness swapping).
             assert_eq!(magic, spv_spec.magic);
 
-            let [version_reserved_hi, version_major, version_minor, version_reserved_lo] =
-                version.to_be_bytes();
+            let [
+                version_reserved_hi,
+                version_major,
+                version_minor,
+                version_reserved_lo,
+            ] = version.to_be_bytes();
 
             if (version_reserved_lo, version_reserved_hi) != (0, 0) {
                 return Err(invalid(&format!(
@@ -141,8 +151,10 @@ impl crate::Module {
             } else if opcode == wk.OpMemoryModel {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (addressing_model, memory_model) = match inst.operands[..] {
-                    [spv::Operand::Imm(spv::Imm::Short(am_kind, am)), spv::Operand::Imm(spv::Imm::Short(mm_kind, mm))] =>
-                    {
+                    [
+                        spv::Operand::Imm(spv::Imm::Short(am_kind, am)),
+                        spv::Operand::Imm(spv::Imm::Short(mm_kind, mm)),
+                    ] => {
                         assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
                         (am, mm)
                     }
@@ -172,8 +184,11 @@ impl crate::Module {
             } else if opcode == wk.OpSource {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (lang, version) = match inst.operands[..] {
-                    [spv::Operand::Imm(spv::Imm::Short(l_kind, lang)), spv::Operand::Imm(spv::Imm::Short(v_kind, version)), ..] =>
-                    {
+                    [
+                        spv::Operand::Imm(spv::Imm::Short(l_kind, lang)),
+                        spv::Operand::Imm(spv::Imm::Short(v_kind, version)),
+                        ..,
+                    ] => {
                         assert!(l_kind == wk.SourceLanguage && v_kind == wk.LiteralInteger);
                         (lang, version)
                     }

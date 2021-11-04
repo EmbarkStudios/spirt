@@ -1,0 +1,2 @@
+# HACK(eddyb) needed to format array/slice patterns (see rust-lang/rustfmt#4994).
+version = "Two"
