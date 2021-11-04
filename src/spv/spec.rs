@@ -86,8 +86,14 @@ def_well_known! {
         OpDecorateString,
         OpMemberDecorateString,
 
+        OpLine,
+        OpNoLine,
+
         OpTypeInt,
         OpTypeFloat,
+
+        OpFunctionEnd,
+        OpLabel,
     ],
     operand_kind: OperandKind = [
         Capability,

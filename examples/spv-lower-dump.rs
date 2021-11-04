@@ -150,12 +150,6 @@ fn main() -> std::io::Result<()> {
                                             name
                                         ))
                                     }
-                                    spirt::MiscInput::SpvDebugString(ref s) => {
-                                        spirt::spv::print::PrintOperand::IdLike(format!(
-                                            "%(OpString {:?})",
-                                            s
-                                        ))
-                                    }
                                 })
                                 .collect::<Vec<_>>(),
                         );
@@ -197,6 +191,26 @@ fn main() -> std::io::Result<()> {
                                             .collect::<Vec<_>>(),
                                     );
                                     eprintln!();
+                                }
+                                spirt::Attr::SpvDebugLine {
+                                    file_path,
+                                    line,
+                                    col,
+                                } => {
+                                    // HACK(eddyb) Rust-GPU's column numbers seem
+                                    // off-by-one wrt what e.g. VSCode expects
+                                    // for `:line:col` syntax, but it's hard to
+                                    // tell from the spec and `glslang` doesn't
+                                    // even emit column numbers at all!
+                                    let col = col + 1;
+
+                                    // HACK(eddyb) only use skip string quoting
+                                    // and escaping for well-behaved file paths.
+                                    if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
+                                        eprintln!("at {}:{}:{}", file_path, line, col);
+                                    } else {
+                                        eprintln!("at {:?}:{}:{}", file_path, line, col);
+                                    }
                                 }
                             }
                         }

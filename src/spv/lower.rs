@@ -89,7 +89,7 @@ impl crate::Module {
             )
         };
 
-        #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
         enum Seq {
             Capability,
             Extension,
@@ -101,12 +101,19 @@ impl crate::Module {
             DebugName,
             DebugModuleProcessed,
             Decoration,
-            Other,
+
+            // NOTE(eddyb) not its own section, but only a "checkpoint", forcing
+            // instructions following `OpLine`/`OpNoLine` into later sections.
+            DebugLine,
+
+            GlobalsAndFunctions,
         }
         let mut seq = None;
 
         let mut has_memory_model = false;
         let mut pending_attrs = FxHashMap::<spv::Id, BTreeSet<_>>::default();
+        let mut current_debug_line = None;
+        let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         let mut id_defs = FxHashMap::default();
         let mut top_level = vec![];
         let mut spv_insts = parser.peekable();
@@ -117,6 +124,58 @@ impl crate::Module {
                 let inst_name = spv_spec.instructions.get_named(opcode).unwrap().0;
                 invalid(&format!("in {}: {}", inst_name, msg))
             };
+
+            // Handle line debuginfo early, as it doesn't have its own section,
+            // but rather can go almost anywhere among globals and functions.
+            if [wk.OpLine, wk.OpNoLine].contains(&opcode) {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+
+                current_debug_line = if opcode == wk.OpLine {
+                    match inst.operands[..] {
+                        [
+                            spv::Operand::Id(fp_kind, file_path_id),
+                            spv::Operand::Imm(spv::Imm::Short(l_kind, line)),
+                            spv::Operand::Imm(spv::Imm::Short(c_kind, col)),
+                        ] => {
+                            assert!(
+                                fp_kind == wk.IdRef && [l_kind, c_kind] == [wk.LiteralInteger; 2]
+                            );
+                            let file_path = match id_defs.get(&file_path_id) {
+                                Some(IdDef::SpvDebugString(s)) => s.clone(),
+                                _ => {
+                                    return Err(invalid(&format!(
+                                        "%{} is not an OpString",
+                                        file_path_id
+                                    )));
+                                }
+                            };
+                            Some((file_path, line, col))
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    assert!(inst.operands.is_empty());
+                    None
+                };
+
+                // Advance to `Seq::DebugLine` if we're not there yet, forcing
+                // any following instructions to not be in earlier sections.
+                seq = seq.min(Some(Seq::DebugLine));
+                continue;
+            }
+
+            // Reset line debuginfo when crossing/leaving blocks.
+            let new_block_id = if opcode == wk.OpLabel {
+                Some(inst.result_id.unwrap())
+            } else if opcode == wk.OpFunctionEnd {
+                None
+            } else {
+                current_block_id
+            };
+            if current_block_id != new_block_id {
+                current_debug_line = None;
+            }
+            current_block_id = new_block_id;
 
             let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
@@ -342,6 +401,19 @@ impl crate::Module {
                     Seq::Decoration
                 }
             } else {
+                let mut attrs = inst.result_id.and_then(|id| pending_attrs.remove(&id));
+
+                if let Some((file_path, line, col)) = current_debug_line.clone() {
+                    // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
+                    attrs
+                        .get_or_insert_with(Default::default)
+                        .insert(crate::Attr::SpvDebugLine {
+                            file_path,
+                            line,
+                            col,
+                        });
+                }
+
                 top_level.push(crate::TopLevel::Misc(crate::Misc {
                     kind: crate::MiscKind::SpvInst {
                         opcode: inst.opcode,
@@ -355,26 +427,29 @@ impl crate::Module {
                     inputs: inst
                         .operands
                         .iter()
-                        .map(|operand| match *operand {
-                            spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
-                            spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                Some(IdDef::SpvExtInstImport(name)) => {
-                                    crate::MiscInput::SpvExtInstImport(name.clone())
-                                }
-                                Some(IdDef::SpvDebugString(s)) => {
-                                    crate::MiscInput::SpvDebugString(s.clone())
-                                }
-                                None => crate::MiscInput::SpvUntrackedId(id),
-                            },
+                        .map(|operand| {
+                            Ok(match *operand {
+                                spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
+                                spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                                    Some(IdDef::SpvExtInstImport(name)) => {
+                                        crate::MiscInput::SpvExtInstImport(name.clone())
+                                    }
+                                    Some(IdDef::SpvDebugString(s)) => {
+                                        return Err(invalid(&format!(
+                                            "unsupported use of `OpString {:?}` \
+                                             outside `OpSource` or `OpLine`",
+                                            s
+                                        )));
+                                    }
+                                    None => crate::MiscInput::SpvUntrackedId(id),
+                                },
+                            })
                         })
-                        .collect(),
-                    attrs: inst
-                        .result_id
-                        .and_then(|id| pending_attrs.remove(&id))
-                        .map(Rc::new),
+                        .collect::<Result<_, _>>()?,
+                    attrs: attrs.map(Rc::new),
                 }));
 
-                Seq::Other
+                Seq::GlobalsAndFunctions
             };
             if !(seq <= Some(next_seq)) {
                 return Err(invalid(&format!(

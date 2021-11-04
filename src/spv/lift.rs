@@ -87,8 +87,14 @@ impl crate::Module {
                             crate::MiscInput::SpvExtInstImport(name) => {
                                 ext_inst_imports.insert(name.clone());
                             }
-                            crate::MiscInput::SpvDebugString(name) => {
-                                debug_strings.insert(name.clone());
+                        }
+                    }
+                    for attr in misc.attrs.as_deref().into_iter().flatten() {
+                        match attr {
+                            crate::Attr::SpvEntryPoint { .. }
+                            | crate::Attr::SpvAnnotation { .. } => {}
+                            crate::Attr::SpvDebugLine { file_path, .. } => {
+                                debug_strings.insert(file_path.clone());
                             }
                         }
                     }
@@ -219,11 +225,16 @@ impl crate::Module {
                     decoration_insts.push(inst);
                 }
             }
+            crate::Attr::SpvDebugLine { .. } => unreachable!(),
         };
         for top_level in &self.top_level {
             match top_level {
                 crate::TopLevel::Misc(misc) => {
                     for attr in misc.attrs.as_deref().into_iter().flatten() {
+                        if let crate::Attr::SpvDebugLine { .. } = attr {
+                            continue;
+                        }
+
                         let target_id = match misc.output {
                             Some(crate::MiscOutput::SpvResult { result_id, .. }) => result_id,
                             None => unreachable!(
@@ -322,6 +333,8 @@ impl crate::Module {
             emitter.push_inst(&decoration_inst)?;
         }
 
+        let mut current_debug_line = None;
+        let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         for top_level in &self.top_level {
             let inst = match top_level {
                 crate::TopLevel::Misc(misc) => spv::Inst {
@@ -343,13 +356,67 @@ impl crate::Module {
                             crate::MiscInput::SpvExtInstImport(ref name) => {
                                 spv::Operand::Id(wk.IdRef, ext_inst_import_ids[name])
                             }
-                            crate::MiscInput::SpvDebugString(ref s) => {
-                                spv::Operand::Id(wk.IdRef, debug_string_ids[s])
-                            }
                         })
                         .collect(),
                 },
             };
+
+            // Reset line debuginfo when crossing/leaving blocks.
+            let new_block_id = if inst.opcode == wk.OpLabel {
+                Some(inst.result_id.unwrap())
+            } else if inst.opcode == wk.OpFunctionEnd {
+                None
+            } else {
+                current_block_id
+            };
+            if current_block_id != new_block_id {
+                current_debug_line = None;
+            }
+            current_block_id = new_block_id;
+
+            // Determine whether to emit `OpLine`/`OpNoLine` before `inst`,
+            // in order to end up with the expected line debuginfo.
+            let new_debug_line = match top_level {
+                crate::TopLevel::Misc(misc) => {
+                    // FIXME(eddyb) make this less of a search and more of a
+                    // lookup by splitting attrs into key and value parts.
+                    misc.attrs
+                        .as_deref()
+                        .into_iter()
+                        .flatten()
+                        .find_map(|attr| match *attr {
+                            crate::Attr::SpvDebugLine {
+                                ref file_path,
+                                line,
+                                col,
+                            } => Some((debug_string_ids[file_path], line, col)),
+                            _ => None,
+                        })
+                }
+            };
+            if current_debug_line != new_debug_line {
+                let (opcode, operands) = match new_debug_line {
+                    Some((file_path_id, line, col)) => (
+                        wk.OpLine,
+                        [
+                            spv::Operand::Id(wk.IdRef, file_path_id),
+                            spv::Operand::Imm(spv::Imm::Short(wk.LiteralInteger, line)),
+                            spv::Operand::Imm(spv::Imm::Short(wk.LiteralInteger, col)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    None => (wk.OpNoLine, [].into_iter().collect()),
+                };
+                emitter.push_inst(&spv::Inst {
+                    opcode,
+                    result_type_id: None,
+                    result_id: None,
+                    operands,
+                })?;
+            }
+            current_debug_line = new_debug_line;
+
             emitter.push_inst(&inst)?;
         }
 

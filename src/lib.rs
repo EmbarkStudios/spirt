@@ -69,10 +69,6 @@ pub enum MiscInput {
 
     // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
     SpvExtInstImport(Rc<String>),
-
-    // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
-    // FIXME(eddyb) remove by limiting usage to non-instructions.
-    SpvDebugString(Rc<String>),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -89,5 +85,12 @@ pub enum Attr {
         // FIXME(eddyb) this cannot represent IDs - is that desirable?
         // (for now we don't support `Op{ExecutionMode,Decorate}Id`)
         params: SmallVec<[spv::Imm; 2]>,
+    },
+
+    SpvDebugLine {
+        // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
+        file_path: Rc<String>,
+        line: u32,
+        col: u32,
     },
 }
