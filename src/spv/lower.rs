@@ -32,6 +32,10 @@ impl crate::Module {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
+        // HACK(eddyb) used to quickly check whether an `OpVariable` is global.
+        let storage_class_function_operand =
+            spv::Operand::Imm(spv::Imm::Short(wk.StorageClass, wk.Function));
+
         let (mut dialect, mut debug_info) = {
             let [
                 magic,
@@ -106,7 +110,8 @@ impl crate::Module {
             // instructions following `OpLine`/`OpNoLine` into later sections.
             DebugLine,
 
-            GlobalsAndFunctions,
+            Globals,
+            Functions,
         }
         let mut seq = None;
 
@@ -449,7 +454,25 @@ impl crate::Module {
                     attrs: attrs.map(Rc::new),
                 }));
 
-                Seq::GlobalsAndFunctions
+                match spv_spec.instructions[opcode].category {
+                    spec::InstructionCategory::Type | spec::InstructionCategory::Const => {
+                        Seq::Globals
+                    }
+
+                    // Where `OpVariable` belongs depends on its `StorageClass`
+                    // operand is `Function` (function-local) or not (global).
+                    _ if opcode == wk.OpVariable
+                        && inst.operands[0] != storage_class_function_operand =>
+                    {
+                        Seq::Globals
+                    }
+
+                    // `OpUndef` can appear either among constants, or in a
+                    // function, so at most advance `seq` to globals.
+                    _ if opcode == wk.OpUndef => seq.min(Some(Seq::Globals)).unwrap(),
+
+                    spec::InstructionCategory::Other => Seq::Functions,
+                }
             };
             if !(seq <= Some(next_seq)) {
                 return Err(invalid(&format!(

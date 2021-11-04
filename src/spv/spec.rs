@@ -20,6 +20,8 @@ pub struct Spec {
 
 #[derive(PartialEq, Eq)]
 pub struct InstructionDef {
+    pub category: InstructionCategory,
+
     // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
     pub has_result_type_id: bool,
     pub has_result_id: bool,
@@ -27,6 +29,13 @@ pub struct InstructionDef {
     pub req_operands: ArrayVec<OperandKind, 16>,
     pub opt_operands: ArrayVec<OperandKind, 2>,
     pub rest_operands: Option<RestOperandsUnit>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum InstructionCategory {
+    Type,
+    Const,
+    Other,
 }
 
 /// Whether the trailing `*` "operand" (i.e. repeated arbitrarily many times),
@@ -92,6 +101,10 @@ def_well_known! {
         OpTypeInt,
         OpTypeFloat,
 
+        OpUndef,
+
+        OpVariable,
+
         OpFunctionEnd,
         OpLabel,
     ],
@@ -100,6 +113,7 @@ def_well_known! {
         AddressingModel,
         MemoryModel,
         SourceLanguage,
+        StorageClass,
 
         LiteralInteger,
         LiteralString,
@@ -107,6 +121,10 @@ def_well_known! {
         IdRef,
         IdResultType,
         IdResult,
+    ],
+    // FIXME(eddyb) find a way to namespace these to avoid conflicts.
+    storage_class: u32 = [
+        Function,
     ],
 }
 
@@ -465,6 +483,12 @@ impl Spec {
         let instructions = indexed::KhrSegmentedVec::from_in_order_iter(
             raw_core_grammar.instructions.iter().map(|inst| {
                 let mut def = InstructionDef {
+                    category: match inst.class {
+                        "Type-Declaration" => InstructionCategory::Type,
+                        "Constant-Creation" => InstructionCategory::Const,
+                        _ => InstructionCategory::Other,
+                    },
+
                     has_result_type_id: false,
                     has_result_id: false,
 
@@ -548,11 +572,17 @@ impl Spec {
             storage: instructions,
         };
 
+        let storage_classes = match &operand_kinds[operand_kinds.lookup("StorageClass").unwrap()] {
+            OperandKindDef::ValueEnum { variants } => variants,
+            _ => unreachable!(),
+        };
+
         // FIXME(eddyb) if this is computed earlier, `IdResultType` and `IdResult`
         // wouldn't be looked up twice - but for now, this is mildly cleaner.
         let well_known = WellKnown::lookup_with(PerWellKnownGroup {
             opcode: |name| instructions.lookup(name).unwrap(),
             operand_kind: |name| operand_kinds.lookup(name).unwrap(),
+            storage_class: |name| storage_classes.lookup(name).unwrap().into(),
         });
 
         Self {

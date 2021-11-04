@@ -56,6 +56,7 @@ pub struct Inst {
     pub operands: SmallVec<[Operand; 2]>,
 }
 
+#[derive(PartialEq)]
 pub enum Operand {
     // FIXME(eddyb) this is a bit wasteful because we don't have to fit the
     // `OperandKind` of `Imm` in between the discriminant and the `u32`, but
