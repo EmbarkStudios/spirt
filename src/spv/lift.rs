@@ -223,17 +223,15 @@ impl crate::Module {
         for top_level in &self.top_level {
             match top_level {
                 crate::TopLevel::Misc(misc) => {
-                    if let Some(attrs) = &misc.attrs {
+                    for attr in misc.attrs.as_deref().into_iter().flatten() {
                         let target_id = match misc.output {
                             Some(crate::MiscOutput::SpvResult { result_id, .. }) => result_id,
                             None => unreachable!(
                                 "FIXME: it shouldn't be possible to attach \
-                                attributes to instructions without an output"
+                                 attributes to instructions without an output"
                             ),
                         };
-                        for attr in attrs.iter() {
-                            push_attr(target_id, attr);
-                        }
+                        push_attr(target_id, attr);
                     }
                 }
             }
