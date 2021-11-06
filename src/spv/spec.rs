@@ -105,6 +105,7 @@ def_well_known! {
 
         OpVariable,
 
+        OpFunction,
         OpFunctionEnd,
         OpLabel,
     ],
@@ -114,6 +115,7 @@ def_well_known! {
         MemoryModel,
         SourceLanguage,
         StorageClass,
+        FunctionControl,
 
         LiteralInteger,
         LiteralString,

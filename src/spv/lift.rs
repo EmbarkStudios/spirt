@@ -78,25 +78,27 @@ impl crate::Module {
         // Collect uses scattered throughout the module, that require def IDs.
         let mut ext_inst_imports = BTreeSet::new();
         let mut debug_strings = BTreeSet::new();
-        for top_level in &self.top_level {
-            match top_level {
-                crate::TopLevel::Misc(misc) => {
-                    for input in &misc.inputs {
-                        match input {
-                            crate::MiscInput::SpvImm(_) | crate::MiscInput::SpvUntrackedId(_) => {}
-                            crate::MiscInput::SpvExtInstImport(name) => {
-                                ext_inst_imports.insert(name.clone());
-                            }
-                        }
+        let globals_and_func_insts = self
+            .globals
+            .iter()
+            .map(|global| match global {
+                crate::Global::Misc(misc) => misc,
+            })
+            .chain(self.funcs.iter().flat_map(|func| &func.insts));
+        for misc in globals_and_func_insts {
+            for input in &misc.inputs {
+                match input {
+                    crate::MiscInput::SpvImm(_) | crate::MiscInput::SpvUntrackedId(_) => {}
+                    crate::MiscInput::SpvExtInstImport(name) => {
+                        ext_inst_imports.insert(name.clone());
                     }
-                    for attr in misc.attrs.as_deref().into_iter().flatten() {
-                        match attr {
-                            crate::Attr::SpvEntryPoint { .. }
-                            | crate::Attr::SpvAnnotation { .. } => {}
-                            crate::Attr::SpvDebugLine { file_path, .. } => {
-                                debug_strings.insert(file_path.clone());
-                            }
-                        }
+                }
+            }
+            for attr in misc.attrs.as_deref().into_iter().flatten() {
+                match attr {
+                    crate::Attr::SpvEntryPoint { .. } | crate::Attr::SpvAnnotation { .. } => {}
+                    crate::Attr::SpvDebugLine { file_path, .. } => {
+                        debug_strings.insert(file_path.clone());
                     }
                 }
             }
@@ -227,24 +229,27 @@ impl crate::Module {
             }
             crate::Attr::SpvDebugLine { .. } => unreachable!(),
         };
-        for top_level in &self.top_level {
-            match top_level {
-                crate::TopLevel::Misc(misc) => {
-                    for attr in misc.attrs.as_deref().into_iter().flatten() {
-                        if let crate::Attr::SpvDebugLine { .. } = attr {
-                            continue;
-                        }
-
-                        let target_id = match misc.output {
-                            Some(crate::MiscOutput::SpvResult { result_id, .. }) => result_id,
-                            None => unreachable!(
-                                "FIXME: it shouldn't be possible to attach \
-                                 attributes to instructions without an output"
-                            ),
-                        };
-                        push_attr(target_id, attr);
-                    }
+        let globals_and_func_insts = self
+            .globals
+            .iter()
+            .map(|global| match global {
+                crate::Global::Misc(misc) => misc,
+            })
+            .chain(self.funcs.iter().flat_map(|func| &func.insts));
+        for misc in globals_and_func_insts {
+            for attr in misc.attrs.as_deref().into_iter().flatten() {
+                if let crate::Attr::SpvDebugLine { .. } = attr {
+                    continue;
                 }
+
+                let target_id = match misc.output {
+                    Some(crate::MiscOutput::SpvResult { result_id, .. }) => result_id,
+                    None => unreachable!(
+                        "FIXME: it shouldn't be possible to attach \
+                         attributes to instructions without an output"
+                    ),
+                };
+                push_attr(target_id, attr);
             }
         }
 
@@ -335,30 +340,35 @@ impl crate::Module {
 
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
-        for top_level in &self.top_level {
-            let inst = match top_level {
-                crate::TopLevel::Misc(misc) => spv::Inst {
-                    opcode: match misc.kind {
-                        crate::MiscKind::SpvInst { opcode } => opcode,
-                    },
-                    result_type_id: misc.output.as_ref().and_then(|output| match *output {
-                        crate::MiscOutput::SpvResult { result_type_id, .. } => result_type_id,
-                    }),
-                    result_id: misc.output.as_ref().map(|output| match *output {
-                        crate::MiscOutput::SpvResult { result_id, .. } => result_id,
-                    }),
-                    operands: misc
-                        .inputs
-                        .iter()
-                        .map(|input| match *input {
-                            crate::MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                            crate::MiscInput::SpvUntrackedId(id) => spv::Operand::Id(wk.IdRef, id),
-                            crate::MiscInput::SpvExtInstImport(ref name) => {
-                                spv::Operand::Id(wk.IdRef, ext_inst_import_ids[name])
-                            }
-                        })
-                        .collect(),
+        let globals_and_func_insts = self
+            .globals
+            .iter()
+            .map(|global| match global {
+                crate::Global::Misc(misc) => misc,
+            })
+            .chain(self.funcs.iter().flat_map(|func| &func.insts));
+        for misc in globals_and_func_insts {
+            let inst = spv::Inst {
+                opcode: match misc.kind {
+                    crate::MiscKind::SpvInst { opcode } => opcode,
                 },
+                result_type_id: misc.output.as_ref().and_then(|output| match *output {
+                    crate::MiscOutput::SpvResult { result_type_id, .. } => result_type_id,
+                }),
+                result_id: misc.output.as_ref().map(|output| match *output {
+                    crate::MiscOutput::SpvResult { result_id, .. } => result_id,
+                }),
+                operands: misc
+                    .inputs
+                    .iter()
+                    .map(|input| match *input {
+                        crate::MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                        crate::MiscInput::SpvUntrackedId(id) => spv::Operand::Id(wk.IdRef, id),
+                        crate::MiscInput::SpvExtInstImport(ref name) => {
+                            spv::Operand::Id(wk.IdRef, ext_inst_import_ids[name])
+                        }
+                    })
+                    .collect(),
             };
 
             // Reset line debuginfo when crossing/leaving blocks.
@@ -376,24 +386,21 @@ impl crate::Module {
 
             // Determine whether to emit `OpLine`/`OpNoLine` before `inst`,
             // in order to end up with the expected line debuginfo.
-            let new_debug_line = match top_level {
-                crate::TopLevel::Misc(misc) => {
-                    // FIXME(eddyb) make this less of a search and more of a
-                    // lookup by splitting attrs into key and value parts.
-                    misc.attrs
-                        .as_deref()
-                        .into_iter()
-                        .flatten()
-                        .find_map(|attr| match *attr {
-                            crate::Attr::SpvDebugLine {
-                                ref file_path,
-                                line,
-                                col,
-                            } => Some((debug_string_ids[file_path], line, col)),
-                            _ => None,
-                        })
-                }
-            };
+            // FIXME(eddyb) make this less of a search and more of a
+            // lookup by splitting attrs into key and value parts.
+            let new_debug_line = misc
+                .attrs
+                .as_deref()
+                .into_iter()
+                .flatten()
+                .find_map(|attr| match *attr {
+                    crate::Attr::SpvDebugLine {
+                        ref file_path,
+                        line,
+                        col,
+                    } => Some((debug_string_ids[file_path], line, col)),
+                    _ => None,
+                });
             if current_debug_line != new_debug_line {
                 let (opcode, operands) = match new_debug_line {
                     Some((file_path_id, line, col)) => (

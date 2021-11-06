@@ -105,120 +105,120 @@ fn main() -> std::io::Result<()> {
             }
 
             eprintln!("  All other instructions:");
-            for top_level in &module.top_level {
-                match top_level {
-                    spirt::TopLevel::Misc(misc) => {
-                        eprint!("    ");
+            let globals_and_func_insts = module
+                .globals
+                .iter()
+                .map(|global| match global {
+                    spirt::Global::Misc(misc) => misc,
+                })
+                .chain(module.funcs.iter().flat_map(|func| &func.insts));
+            for misc in globals_and_func_insts {
+                eprint!("    ");
 
-                        if let Some(output) = &misc.output {
-                            match *output {
-                                spirt::MiscOutput::SpvResult {
-                                    result_type_id,
-                                    result_id,
-                                } => {
-                                    eprint!("%{}", result_id);
-                                    if let Some(type_id) = result_type_id {
-                                        eprint!(": %{}", type_id);
-                                    }
-                                    eprint!(" = ");
-                                }
+                if let Some(output) = &misc.output {
+                    match *output {
+                        spirt::MiscOutput::SpvResult {
+                            result_type_id,
+                            result_id,
+                        } => {
+                            eprint!("%{}", result_id);
+                            if let Some(type_id) = result_type_id {
+                                eprint!(": %{}", type_id);
                             }
+                            eprint!(" = ");
                         }
-
-                        let name = match misc.kind {
-                            spirt::MiscKind::SpvInst { opcode } => {
-                                spv_spec.instructions.get_named(opcode).unwrap().0
-                            }
-                        };
-                        eprint!("{}", name);
-
-                        // FIXME(eddyb) try to make this a bit more ergonomic.
-                        print_operands(
-                            &misc
-                                .inputs
-                                .iter()
-                                .map(|input| match *input {
-                                    spirt::MiscInput::SpvImm(imm) => {
-                                        spirt::spv::print::PrintOperand::Imm(imm)
-                                    }
-                                    spirt::MiscInput::SpvUntrackedId(id) => {
-                                        spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
-                                    }
-                                    spirt::MiscInput::SpvExtInstImport(ref name) => {
-                                        spirt::spv::print::PrintOperand::IdLike(format!(
-                                            "%(OpExtInstImport {:?})",
-                                            name
-                                        ))
-                                    }
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                        eprintln!();
-
-                        for attr in misc.attrs.as_deref().into_iter().flatten() {
-                            eprint!("      ");
-                            match attr {
-                                spirt::Attr::SpvEntryPoint {
-                                    params,
-                                    interface_ids,
-                                } => {
-                                    eprint!("OpEntryPoint");
-
-                                    // FIXME(eddyb) try to make this a bit more ergonomic.
-                                    print_operands(
-                                        &params
-                                            .iter()
-                                            .map(|&imm| spirt::spv::print::PrintOperand::Imm(imm))
-                                            .chain(interface_ids.iter().map(|&id| {
-                                                spirt::spv::print::PrintOperand::IdLike(format!(
-                                                    "%{}",
-                                                    id
-                                                ))
-                                            }))
-                                            .collect::<Vec<_>>(),
-                                    );
-                                    eprintln!();
-                                }
-                                spirt::Attr::SpvAnnotation { opcode, params } => {
-                                    let name = spv_spec.instructions.get_named(*opcode).unwrap().0;
-                                    eprint!("{}", name);
-
-                                    // FIXME(eddyb) try to make this a bit more ergonomic.
-                                    print_operands(
-                                        &params
-                                            .iter()
-                                            .map(|&imm| spirt::spv::print::PrintOperand::Imm(imm))
-                                            .collect::<Vec<_>>(),
-                                    );
-                                    eprintln!();
-                                }
-                                spirt::Attr::SpvDebugLine {
-                                    file_path,
-                                    line,
-                                    col,
-                                } => {
-                                    // HACK(eddyb) Rust-GPU's column numbers seem
-                                    // off-by-one wrt what e.g. VSCode expects
-                                    // for `:line:col` syntax, but it's hard to
-                                    // tell from the spec and `glslang` doesn't
-                                    // even emit column numbers at all!
-                                    let col = col + 1;
-
-                                    // HACK(eddyb) only use skip string quoting
-                                    // and escaping for well-behaved file paths.
-                                    if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
-                                        eprintln!("at {}:{}:{}", file_path, line, col);
-                                    } else {
-                                        eprintln!("at {:?}:{}:{}", file_path, line, col);
-                                    }
-                                }
-                            }
-                        }
-
-                        // HACK(eddyb) this makes attr attachment more obvious.
-                        eprintln!();
                     }
                 }
+
+                let name = match misc.kind {
+                    spirt::MiscKind::SpvInst { opcode } => {
+                        spv_spec.instructions.get_named(opcode).unwrap().0
+                    }
+                };
+                eprint!("{}", name);
+
+                // FIXME(eddyb) try to make this a bit more ergonomic.
+                print_operands(
+                    &misc
+                        .inputs
+                        .iter()
+                        .map(|input| match *input {
+                            spirt::MiscInput::SpvImm(imm) => {
+                                spirt::spv::print::PrintOperand::Imm(imm)
+                            }
+                            spirt::MiscInput::SpvUntrackedId(id) => {
+                                spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
+                            }
+                            spirt::MiscInput::SpvExtInstImport(ref name) => {
+                                spirt::spv::print::PrintOperand::IdLike(format!(
+                                    "%(OpExtInstImport {:?})",
+                                    name
+                                ))
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                eprintln!();
+
+                for attr in misc.attrs.as_deref().into_iter().flatten() {
+                    eprint!("      ");
+                    match attr {
+                        spirt::Attr::SpvEntryPoint {
+                            params,
+                            interface_ids,
+                        } => {
+                            eprint!("OpEntryPoint");
+
+                            // FIXME(eddyb) try to make this a bit more ergonomic.
+                            print_operands(
+                                &params
+                                    .iter()
+                                    .map(|&imm| spirt::spv::print::PrintOperand::Imm(imm))
+                                    .chain(interface_ids.iter().map(|&id| {
+                                        spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
+                                    }))
+                                    .collect::<Vec<_>>(),
+                            );
+                            eprintln!();
+                        }
+                        spirt::Attr::SpvAnnotation { opcode, params } => {
+                            let name = spv_spec.instructions.get_named(*opcode).unwrap().0;
+                            eprint!("{}", name);
+
+                            // FIXME(eddyb) try to make this a bit more ergonomic.
+                            print_operands(
+                                &params
+                                    .iter()
+                                    .map(|&imm| spirt::spv::print::PrintOperand::Imm(imm))
+                                    .collect::<Vec<_>>(),
+                            );
+                            eprintln!();
+                        }
+                        spirt::Attr::SpvDebugLine {
+                            file_path,
+                            line,
+                            col,
+                        } => {
+                            // HACK(eddyb) Rust-GPU's column numbers seem
+                            // off-by-one wrt what e.g. VSCode expects
+                            // for `:line:col` syntax, but it's hard to
+                            // tell from the spec and `glslang` doesn't
+                            // even emit column numbers at all!
+                            let col = col + 1;
+
+                            // HACK(eddyb) only use skip string quoting
+                            // and escaping for well-behaved file paths.
+                            if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
+                                eprintln!("at {}:{}:{}", file_path, line, col);
+                            } else {
+                                eprintln!("at {:?}:{}:{}", file_path, line, col);
+                            }
+                        }
+                    }
+                }
+
+                // HACK(eddyb) this makes attr attachment more obvious.
+                eprintln!();
             }
 
             Ok(())

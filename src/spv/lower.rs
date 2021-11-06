@@ -120,7 +120,10 @@ impl crate::Module {
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         let mut id_defs = FxHashMap::default();
-        let mut top_level = vec![];
+        let mut globals = vec![];
+        let mut funcs = vec![];
+        let mut current_func = None;
+
         let mut spv_insts = parser.peekable();
         while let Some(inst) = spv_insts.next().transpose()? {
             let opcode = inst.opcode;
@@ -181,6 +184,19 @@ impl crate::Module {
                 current_debug_line = None;
             }
             current_block_id = new_block_id;
+
+            let mut attrs = inst.result_id.and_then(|id| pending_attrs.remove(&id));
+
+            if let Some((file_path, line, col)) = current_debug_line.clone() {
+                // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
+                attrs
+                    .get_or_insert_with(Default::default)
+                    .insert(crate::Attr::SpvDebugLine {
+                        file_path,
+                        line,
+                        col,
+                    });
+            }
 
             let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
@@ -405,21 +421,74 @@ impl crate::Module {
                 } else {
                     Seq::Decoration
                 }
-            } else {
-                let mut attrs = inst.result_id.and_then(|id| pending_attrs.remove(&id));
-
-                if let Some((file_path, line, col)) = current_debug_line.clone() {
-                    // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
-                    attrs
-                        .get_or_insert_with(Default::default)
-                        .insert(crate::Attr::SpvDebugLine {
-                            file_path,
-                            line,
-                            col,
-                        });
+            } else if opcode == wk.OpFunction {
+                if current_func.is_some() {
+                    return Err(invalid("nested OpFunction while still in a function"));
                 }
 
-                top_level.push(crate::TopLevel::Misc(crate::Misc {
+                let func_id = inst.result_id.unwrap();
+                // FIXME(eddyb) hide this from SPIR-T, it's the function return
+                // type, *not* the function type, which is in `func_type_id`.
+                let func_ret_type_id = inst.result_type_id.unwrap();
+
+                let (func_ctrl, func_type_id) = match inst.operands[..] {
+                    [
+                        spv::Operand::Imm(spv::Imm::Short(fc_kind, func_ctrl)),
+                        spv::Operand::Id(ft_kind, func_type_id),
+                    ] => {
+                        assert!(fc_kind == wk.FunctionControl && ft_kind == wk.IdRef);
+                        (func_ctrl, func_type_id)
+                    }
+                    _ => unreachable!(),
+                };
+
+                // FIXME(eddyb) pull out this information from the first entry
+                // in the `insts` field, into new fields of `Func`.
+                let func_inst = crate::Misc {
+                    kind: crate::MiscKind::SpvInst {
+                        opcode: inst.opcode,
+                    },
+                    output: Some(crate::MiscOutput::SpvResult {
+                        result_type_id: Some(func_ret_type_id),
+                        result_id: func_id,
+                    }),
+                    inputs: [
+                        crate::MiscInput::SpvImm(spv::Imm::Short(wk.FunctionControl, func_ctrl)),
+                        crate::MiscInput::SpvUntrackedId(func_type_id),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    attrs: attrs.take().map(Rc::new),
+                };
+
+                current_func = Some(crate::Func {
+                    insts: vec![func_inst],
+                });
+
+                Seq::Functions
+            } else if opcode == wk.OpFunctionEnd {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                assert!(inst.operands.is_empty());
+
+                let mut func = current_func
+                    .take()
+                    .ok_or_else(|| invalid("nested OpFunction while still in a function"))?;
+
+                // FIXME(eddyb) don't keep this instruction explicitly.
+                func.insts.push(crate::Misc {
+                    kind: crate::MiscKind::SpvInst {
+                        opcode: inst.opcode,
+                    },
+                    output: None,
+                    inputs: [].into_iter().collect(),
+                    attrs: None,
+                });
+
+                funcs.push(func);
+
+                Seq::Functions
+            } else {
+                let misc = crate::Misc {
                     kind: crate::MiscKind::SpvInst {
                         opcode: inst.opcode,
                     },
@@ -451,8 +520,16 @@ impl crate::Module {
                             })
                         })
                         .collect::<Result<_, _>>()?,
-                    attrs: attrs.map(Rc::new),
-                }));
+                    attrs: attrs.take().map(Rc::new),
+                };
+
+                match &mut current_func {
+                    Some(func) => {
+                        assert_eq!(seq, Some(Seq::Functions));
+                        func.insts.push(misc)
+                    }
+                    None => globals.push(crate::Global::Misc(misc)),
+                }
 
                 match spv_spec.instructions[opcode].category {
                     spec::InstructionCategory::Type | spec::InstructionCategory::Const => {
@@ -481,6 +558,10 @@ impl crate::Module {
                 )));
             }
             seq = Some(next_seq);
+
+            if attrs.is_some() {
+                return Err(invalid("unused decorations / line debuginfo"));
+            }
         }
 
         if !has_memory_model {
@@ -492,10 +573,15 @@ impl crate::Module {
             return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
         }
 
+        if current_func.is_some() {
+            return Err(invalid("OpFunction without matching OpFunctionEnd"));
+        }
+
         Ok(Self {
             dialect: crate::ModuleDialect::Spv(dialect),
             debug_info: crate::ModuleDebugInfo::Spv(debug_info),
-            top_level,
+            globals,
+            funcs,
         })
     }
 }

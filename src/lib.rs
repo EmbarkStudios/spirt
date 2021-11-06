@@ -13,7 +13,8 @@ pub struct Module {
     pub dialect: ModuleDialect,
     pub debug_info: ModuleDebugInfo,
 
-    pub top_level: Vec<TopLevel>,
+    pub globals: Vec<Global>,
+    pub funcs: Vec<Func>,
 }
 
 pub enum ModuleDialect {
@@ -24,8 +25,12 @@ pub enum ModuleDebugInfo {
     Spv(spv::ModuleDebugInfo),
 }
 
-pub enum TopLevel {
+pub enum Global {
     Misc(Misc),
+}
+
+pub struct Func {
+    pub insts: Vec<Misc>,
 }
 
 pub struct Misc {
