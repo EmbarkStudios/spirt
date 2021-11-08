@@ -130,7 +130,7 @@ def_well_known! {
     ],
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OperandKind(u8);
 
 impl indexed::FlatIdx for OperandKind {

@@ -1,8 +1,8 @@
+use crate::InternedStr;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 use std::num::NonZeroU32;
-use std::rc::Rc;
 use std::string::FromUtf8Error;
 
 pub mod lift;
@@ -42,7 +42,7 @@ pub struct DebugSourceLang {
 
 #[derive(Default)]
 pub struct DebugSources {
-    pub file_contents: BTreeMap<Rc<String>, String>,
+    pub file_contents: BTreeMap<InternedStr, String>,
 }
 
 pub struct Inst {
@@ -68,7 +68,7 @@ pub enum Operand {
 
 // FIXME(eddyb) consider replacing with a `struct` e.g.:
 // `{ first: bool, last: bool, kind: OperandKind, word: u32 }`
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Imm {
     Short(spec::OperandKind, u32),
     LongStart(spec::OperandKind, u32),

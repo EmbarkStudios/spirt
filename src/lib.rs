@@ -1,21 +1,53 @@
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
-use std::rc::Rc;
+
+mod context;
+pub use context::{AttrSet, Context, InternedStr};
 
 pub mod spv;
 
-// TODO(eddyb) split out everything into:
-// * a "context" containing type/const definitions
-//   (or just intern them globally/thread-locally?)
-// * globals (variables/fns) that can be grouped into "modules"
-//   (which also have e.g. individual dialects)
-pub struct Module {
-    pub dialect: ModuleDialect,
-    pub debug_info: ModuleDebugInfo,
+// HACK(eddyb) this only serves to disallow modifying the `cx` field of `Module`.
+mod sealed {
+    use super::*;
+    use std::rc::Rc;
 
-    pub globals: Vec<Global>,
-    pub funcs: Vec<Func>,
+    pub struct Module {
+        /// Context used for everything interned, in this module.
+        ///
+        /// Notable choices made for this field:
+        /// * private to disallow switching the context of a module
+        /// * `Rc` sharing to allow multiple modules to use the same context
+        ///   (`Context: !Sync` because of the interners so it can't be `Arc`)
+        cx: Rc<Context>,
+
+        pub dialect: ModuleDialect,
+        pub debug_info: ModuleDebugInfo,
+
+        pub globals: Vec<Global>,
+        pub funcs: Vec<Func>,
+    }
+
+    impl Module {
+        pub fn new(cx: Rc<Context>, dialect: ModuleDialect, debug_info: ModuleDebugInfo) -> Self {
+            Self {
+                cx,
+
+                dialect,
+                debug_info,
+
+                globals: vec![],
+                funcs: vec![],
+            }
+        }
+
+        // FIXME(eddyb) `-> &Rc<Context>` might be better in situations where
+        // the module doesn't need to be modified, figure out if that's common.
+        pub fn cx(&self) -> Rc<Context> {
+            self.cx.clone()
+        }
+    }
 }
+pub use sealed::Module;
 
 pub enum ModuleDialect {
     Spv(spv::Dialect),
@@ -43,15 +75,7 @@ pub struct Misc {
     // (would "params" only contain immediates, or also e.g. types?)
     pub inputs: SmallVec<[MiscInput; 2]>,
 
-    // FIXME(eddyb) intern attr sets instead of just using `Rc`.
-    // FIXME(eddyb) use `BTreeMap<Attr, AttrValue>` and split some of the params
-    // between the `Attr` and `AttrValue` based on specified uniquness.
-    // FIXME(eddyb) don't put debuginfo in here, but rather at use sites
-    // (for e.g. types, with component types also having the debuginfo
-    // bundled at the use site of the composite type) in order to allow
-    // deduplicating definitions that only differ in debuginfo, in SPIR-T,
-    // and still lift SPIR-V with duplicate definitions, out of that.
-    pub attrs: Option<Rc<BTreeSet<Attr>>>,
+    pub attrs: AttrSet,
 }
 
 pub enum MiscKind {
@@ -65,18 +89,33 @@ pub enum MiscOutput {
     },
 }
 
+#[derive(Copy, Clone)]
 pub enum MiscInput {
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investingating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
     SpvImm(spv::Imm),
 
     // FIXME(eddyb) get rid of this by tracking all entities SPIR-V uses ID for.
     SpvUntrackedId(spv::Id),
 
-    // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
-    SpvExtInstImport(Rc<String>),
+    SpvExtInstImport(InternedStr),
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, PartialEq, Eq, Hash)]
+pub struct AttrSetDef {
+    // FIXME(eddyb) use `BTreeMap<Attr, AttrValue>` and split some of the params
+    // between the `Attr` and `AttrValue` based on specified uniquness.
+    // FIXME(eddyb) don't put debuginfo in here, but rather at use sites
+    // (for e.g. types, with component types also having the debuginfo
+    // bundled at the use site of the composite type) in order to allow
+    // deduplicating definitions that only differ in debuginfo, in SPIR-T,
+    // and still lift SPIR-V with duplicate definitions, out of that.
+    pub attrs: BTreeSet<Attr>,
+}
+
+// FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
     // FIXME(eddyb) de-special-case this by recomputing the interface IDs.
     SpvEntryPoint {
@@ -93,8 +132,7 @@ pub enum Attr {
     },
 
     SpvDebugLine {
-        // FIXME(eddyb) consider using string interning instead of `Rc<String>`.
-        file_path: Rc<String>,
+        file_path: InternedStr,
         line: u32,
         col: u32,
     },

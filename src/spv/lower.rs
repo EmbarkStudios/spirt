@@ -1,18 +1,19 @@
 //! SPIR-V to SPIR-T lowering.
 
 use crate::spv::{self, spec};
+use crate::{Context, InternedStr};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
-use std::{io, iter};
+use std::{io, iter, mem};
 
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
-    SpvExtInstImport(Rc<String>),
-    SpvDebugString(Rc<String>),
+    SpvExtInstImport(InternedStr),
+    SpvDebugString(InternedStr),
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -24,11 +25,14 @@ fn invalid(reason: &str) -> io::Error {
 }
 
 impl crate::Module {
-    pub fn lower_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
-        Self::lower_from_spv_module_parser(spv::read::ModuleParser::read_from_spv_file(path)?)
+    pub fn lower_from_spv_file(cx: Rc<Context>, path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::lower_from_spv_module_parser(cx, spv::read::ModuleParser::read_from_spv_file(path)?)
     }
 
-    pub fn lower_from_spv_module_parser(parser: spv::read::ModuleParser) -> io::Result<Self> {
+    pub fn lower_from_spv_module_parser(
+        cx: Rc<Context>,
+        parser: spv::read::ModuleParser,
+    ) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
@@ -36,7 +40,7 @@ impl crate::Module {
         let storage_class_function_operand =
             spv::Operand::Imm(spv::Imm::Short(wk.StorageClass, wk.Function));
 
-        let (mut dialect, mut debug_info) = {
+        let mut module = {
             let [
                 magic,
                 version,
@@ -69,8 +73,9 @@ impl crate::Module {
                 )));
             }
 
-            (
-                spv::Dialect {
+            Self::new(
+                cx.clone(),
+                crate::ModuleDialect::Spv(spv::Dialect {
                     version_major,
                     version_minor,
 
@@ -82,14 +87,14 @@ impl crate::Module {
 
                     addressing_model: 0,
                     memory_model: 0,
-                },
-                spv::ModuleDebugInfo {
+                }),
+                crate::ModuleDebugInfo::Spv(spv::ModuleDebugInfo {
                     original_generator_magic: NonZeroU32::new(generator_magic),
 
                     source_languages: BTreeMap::new(),
                     source_extensions: vec![],
                     module_processes: vec![],
-                },
+                }),
             )
         };
 
@@ -116,12 +121,10 @@ impl crate::Module {
         let mut seq = None;
 
         let mut has_memory_model = false;
-        let mut pending_attrs = FxHashMap::<spv::Id, BTreeSet<_>>::default();
+        let mut pending_attr_sets = FxHashMap::<spv::Id, crate::AttrSetDef>::default();
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         let mut id_defs = FxHashMap::default();
-        let mut globals = vec![];
-        let mut funcs = vec![];
         let mut current_func = None;
 
         let mut spv_insts = parser.peekable();
@@ -149,7 +152,7 @@ impl crate::Module {
                                 fp_kind == wk.IdRef && [l_kind, c_kind] == [wk.LiteralInteger; 2]
                             );
                             let file_path = match id_defs.get(&file_path_id) {
-                                Some(IdDef::SpvDebugString(s)) => s.clone(),
+                                Some(&IdDef::SpvDebugString(s)) => s,
                                 _ => {
                                     return Err(invalid(&format!(
                                         "%{} is not an OpString",
@@ -185,18 +188,21 @@ impl crate::Module {
             }
             current_block_id = new_block_id;
 
-            let mut attrs = inst.result_id.and_then(|id| pending_attrs.remove(&id));
+            let mut attr_set = inst
+                .result_id
+                .and_then(|id| pending_attr_sets.remove(&id))
+                .unwrap_or_default();
 
-            if let Some((file_path, line, col)) = current_debug_line.clone() {
+            if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
-                attrs
-                    .get_or_insert_with(Default::default)
-                    .insert(crate::Attr::SpvDebugLine {
-                        file_path,
-                        line,
-                        col,
-                    });
+                attr_set.attrs.insert(crate::Attr::SpvDebugLine {
+                    file_path,
+                    line,
+                    col,
+                });
             }
+
+            let mut attr_set = cx.intern(attr_set);
 
             let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
@@ -208,7 +214,11 @@ impl crate::Module {
                     _ => unreachable!(),
                 };
 
-                dialect.capabilities.insert(cap);
+                match &mut module.dialect {
+                    crate::ModuleDialect::Spv(dialect) => {
+                        dialect.capabilities.insert(cap);
+                    }
+                }
 
                 Seq::Capability
             } else if opcode == wk.OpExtension {
@@ -216,7 +226,11 @@ impl crate::Module {
                 let ext = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
-                dialect.extensions.insert(ext);
+                match &mut module.dialect {
+                    crate::ModuleDialect::Spv(dialect) => {
+                        dialect.extensions.insert(ext);
+                    }
+                }
 
                 Seq::Extension
             } else if opcode == wk.OpExtInstImport {
@@ -225,7 +239,7 @@ impl crate::Module {
                 let name = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
-                id_defs.insert(id, IdDef::SpvExtInstImport(Rc::new(name)));
+                id_defs.insert(id, IdDef::SpvExtInstImport(cx.intern(name)));
 
                 Seq::ExtInstImport
             } else if opcode == wk.OpMemoryModel {
@@ -246,8 +260,12 @@ impl crate::Module {
                 }
                 has_memory_model = true;
 
-                dialect.addressing_model = addressing_model;
-                dialect.memory_model = memory_model;
+                match &mut module.dialect {
+                    crate::ModuleDialect::Spv(dialect) => {
+                        dialect.addressing_model = addressing_model;
+                        dialect.memory_model = memory_model;
+                    }
+                }
 
                 Seq::MemoryModel
             } else if opcode == wk.OpString {
@@ -256,7 +274,7 @@ impl crate::Module {
                 let s = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
-                id_defs.insert(id, IdDef::SpvDebugString(Rc::new(s)));
+                id_defs.insert(id, IdDef::SpvDebugString(cx.intern(s)));
 
                 // NOTE(eddyb) debug instructions are handled earlier in the code
                 // for organizatory purposes, see `Seq` for the in-module order.
@@ -275,16 +293,18 @@ impl crate::Module {
                     _ => unreachable!(),
                 };
 
-                let debug_sources = debug_info
-                    .source_languages
-                    .entry(spv::DebugSourceLang { lang, version })
-                    .or_default();
+                let debug_sources = match &mut module.debug_info {
+                    crate::ModuleDebugInfo::Spv(debug_info) => debug_info
+                        .source_languages
+                        .entry(spv::DebugSourceLang { lang, version })
+                        .or_default(),
+                };
 
                 match inst.operands[2..] {
                     [spv::Operand::Id(fp_kind, file_path_id), ref contents @ ..] => {
                         assert!(fp_kind == wk.IdRef);
                         let file_path = match id_defs.get(&file_path_id) {
-                            Some(IdDef::SpvDebugString(s)) => s.clone(),
+                            Some(&IdDef::SpvDebugString(s)) => s,
                             _ => {
                                 return Err(invalid(&format!(
                                     "%{} is not an OpString",
@@ -330,7 +350,11 @@ impl crate::Module {
                 let ext = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
-                debug_info.source_extensions.push(ext);
+                match &mut module.debug_info {
+                    crate::ModuleDebugInfo::Spv(debug_info) => {
+                        debug_info.source_extensions.push(ext);
+                    }
+                }
 
                 // NOTE(eddyb) debug instructions are handled earlier in the code
                 // for organizatory purposes, see `Seq` for the in-module order.
@@ -340,7 +364,11 @@ impl crate::Module {
                 let proc = spv::extract_literal_string(&inst.operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
-                debug_info.module_processes.push(proc);
+                match &mut module.debug_info {
+                    crate::ModuleDebugInfo::Spv(debug_info) => {
+                        debug_info.module_processes.push(proc);
+                    }
+                }
 
                 // NOTE(eddyb) debug instructions are handled earlier in the code
                 // for organizatory purposes, see `Seq` for the in-module order.
@@ -371,9 +399,10 @@ impl crate::Module {
                     }
                 }
 
-                pending_attrs
+                pending_attr_sets
                     .entry(target_id)
                     .or_default()
+                    .attrs
                     .insert(crate::Attr::SpvEntryPoint {
                         params,
                         interface_ids,
@@ -409,9 +438,10 @@ impl crate::Module {
                         spv::Operand::Id(..) => Err(invalid("unsupported decoration with ID")),
                     })
                     .collect::<Result<_, _>>()?;
-                pending_attrs
+                pending_attr_sets
                     .entry(target_id)
                     .or_default()
+                    .attrs
                     .insert(crate::Attr::SpvAnnotation { opcode, params });
 
                 if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
@@ -458,7 +488,7 @@ impl crate::Module {
                     ]
                     .into_iter()
                     .collect(),
-                    attrs: attrs.take().map(Rc::new),
+                    attrs: mem::take(&mut attr_set),
                 };
 
                 current_func = Some(crate::Func {
@@ -481,10 +511,10 @@ impl crate::Module {
                     },
                     output: None,
                     inputs: [].into_iter().collect(),
-                    attrs: None,
+                    attrs: crate::AttrSet::default(),
                 });
 
-                funcs.push(func);
+                module.funcs.push(func);
 
                 Seq::Functions
             } else {
@@ -505,14 +535,14 @@ impl crate::Module {
                             Ok(match *operand {
                                 spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
                                 spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                    Some(IdDef::SpvExtInstImport(name)) => {
-                                        crate::MiscInput::SpvExtInstImport(name.clone())
+                                    Some(&IdDef::SpvExtInstImport(name)) => {
+                                        crate::MiscInput::SpvExtInstImport(name)
                                     }
-                                    Some(IdDef::SpvDebugString(s)) => {
+                                    Some(&IdDef::SpvDebugString(s)) => {
                                         return Err(invalid(&format!(
                                             "unsupported use of `OpString {:?}` \
                                              outside `OpSource` or `OpLine`",
-                                            s
+                                            &cx[s]
                                         )));
                                     }
                                     None => crate::MiscInput::SpvUntrackedId(id),
@@ -520,7 +550,7 @@ impl crate::Module {
                             })
                         })
                         .collect::<Result<_, _>>()?,
-                    attrs: attrs.take().map(Rc::new),
+                    attrs: mem::take(&mut attr_set),
                 };
 
                 match &mut current_func {
@@ -528,7 +558,7 @@ impl crate::Module {
                         assert_eq!(seq, Some(Seq::Functions));
                         func.insts.push(misc)
                     }
-                    None => globals.push(crate::Global::Misc(misc)),
+                    None => module.globals.push(crate::Global::Misc(misc)),
                 }
 
                 match spv_spec.instructions[opcode].category {
@@ -559,7 +589,7 @@ impl crate::Module {
             }
             seq = Some(next_seq);
 
-            if attrs.is_some() {
+            if attr_set != Default::default() {
                 return Err(invalid("unused decorations / line debuginfo"));
             }
         }
@@ -568,8 +598,8 @@ impl crate::Module {
             return Err(invalid("missing OpMemoryModel"));
         }
 
-        if !pending_attrs.is_empty() {
-            let ids = pending_attrs.keys().collect::<BTreeSet<_>>();
+        if !pending_attr_sets.is_empty() {
+            let ids = pending_attr_sets.keys().collect::<BTreeSet<_>>();
             return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
         }
 
@@ -577,11 +607,6 @@ impl crate::Module {
             return Err(invalid("OpFunction without matching OpFunctionEnd"));
         }
 
-        Ok(Self {
-            dialect: crate::ModuleDialect::Spv(dialect),
-            debug_info: crate::ModuleDebugInfo::Spv(debug_info),
-            globals,
-            funcs,
-        })
+        Ok(module)
     }
 }

@@ -1,7 +1,10 @@
+use std::rc::Rc;
+
 fn main() -> std::io::Result<()> {
     match &std::env::args().collect::<Vec<_>>()[..] {
         [_, in_file] => {
-            let module = spirt::Module::lower_from_spv_file(in_file)?;
+            let cx = Rc::new(spirt::Context::new());
+            let module = spirt::Module::lower_from_spv_file(cx.clone(), in_file)?;
 
             let print_operands = |operands: &[_]| {
                 spirt::spv::print::OperandPrinter {
@@ -82,8 +85,8 @@ fn main() -> std::io::Result<()> {
                             )]);
                             eprintln!(" {}", lang.version);
 
-                            for (file, contents) in &sources.file_contents {
-                                eprintln!("      {:?}: {:?}", file, contents);
+                            for (&file, contents) in &sources.file_contents {
+                                eprintln!("      {:?}: {:?}", &cx[file], contents);
                             }
                         }
                     }
@@ -149,10 +152,10 @@ fn main() -> std::io::Result<()> {
                             spirt::MiscInput::SpvUntrackedId(id) => {
                                 spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
                             }
-                            spirt::MiscInput::SpvExtInstImport(ref name) => {
+                            spirt::MiscInput::SpvExtInstImport(name) => {
                                 spirt::spv::print::PrintOperand::IdLike(format!(
                                     "%(OpExtInstImport {:?})",
-                                    name
+                                    &cx[name]
                                 ))
                             }
                         })
@@ -160,7 +163,7 @@ fn main() -> std::io::Result<()> {
                 );
                 eprintln!();
 
-                for attr in misc.attrs.as_deref().into_iter().flatten() {
+                for attr in cx[misc.attrs].attrs.iter() {
                     eprint!("      ");
                     match attr {
                         spirt::Attr::SpvEntryPoint {
@@ -194,7 +197,7 @@ fn main() -> std::io::Result<()> {
                             );
                             eprintln!();
                         }
-                        spirt::Attr::SpvDebugLine {
+                        &spirt::Attr::SpvDebugLine {
                             file_path,
                             line,
                             col,
@@ -208,6 +211,7 @@ fn main() -> std::io::Result<()> {
 
                             // HACK(eddyb) only use skip string quoting
                             // and escaping for well-behaved file paths.
+                            let file_path = &cx[file_path];
                             if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
                                 eprintln!("at {}:{}:{}", file_path, line, col);
                             } else {

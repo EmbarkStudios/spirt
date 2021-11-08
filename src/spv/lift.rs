@@ -59,6 +59,7 @@ impl crate::Module {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
+        let cx = self.cx();
         let (dialect, debug_info) = match (&self.dialect, &self.debug_info) {
             (crate::ModuleDialect::Spv(dialect), crate::ModuleDebugInfo::Spv(debug_info)) => {
                 (dialect, debug_info)
@@ -86,26 +87,26 @@ impl crate::Module {
             })
             .chain(self.funcs.iter().flat_map(|func| &func.insts));
         for misc in globals_and_func_insts {
-            for input in &misc.inputs {
+            for &input in &misc.inputs {
                 match input {
                     crate::MiscInput::SpvImm(_) | crate::MiscInput::SpvUntrackedId(_) => {}
                     crate::MiscInput::SpvExtInstImport(name) => {
-                        ext_inst_imports.insert(name.clone());
+                        ext_inst_imports.insert(name);
                     }
                 }
             }
-            for attr in misc.attrs.as_deref().into_iter().flatten() {
-                match attr {
+            for attr in &cx[misc.attrs].attrs {
+                match *attr {
                     crate::Attr::SpvEntryPoint { .. } | crate::Attr::SpvAnnotation { .. } => {}
                     crate::Attr::SpvDebugLine { file_path, .. } => {
-                        debug_strings.insert(file_path.clone());
+                        debug_strings.insert(file_path);
                     }
                 }
             }
         }
         for sources in debug_info.source_languages.values() {
             // The file operand of `OpSource` has to point to an `OpString`.
-            debug_strings.extend(sources.file_contents.keys().cloned());
+            debug_strings.extend(sources.file_contents.keys().copied());
         }
 
         // FIXME(eddyb) recompute this based on the module.
@@ -157,12 +158,12 @@ impl crate::Module {
         for ext_inst in dialect.extension_insts() {
             emitter.push_inst(&ext_inst)?;
         }
-        for (name, &id) in &ext_inst_import_ids {
+        for (&name, &id) in &ext_inst_import_ids {
             emitter.push_inst(&spv::Inst {
                 opcode: wk.OpExtInstImport,
                 result_type_id: None,
                 result_id: Some(id),
-                operands: spv::encode_literal_string(name).collect(),
+                operands: spv::encode_literal_string(&cx[name]).collect(),
             })?;
         }
         emitter.push_inst(&spv::Inst {
@@ -237,7 +238,7 @@ impl crate::Module {
             })
             .chain(self.funcs.iter().flat_map(|func| &func.insts));
         for misc in globals_and_func_insts {
-            for attr in misc.attrs.as_deref().into_iter().flatten() {
+            for attr in cx[misc.attrs].attrs.iter() {
                 if let crate::Attr::SpvDebugLine { .. } = attr {
                     continue;
                 }
@@ -261,12 +262,12 @@ impl crate::Module {
             emitter.push_inst(&execution_mode_inst)?;
         }
 
-        for (s, &id) in &debug_string_ids {
+        for (&s, &id) in &debug_string_ids {
             emitter.push_inst(&spv::Inst {
                 opcode: wk.OpString,
                 result_type_id: None,
                 result_id: Some(id),
-                operands: spv::encode_literal_string(s).collect(),
+                operands: spv::encode_literal_string(&cx[s]).collect(),
             })?;
         }
         for (lang, sources) in &debug_info.source_languages {
@@ -364,8 +365,8 @@ impl crate::Module {
                     .map(|input| match *input {
                         crate::MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
                         crate::MiscInput::SpvUntrackedId(id) => spv::Operand::Id(wk.IdRef, id),
-                        crate::MiscInput::SpvExtInstImport(ref name) => {
-                            spv::Operand::Id(wk.IdRef, ext_inst_import_ids[name])
+                        crate::MiscInput::SpvExtInstImport(name) => {
+                            spv::Operand::Id(wk.IdRef, ext_inst_import_ids[&name])
                         }
                     })
                     .collect(),
@@ -388,19 +389,14 @@ impl crate::Module {
             // in order to end up with the expected line debuginfo.
             // FIXME(eddyb) make this less of a search and more of a
             // lookup by splitting attrs into key and value parts.
-            let new_debug_line = misc
-                .attrs
-                .as_deref()
-                .into_iter()
-                .flatten()
-                .find_map(|attr| match *attr {
-                    crate::Attr::SpvDebugLine {
-                        ref file_path,
-                        line,
-                        col,
-                    } => Some((debug_string_ids[file_path], line, col)),
-                    _ => None,
-                });
+            let new_debug_line = cx[misc.attrs].attrs.iter().find_map(|attr| match *attr {
+                crate::Attr::SpvDebugLine {
+                    file_path,
+                    line,
+                    col,
+                } => Some((debug_string_ids[&file_path], line, col)),
+                _ => None,
+            });
             if current_debug_line != new_debug_line {
                 let (opcode, operands) = match new_debug_line {
                     Some((file_path_id, line, col)) => (

@@ -1,7 +1,10 @@
+use std::rc::Rc;
+
 fn main() -> std::io::Result<()> {
     match &std::env::args().collect::<Vec<_>>()[..] {
         [_, in_file, out_file] => {
-            let module = spirt::Module::lower_from_spv_file(in_file)?;
+            let module =
+                spirt::Module::lower_from_spv_file(Rc::new(spirt::Context::new()), in_file)?;
             module.lift_to_spv_file(out_file)?;
 
             // FIXME(eddyb) dump the module without reading the just-written file.
