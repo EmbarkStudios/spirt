@@ -168,7 +168,7 @@ impl crate::Module {
 
                 // Advance to `Seq::DebugLine` if we're not there yet, forcing
                 // any following instructions to not be in earlier sections.
-                seq = seq.min(Some(Seq::DebugLine));
+                seq = seq.max(Some(Seq::DebugLine));
                 continue;
             }
 
@@ -546,7 +546,7 @@ impl crate::Module {
 
                     // `OpUndef` can appear either among constants, or in a
                     // function, so at most advance `seq` to globals.
-                    _ if opcode == wk.OpUndef => seq.min(Some(Seq::Globals)).unwrap(),
+                    _ if opcode == wk.OpUndef => seq.max(Some(Seq::Globals)).unwrap(),
 
                     spec::InstructionCategory::Other => Seq::Functions,
                 }
