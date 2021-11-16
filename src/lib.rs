@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 mod context;
 pub use context::{AttrSet, Context, InternedStr};
 
+pub mod visit;
+
 pub mod spv;
 
 // HACK(eddyb) this only serves to disallow modifying the `cx` field of `Module`.
@@ -82,6 +84,7 @@ pub enum MiscKind {
     SpvInst { opcode: u16 },
 }
 
+#[derive(Copy, Clone)]
 pub enum MiscOutput {
     SpvResult {
         result_type_id: Option<spv::Id>,

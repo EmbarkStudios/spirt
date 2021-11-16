@@ -1,9 +1,12 @@
 //! SPIR-T to SPIR-V lifting.
 
 use crate::spv::{self, spec};
+use crate::visit::Visitor;
+use crate::{Attr, AttrSet, Context, InternedStr, MiscInput, MiscOutput};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::rc::Rc;
 use std::{io, iter};
 
 impl spv::Dialect {
@@ -50,6 +53,86 @@ impl spv::ModuleDebugInfo {
     }
 }
 
+struct NeedsIdsCollector {
+    cx: Rc<Context>,
+    ext_inst_imports: BTreeSet<InternedStr>,
+    debug_strings: BTreeSet<InternedStr>,
+    old_outputs: BTreeSet<spv::Id>,
+}
+
+impl Visitor<'_> for NeedsIdsCollector {
+    fn visit_attr_set_use(&mut self, attrs: AttrSet) {
+        let cx = self.cx.clone();
+        self.visit_attr_set_def(&cx[attrs]);
+    }
+
+    fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
+        for sources in debug_info.source_languages.values() {
+            // The file operand of `OpSource` has to point to an `OpString`.
+            self.debug_strings
+                .extend(sources.file_contents.keys().copied());
+        }
+    }
+    fn visit_misc_output(&mut self, output: MiscOutput) {
+        match output {
+            MiscOutput::SpvResult { result_id, .. } => {
+                self.old_outputs.insert(result_id);
+            }
+        }
+    }
+    fn visit_misc_input(&mut self, input: MiscInput) {
+        match input {
+            MiscInput::SpvImm(_) | MiscInput::SpvUntrackedId(_) => {}
+            MiscInput::SpvExtInstImport(name) => {
+                self.ext_inst_imports.insert(name);
+            }
+        }
+    }
+    fn visit_attr(&mut self, attr: &Attr) {
+        match *attr {
+            Attr::SpvEntryPoint { .. } | Attr::SpvAnnotation { .. } => {}
+            Attr::SpvDebugLine { file_path, .. } => {
+                self.debug_strings.insert(file_path);
+            }
+        }
+    }
+}
+
+struct AllocatedIds {
+    ext_inst_imports: BTreeMap<InternedStr, spv::Id>,
+    debug_strings: BTreeMap<InternedStr, spv::Id>,
+    old_outputs: BTreeMap<spv::Id, spv::Id>,
+}
+
+impl NeedsIdsCollector {
+    fn alloc_ids<E>(
+        self,
+        mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
+    ) -> Result<AllocatedIds, E> {
+        let Self {
+            cx: _,
+            ext_inst_imports,
+            debug_strings,
+            old_outputs,
+        } = self;
+
+        Ok(AllocatedIds {
+            ext_inst_imports: ext_inst_imports
+                .into_iter()
+                .map(|name| Ok((name, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
+            debug_strings: debug_strings
+                .into_iter()
+                .map(|s| Ok((s, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
+            old_outputs: old_outputs
+                .into_iter()
+                .map(|old_id| Ok((old_id, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
 impl crate::Module {
     pub fn lift_to_spv_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
         self.lift_to_spv_module_emitter()?.write_to_spv_file(path)
@@ -77,69 +160,31 @@ impl crate::Module {
         };
 
         // Collect uses scattered throughout the module, that require def IDs.
-        let mut ext_inst_imports = BTreeSet::new();
-        let mut debug_strings = BTreeSet::new();
-        let globals_and_func_insts = self
-            .globals
-            .iter()
-            .map(|global| match global {
-                crate::Global::Misc(misc) => misc,
-            })
-            .chain(self.funcs.iter().flat_map(|func| &func.insts));
-        for misc in globals_and_func_insts {
-            for &input in &misc.inputs {
-                match input {
-                    crate::MiscInput::SpvImm(_) | crate::MiscInput::SpvUntrackedId(_) => {}
-                    crate::MiscInput::SpvExtInstImport(name) => {
-                        ext_inst_imports.insert(name);
-                    }
-                }
-            }
-            for attr in &cx[misc.attrs].attrs {
-                match *attr {
-                    crate::Attr::SpvEntryPoint { .. } | crate::Attr::SpvAnnotation { .. } => {}
-                    crate::Attr::SpvDebugLine { file_path, .. } => {
-                        debug_strings.insert(file_path);
-                    }
-                }
-            }
-        }
-        for sources in debug_info.source_languages.values() {
-            // The file operand of `OpSource` has to point to an `OpString`.
-            debug_strings.extend(sources.file_contents.keys().copied());
-        }
+        let mut needs_ids_collector = NeedsIdsCollector {
+            cx: cx.clone(),
+            ext_inst_imports: BTreeSet::new(),
+            debug_strings: BTreeSet::new(),
+            old_outputs: BTreeSet::new(),
+        };
+        needs_ids_collector.visit_module(self);
 
-        // FIXME(eddyb) recompute this based on the module.
-        let mut id_bound = dialect.original_id_bound;
-        let mut id_bound_overflowed = false;
-        let mut alloc_id = || {
+        // IDs can be allocated once we have the full *sorted* sets needing them.
+        let mut id_bound = NonZeroU32::new(1).unwrap();
+        let ids = needs_ids_collector.alloc_ids(|| {
             let id = id_bound;
 
             // FIXME(eddyb) use `id_bound.checked_add(1)` once that's stabilized.
             match id_bound.get().checked_add(1).and_then(NonZeroU32::new) {
-                Some(new_bound) => id_bound = new_bound,
-                None => {
-                    id_bound_overflowed = true;
+                Some(new_bound) => {
+                    id_bound = new_bound;
+                    Ok(id)
                 }
+                None => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ID bound of SPIR-V module doesn't fit in 32 bits",
+                )),
             }
-
-            id
-        };
-
-        // IDs can be allocated once we have the full *sorted* sets needing them.
-        let ext_inst_import_ids: BTreeMap<_, _> = ext_inst_imports
-            .into_iter()
-            .map(|name| (name, alloc_id()))
-            .collect();
-        let debug_string_ids: BTreeMap<_, _> =
-            debug_strings.into_iter().map(|s| (s, alloc_id())).collect();
-
-        if id_bound_overflowed {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ID bound of SPIR-V module doesn't fit in 32 bits",
-            ));
-        }
+        })?;
 
         let reserved_inst_schema = 0;
         let header = [
@@ -158,7 +203,7 @@ impl crate::Module {
         for ext_inst in dialect.extension_insts() {
             emitter.push_inst(&ext_inst)?;
         }
-        for (&name, &id) in &ext_inst_import_ids {
+        for (&name, &id) in &ids.ext_inst_imports {
             emitter.push_inst(&spv::Inst {
                 opcode: wk.OpExtInstImport,
                 result_type_id: None,
@@ -187,8 +232,8 @@ impl crate::Module {
         let mut debug_name_insts = vec![];
         let mut decoration_insts = vec![];
 
-        let mut push_attr = |target_id, attr: &crate::Attr| match attr {
-            crate::Attr::SpvEntryPoint {
+        let mut push_attr = |target_id, attr: &Attr| match attr {
+            Attr::SpvEntryPoint {
                 params,
                 interface_ids,
             } => {
@@ -205,12 +250,12 @@ impl crate::Module {
                     .chain(
                         interface_ids
                             .iter()
-                            .map(|&id| spv::Operand::Id(wk.IdRef, id)),
+                            .map(|&old_id| spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])),
                     )
                     .collect(),
                 });
             }
-            crate::Attr::SpvAnnotation { opcode, params } => {
+            Attr::SpvAnnotation { opcode, params } => {
                 let inst = spv::Inst {
                     opcode: *opcode,
                     result_type_id: None,
@@ -228,7 +273,7 @@ impl crate::Module {
                     decoration_insts.push(inst);
                 }
             }
-            crate::Attr::SpvDebugLine { .. } => unreachable!(),
+            Attr::SpvDebugLine { .. } => unreachable!(),
         };
         let globals_and_func_insts = self
             .globals
@@ -239,12 +284,15 @@ impl crate::Module {
             .chain(self.funcs.iter().flat_map(|func| &func.insts));
         for misc in globals_and_func_insts {
             for attr in cx[misc.attrs].attrs.iter() {
-                if let crate::Attr::SpvDebugLine { .. } = attr {
+                if let Attr::SpvDebugLine { .. } = attr {
                     continue;
                 }
 
                 let target_id = match misc.output {
-                    Some(crate::MiscOutput::SpvResult { result_id, .. }) => result_id,
+                    Some(MiscOutput::SpvResult {
+                        result_id: old_result_id,
+                        ..
+                    }) => ids.old_outputs[&old_result_id],
                     None => unreachable!(
                         "FIXME: it shouldn't be possible to attach \
                          attributes to instructions without an output"
@@ -262,7 +310,7 @@ impl crate::Module {
             emitter.push_inst(&execution_mode_inst)?;
         }
 
-        for (&s, &id) in &debug_string_ids {
+        for (&s, &id) in &ids.debug_strings {
             emitter.push_inst(&spv::Inst {
                 opcode: wk.OpString,
                 result_type_id: None,
@@ -305,7 +353,7 @@ impl crate::Module {
                         result_type_id: None,
                         result_id: None,
                         operands: lang_operands()
-                            .chain([spv::Operand::Id(wk.IdRef, debug_string_ids[file])])
+                            .chain([spv::Operand::Id(wk.IdRef, ids.debug_strings[file])])
                             .chain(spv::encode_literal_string(contents_initial))
                             .collect(),
                     })?;
@@ -353,20 +401,31 @@ impl crate::Module {
                 opcode: match misc.kind {
                     crate::MiscKind::SpvInst { opcode } => opcode,
                 },
-                result_type_id: misc.output.as_ref().and_then(|output| match *output {
-                    crate::MiscOutput::SpvResult { result_type_id, .. } => result_type_id,
-                }),
-                result_id: misc.output.as_ref().map(|output| match *output {
-                    crate::MiscOutput::SpvResult { result_id, .. } => result_id,
+                result_type_id: misc
+                    .output
+                    .as_ref()
+                    .and_then(|old_output| match *old_output {
+                        MiscOutput::SpvResult {
+                            result_type_id: old_result_type_id,
+                            ..
+                        } => old_result_type_id.map(|old_id| ids.old_outputs[&old_id]),
+                    }),
+                result_id: misc.output.as_ref().map(|old_output| match *old_output {
+                    MiscOutput::SpvResult {
+                        result_id: old_result_id,
+                        ..
+                    } => ids.old_outputs[&old_result_id],
                 }),
                 operands: misc
                     .inputs
                     .iter()
                     .map(|input| match *input {
-                        crate::MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                        crate::MiscInput::SpvUntrackedId(id) => spv::Operand::Id(wk.IdRef, id),
-                        crate::MiscInput::SpvExtInstImport(name) => {
-                            spv::Operand::Id(wk.IdRef, ext_inst_import_ids[&name])
+                        MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                        MiscInput::SpvUntrackedId(old_id) => {
+                            spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
+                        }
+                        MiscInput::SpvExtInstImport(name) => {
+                            spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&name])
                         }
                     })
                     .collect(),
@@ -390,11 +449,11 @@ impl crate::Module {
             // FIXME(eddyb) make this less of a search and more of a
             // lookup by splitting attrs into key and value parts.
             let new_debug_line = cx[misc.attrs].attrs.iter().find_map(|attr| match *attr {
-                crate::Attr::SpvDebugLine {
+                Attr::SpvDebugLine {
                     file_path,
                     line,
                     col,
-                } => Some((debug_string_ids[&file_path], line, col)),
+                } => Some((ids.debug_strings[&file_path], line, col)),
                 _ => None,
             });
             if current_debug_line != new_debug_line {

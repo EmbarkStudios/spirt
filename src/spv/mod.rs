@@ -16,9 +16,6 @@ pub struct Dialect {
     pub version_major: u8,
     pub version_minor: u8,
 
-    // FIXME(eddyb) always recompute this from the module.
-    pub original_id_bound: NonZeroU32,
-
     pub capabilities: BTreeSet<u32>,
     pub extensions: BTreeSet<String>,
 

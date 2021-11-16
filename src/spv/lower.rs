@@ -66,6 +66,9 @@ impl crate::Module {
                 )));
             }
 
+            // FIXME(eddyb) maybe use this somehow? (e.g. check IDs against it)
+            let _ = id_bound;
+
             if reserved_inst_schema != 0 {
                 return Err(invalid(&format!(
                     "unknown instruction schema {} - only 0 is supported",
@@ -78,9 +81,6 @@ impl crate::Module {
                 crate::ModuleDialect::Spv(spv::Dialect {
                     version_major,
                     version_minor,
-
-                    original_id_bound: NonZeroU32::new(id_bound)
-                        .ok_or_else(|| invalid("ID bound 0"))?,
 
                     capabilities: BTreeSet::new(),
                     extensions: BTreeSet::new(),
