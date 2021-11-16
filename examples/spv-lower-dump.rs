@@ -1,3 +1,4 @@
+use spirt::spv::print::PrintOperand;
 use std::rc::Rc;
 
 fn main() -> std::io::Result<()> {
@@ -6,14 +7,14 @@ fn main() -> std::io::Result<()> {
             let cx = Rc::new(spirt::Context::new());
             let module = spirt::Module::lower_from_spv_file(cx.clone(), in_file)?;
 
-            let print_operands = |operands: &[_]| {
-                spirt::spv::print::OperandPrinter {
-                    operands: operands.iter(),
-                    out: std::io::stderr().lock(),
-                }
-                .all_operands()
-                .unwrap();
-            };
+            fn print_operands(operands: impl IntoIterator<Item = PrintOperand>) {
+                eprint!(
+                    "{}",
+                    spirt::spv::print::operands(operands)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
 
             let spv_spec = spirt::spv::spec::Spec::get();
             let wk = &spv_spec.well_known;
@@ -28,12 +29,11 @@ fn main() -> std::io::Result<()> {
                     if !dialect.capabilities.is_empty() {
                         eprintln!("  Capabilities:");
                         for &cap in &dialect.capabilities {
-                            // HACK(eddyb) this is one shorter because
-                            // `print_operands` always prints a space first.
-                            eprint!("   ");
-                            print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                                spirt::spv::Imm::Short(wk.Capability, cap),
-                            )]);
+                            eprint!("    ");
+                            print_operands([PrintOperand::Imm(spirt::spv::Imm::Short(
+                                wk.Capability,
+                                cap,
+                            ))]);
                             eprintln!();
                         }
                     }
@@ -45,20 +45,18 @@ fn main() -> std::io::Result<()> {
                         }
                     }
 
-                    // HACK(eddyb) this lacks a space because
-                    // `print_operands` always prints a space first.
-                    eprint!("  Addressing model:");
-                    print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                        spirt::spv::Imm::Short(wk.AddressingModel, dialect.addressing_model),
-                    )]);
+                    eprint!("  Addressing model: ");
+                    print_operands([PrintOperand::Imm(spirt::spv::Imm::Short(
+                        wk.AddressingModel,
+                        dialect.addressing_model,
+                    ))]);
                     eprintln!();
 
-                    // HACK(eddyb) this lacks a space because
-                    // `print_operands` always prints a space first.
-                    eprint!("  Memory model:");
-                    print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                        spirt::spv::Imm::Short(wk.MemoryModel, dialect.memory_model),
-                    )]);
+                    eprint!("  Memory model: ");
+                    print_operands([PrintOperand::Imm(spirt::spv::Imm::Short(
+                        wk.MemoryModel,
+                        dialect.memory_model,
+                    ))]);
                     eprintln!();
                 }
             }
@@ -77,12 +75,11 @@ fn main() -> std::io::Result<()> {
                     if !debug_info.source_languages.is_empty() {
                         eprintln!("  Source languages:");
                         for (lang, sources) in &debug_info.source_languages {
-                            // HACK(eddyb) this is one shorter because
-                            // `print_operands` always prints a space first.
-                            eprint!("   ");
-                            print_operands(&[spirt::spv::print::PrintOperand::Imm(
-                                spirt::spv::Imm::Short(wk.SourceLanguage, lang.lang),
-                            )]);
+                            eprint!("    ");
+                            print_operands([PrintOperand::Imm(spirt::spv::Imm::Short(
+                                wk.SourceLanguage,
+                                lang.lang,
+                            ))]);
                             eprintln!(" {}", lang.version);
 
                             for (&file, contents) in &sources.file_contents {
@@ -139,28 +136,18 @@ fn main() -> std::io::Result<()> {
                     }
                 };
                 eprint!("{}", name);
-
-                // FIXME(eddyb) try to make this a bit more ergonomic.
-                print_operands(
-                    &misc
-                        .inputs
-                        .iter()
-                        .map(|input| match *input {
-                            spirt::MiscInput::SpvImm(imm) => {
-                                spirt::spv::print::PrintOperand::Imm(imm)
-                            }
-                            spirt::MiscInput::SpvUntrackedId(id) => {
-                                spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
-                            }
-                            spirt::MiscInput::SpvExtInstImport(name) => {
-                                spirt::spv::print::PrintOperand::IdLike(format!(
-                                    "%(OpExtInstImport {:?})",
-                                    &cx[name]
-                                ))
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                );
+                if !misc.inputs.is_empty() {
+                    eprint!(" ");
+                }
+                print_operands(misc.inputs.iter().map(|input| match *input {
+                    spirt::MiscInput::SpvImm(imm) => PrintOperand::Imm(imm),
+                    spirt::MiscInput::SpvUntrackedId(id) => {
+                        PrintOperand::IdLike(format!("%{}", id))
+                    }
+                    spirt::MiscInput::SpvExtInstImport(name) => {
+                        PrintOperand::IdLike(format!("%(OpExtInstImport {:?})", &cx[name]))
+                    }
+                }));
                 eprintln!();
 
                 for attr in cx[misc.attrs].attrs.iter() {
@@ -170,31 +157,22 @@ fn main() -> std::io::Result<()> {
                             params,
                             interface_ids,
                         } => {
-                            eprint!("OpEntryPoint");
+                            eprint!("OpEntryPoint ");
 
-                            // FIXME(eddyb) try to make this a bit more ergonomic.
                             print_operands(
-                                &params
-                                    .iter()
-                                    .map(|&imm| spirt::spv::print::PrintOperand::Imm(imm))
-                                    .chain(interface_ids.iter().map(|&id| {
-                                        spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
-                                    }))
-                                    .collect::<Vec<_>>(),
+                                params.iter().map(|&imm| PrintOperand::Imm(imm)).chain(
+                                    interface_ids
+                                        .iter()
+                                        .map(|&id| PrintOperand::IdLike(format!("%{}", id))),
+                                ),
                             );
                             eprintln!();
                         }
                         spirt::Attr::SpvAnnotation { opcode, params } => {
                             let name = spv_spec.instructions.get_named(*opcode).unwrap().0;
-                            eprint!("{}", name);
+                            eprint!("{} ", name);
 
-                            // FIXME(eddyb) try to make this a bit more ergonomic.
-                            print_operands(
-                                &params
-                                    .iter()
-                                    .map(|&imm| spirt::spv::print::PrintOperand::Imm(imm))
-                                    .collect::<Vec<_>>(),
-                            );
+                            print_operands(params.iter().map(|&imm| PrintOperand::Imm(imm)));
                             eprintln!();
                         }
                         &spirt::Attr::SpvDebugLine {

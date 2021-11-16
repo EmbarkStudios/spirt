@@ -1,17 +1,10 @@
+use spirt::spv::print::PrintOperand;
+
 fn main() -> std::io::Result<()> {
     match &std::env::args().collect::<Vec<_>>()[..] {
         [_, in_file, out_file] => {
             let parser = spirt::spv::read::ModuleParser::read_from_spv_file(in_file)?;
             let mut emitter = spirt::spv::write::ModuleEmitter::with_header(parser.header);
-
-            let print_operands = |operands: &[_]| {
-                spirt::spv::print::OperandPrinter {
-                    operands: operands.iter(),
-                    out: std::io::stderr().lock(),
-                }
-                .all_operands()
-                .unwrap();
-            };
 
             {
                 // FIXME(eddyb) show more of the header.
@@ -38,21 +31,11 @@ fn main() -> std::io::Result<()> {
                     spv_spec.instructions.get_named(inst.opcode).unwrap().0
                 );
 
-                // FIXME(eddyb) try to make this a bit more ergonomic.
-                print_operands(
-                    &inst
-                        .operands
-                        .iter()
-                        .map(|operand| match *operand {
-                            spirt::spv::Operand::Imm(imm) => {
-                                spirt::spv::print::PrintOperand::Imm(imm)
-                            }
-                            spirt::spv::Operand::Id(_, id) => {
-                                spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                );
+                spirt::spv::print::operands(inst.operands.iter().map(|operand| match *operand {
+                    spirt::spv::Operand::Imm(imm) => PrintOperand::Imm(imm),
+                    spirt::spv::Operand::Id(_, id) => PrintOperand::IdLike(format!("%{}", id)),
+                }))
+                .for_each(|operand| eprint!(" {}", operand));
 
                 eprintln!();
 

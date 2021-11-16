@@ -2,7 +2,8 @@
 
 use crate::spv::{self, spec};
 use smallvec::SmallVec;
-use std::{io, slice, str};
+use std::fmt::Write;
+use std::{fmt, iter, mem, str};
 
 // HACK(eddyb) using a different type than `spv::Operand` for flexibility.
 pub enum PrintOperand {
@@ -13,29 +14,41 @@ pub enum PrintOperand {
 }
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
-pub struct OperandPrinter<'a, W> {
+struct OperandPrinter<I: Iterator<Item = PrintOperand>> {
     /// Input operands to print from (may be grouped e.g. into literals).
-    pub operands: slice::Iter<'a, PrintOperand>,
+    operands: iter::Peekable<I>,
 
-    /// Output sink to print into.
-    // FIXME(eddyb) printing to a string first might be better?
-    pub out: W,
+    /// Output for the current operand (drained by the `all_operands` method).
+    out: String,
 }
 
-impl<W: io::Write> OperandPrinter<'_, W> {
-    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> io::Result<()> {
-        let param_count = match enumerant.rest_params {
-            None => enumerant.req_params.len(),
-            Some(_) => self.operands.len(),
+impl<I: Iterator<Item = PrintOperand>> OperandPrinter<I> {
+    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> fmt::Result {
+        struct Unlimited;
+        let mut remaining_params = match enumerant.rest_params {
+            None => Ok(enumerant.req_params.len()),
+            Some(_) => Err(Unlimited),
         };
 
-        if param_count != 0 {
+        let exhausted_params = match remaining_params {
+            Ok(count) => count == 0,
+            Err(Unlimited) => self.operands.peek().is_none(),
+        };
+        if !exhausted_params {
             write!(self.out, "(")?;
-            for i in 0..param_count {
-                if i > 0 {
-                    write!(self.out, ", ")?;
-                }
+            loop {
                 self.operand()?;
+                let exhausted_params = match &mut remaining_params {
+                    Ok(count) => {
+                        *count -= 1;
+                        *count == 0
+                    }
+                    Err(Unlimited) => self.operands.peek().is_none(),
+                };
+                if exhausted_params {
+                    break;
+                }
+                write!(self.out, ", ")?;
             }
             write!(self.out, ")")?;
         }
@@ -43,12 +56,12 @@ impl<W: io::Write> OperandPrinter<'_, W> {
         Ok(())
     }
 
-    fn literal(&mut self, kind: spec::OperandKind, first_word: u32) -> io::Result<()> {
+    fn literal(&mut self, kind: spec::OperandKind, first_word: u32) -> fmt::Result {
         // HACK(eddyb) easier to buffer these than to deal with iterators.
         let mut words = SmallVec::<[u32; 16]>::new();
         words.push(first_word);
         while let Some(&PrintOperand::Imm(spv::Imm::LongCont(cont_kind, word))) =
-            self.operands.clone().next()
+            self.operands.peek()
         {
             self.operands.next();
             assert!(kind == cont_kind);
@@ -83,9 +96,9 @@ impl<W: io::Write> OperandPrinter<'_, W> {
         write!(self.out, ")")
     }
 
-    fn operand(&mut self) -> io::Result<()> {
+    fn operand(&mut self) -> fmt::Result {
         let operand = self.operands.next().unwrap();
-        match *operand {
+        match operand {
             PrintOperand::Imm(spv::Imm::Short(kind, word)) => {
                 let (name, def) = kind.name_and_def();
                 match def {
@@ -121,17 +134,34 @@ impl<W: io::Write> OperandPrinter<'_, W> {
             }
             PrintOperand::Imm(spv::Imm::LongStart(kind, word)) => self.literal(kind, word),
             PrintOperand::Imm(spv::Imm::LongCont(..)) => unreachable!(),
-            PrintOperand::IdLike(ref s) => write!(self.out, "{}", s),
+            PrintOperand::IdLike(s) => {
+                if self.out.is_empty() {
+                    self.out = s;
+                } else {
+                    self.out.push_str(&s);
+                }
+                Ok(())
+            }
         }
     }
 
-    pub fn all_operands(mut self) -> io::Result<()> {
-        // FIXME(eddyb) use `!self.operands.is_empty()` when that is stabilized.
-        while self.operands.len() != 0 {
-            // FIXME(eddyb) maybe don't print this at the very start?
-            write!(self.out, " ")?;
-            self.operand()?;
-        }
-        Ok(())
+    fn all_operands(mut self) -> impl Iterator<Item = String> {
+        iter::from_fn(move || {
+            if self.operands.peek().is_none() {
+                return None;
+            }
+            self.operand().unwrap();
+            Some(mem::take(&mut self.out))
+        })
     }
+}
+
+/// Group `operands` into logical operands (i.e. long immediates are unflattened)
+/// and produce one output `String` for each of them.
+pub fn operands(operands: impl IntoIterator<Item = PrintOperand>) -> impl Iterator<Item = String> {
+    OperandPrinter {
+        operands: operands.into_iter().peekable(),
+        out: String::new(),
+    }
+    .all_operands()
 }

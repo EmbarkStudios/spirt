@@ -1,3 +1,4 @@
+use spirt::spv::print::PrintOperand;
 use std::rc::Rc;
 
 fn main() -> std::io::Result<()> {
@@ -12,14 +13,6 @@ fn main() -> std::io::Result<()> {
 
             // FIXME(eddyb) deduplicate the rest of this function between this
             // example and `spv-read-write-roundtrip`.
-            let print_operands = |operands: &[_]| {
-                spirt::spv::print::OperandPrinter {
-                    operands: operands.iter(),
-                    out: std::io::stderr().lock(),
-                }
-                .all_operands()
-                .unwrap();
-            };
 
             {
                 // FIXME(eddyb) show more of the header.
@@ -46,21 +39,11 @@ fn main() -> std::io::Result<()> {
                     spv_spec.instructions.get_named(inst.opcode).unwrap().0
                 );
 
-                // FIXME(eddyb) try to make this a bit more ergonomic.
-                print_operands(
-                    &inst
-                        .operands
-                        .iter()
-                        .map(|operand| match *operand {
-                            spirt::spv::Operand::Imm(imm) => {
-                                spirt::spv::print::PrintOperand::Imm(imm)
-                            }
-                            spirt::spv::Operand::Id(_, id) => {
-                                spirt::spv::print::PrintOperand::IdLike(format!("%{}", id))
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                );
+                spirt::spv::print::operands(inst.operands.iter().map(|operand| match *operand {
+                    spirt::spv::Operand::Imm(imm) => PrintOperand::Imm(imm),
+                    spirt::spv::Operand::Id(_, id) => PrintOperand::IdLike(format!("%{}", id)),
+                }))
+                .for_each(|operand| eprint!(" {}", operand));
 
                 eprintln!();
             }
