@@ -54,6 +54,20 @@ pub trait InnerVisit {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>);
 }
 
+/// Dynamic dispatch version of `InnerVisit`.
+///
+/// `dyn DynInnerVisit<'a, V>` is possible, unlike `dyn InnerVisit`, because of
+/// the `trait`-level type parameter `V`, which replaces the method parameter.
+pub trait DynInnerVisit<'a, V> {
+    fn dyn_inner_visit_with(&'a self, visitor: &mut V);
+}
+
+impl<'a, T: InnerVisit, V: Visitor<'a>> DynInnerVisit<'a, V> for T {
+    fn dyn_inner_visit_with(&'a self, visitor: &mut V) {
+        self.inner_visit_with(visitor);
+    }
+}
+
 // FIXME(eddyb) should the impls be here, or next to definitions? (maybe derived?)
 impl InnerVisit for Module {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {

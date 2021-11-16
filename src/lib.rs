@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 mod context;
 pub use context::{AttrSet, Context, InternedStr};
 
+pub mod print;
 pub mod visit;
 
 pub mod spv;
@@ -42,10 +43,14 @@ mod sealed {
             }
         }
 
-        // FIXME(eddyb) `-> &Rc<Context>` might be better in situations where
+        // FIXME(eddyb) `cx_ref` might be the better default in situations where
         // the module doesn't need to be modified, figure out if that's common.
         pub fn cx(&self) -> Rc<Context> {
             self.cx.clone()
+        }
+
+        pub fn cx_ref(&self) -> &Rc<Context> {
+            &self.cx
         }
     }
 }

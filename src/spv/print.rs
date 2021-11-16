@@ -71,7 +71,12 @@ impl<I: Iterator<Item = PrintOperand>> OperandPrinter<I> {
         let (name, def) = kind.name_and_def();
         assert!(matches!(def, spec::OperandKindDef::Literal { .. }));
 
-        write!(self.out, "{}(", name)?;
+        // FIXME(eddyb) decide when it's useful to show the kind of literal.
+        let explicit_kind = false;
+
+        if explicit_kind {
+            write!(self.out, "{}(", name)?;
+        }
 
         if kind == spec::Spec::get().well_known.LiteralString {
             // FIXME(eddyb) deduplicate with `spv::extract_literal_string`.
@@ -93,7 +98,11 @@ impl<I: Iterator<Item = PrintOperand>> OperandPrinter<I> {
             }
         }
 
-        write!(self.out, ")")
+        if explicit_kind {
+            write!(self.out, ")")?;
+        }
+
+        Ok(())
     }
 
     fn operand(&mut self) -> fmt::Result {
@@ -156,8 +165,19 @@ impl<I: Iterator<Item = PrintOperand>> OperandPrinter<I> {
     }
 }
 
+/// Print a single SPIR-V (short) immediate (e.g. an enumerand).
+pub fn imm(kind: spec::OperandKind, word: u32) -> String {
+    let mut printer = OperandPrinter {
+        operands: iter::once(PrintOperand::Imm(spv::Imm::Short(kind, word))).peekable(),
+        out: String::new(),
+    };
+    printer.operand().unwrap();
+    assert!(printer.operands.next().is_none());
+    printer.out
+}
+
 /// Group `operands` into logical operands (i.e. long immediates are unflattened)
-/// and produce one output `String` for each of them.
+/// and produce one output `String` by printing each of them.
 pub fn operands(operands: impl IntoIterator<Item = PrintOperand>) -> impl Iterator<Item = String> {
     OperandPrinter {
         operands: operands.into_iter().peekable(),
