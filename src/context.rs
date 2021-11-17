@@ -87,7 +87,9 @@ macro_rules! interners {
         }
 
         $(
-            #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+            // NOTE(eddyb) never derive `PartialOrd, Ord` for these types, as
+            // observing the interning order shouldn't be allowed.
+            #[derive(Copy, Clone, PartialEq, Eq, Hash)]
             pub struct $name(u32);
 
             impl std::ops::Index<$name> for Context {

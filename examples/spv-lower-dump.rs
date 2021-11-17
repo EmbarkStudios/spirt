@@ -189,7 +189,7 @@ fn main() -> std::io::Result<()> {
 
                             // HACK(eddyb) only use skip string quoting
                             // and escaping for well-behaved file paths.
-                            let file_path = &cx[file_path];
+                            let file_path = &cx[file_path.0];
                             if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
                                 eprintln!("at {}:{}:{}", file_path, line, col);
                             } else {

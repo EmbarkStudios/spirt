@@ -196,7 +196,7 @@ impl crate::Module {
             if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
                 attr_set.attrs.insert(crate::Attr::SpvDebugLine {
-                    file_path,
+                    file_path: crate::OrdAssertEq(file_path),
                     line,
                     col,
                 });

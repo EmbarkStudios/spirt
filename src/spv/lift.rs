@@ -2,11 +2,11 @@
 
 use crate::spv::{self, spec};
 use crate::visit::Visitor;
-use crate::{Attr, AttrSet, Context, InternedStr, MiscInput, MiscOutput};
+use crate::{Attr, AttrSet, Context, MiscInput, MiscOutput};
+use indexmap::{IndexMap, IndexSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::rc::Rc;
 use std::{io, iter};
 
 impl spv::Dialect {
@@ -53,24 +53,23 @@ impl spv::ModuleDebugInfo {
     }
 }
 
-struct NeedsIdsCollector {
-    cx: Rc<Context>,
-    ext_inst_imports: BTreeSet<InternedStr>,
-    debug_strings: BTreeSet<InternedStr>,
-    old_outputs: BTreeSet<spv::Id>,
+struct NeedsIdsCollector<'a> {
+    cx: &'a Context,
+    ext_inst_imports: BTreeSet<&'a str>,
+    debug_strings: BTreeSet<&'a str>,
+    old_outputs: IndexSet<spv::Id>,
 }
 
-impl Visitor<'_> for NeedsIdsCollector {
+impl Visitor<'_> for NeedsIdsCollector<'_> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
-        let cx = self.cx.clone();
-        self.visit_attr_set_def(&cx[attrs]);
+        self.visit_attr_set_def(&self.cx[attrs]);
     }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
         for sources in debug_info.source_languages.values() {
             // The file operand of `OpSource` has to point to an `OpString`.
             self.debug_strings
-                .extend(sources.file_contents.keys().copied());
+                .extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
         }
     }
     fn visit_misc_output(&mut self, output: MiscOutput) {
@@ -84,7 +83,7 @@ impl Visitor<'_> for NeedsIdsCollector {
         match input {
             MiscInput::SpvImm(_) | MiscInput::SpvUntrackedId(_) => {}
             MiscInput::SpvExtInstImport(name) => {
-                self.ext_inst_imports.insert(name);
+                self.ext_inst_imports.insert(&self.cx[name]);
             }
         }
     }
@@ -92,23 +91,23 @@ impl Visitor<'_> for NeedsIdsCollector {
         match *attr {
             Attr::SpvEntryPoint { .. } | Attr::SpvAnnotation { .. } => {}
             Attr::SpvDebugLine { file_path, .. } => {
-                self.debug_strings.insert(file_path);
+                self.debug_strings.insert(&self.cx[file_path.0]);
             }
         }
     }
 }
 
-struct AllocatedIds {
-    ext_inst_imports: BTreeMap<InternedStr, spv::Id>,
-    debug_strings: BTreeMap<InternedStr, spv::Id>,
-    old_outputs: BTreeMap<spv::Id, spv::Id>,
+struct AllocatedIds<'a> {
+    ext_inst_imports: BTreeMap<&'a str, spv::Id>,
+    debug_strings: BTreeMap<&'a str, spv::Id>,
+    old_outputs: IndexMap<spv::Id, spv::Id>,
 }
 
-impl NeedsIdsCollector {
+impl<'a> NeedsIdsCollector<'a> {
     fn alloc_ids<E>(
         self,
         mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
-    ) -> Result<AllocatedIds, E> {
+    ) -> Result<AllocatedIds<'a>, E> {
         let Self {
             cx: _,
             ext_inst_imports,
@@ -161,14 +160,15 @@ impl crate::Module {
 
         // Collect uses scattered throughout the module, that require def IDs.
         let mut needs_ids_collector = NeedsIdsCollector {
-            cx: cx.clone(),
+            cx: &cx,
             ext_inst_imports: BTreeSet::new(),
             debug_strings: BTreeSet::new(),
-            old_outputs: BTreeSet::new(),
+            old_outputs: IndexSet::new(),
         };
         needs_ids_collector.visit_module(self);
 
-        // IDs can be allocated once we have the full *sorted* sets needing them.
+        // IDs can be allocated once we have the full sets needing them, whether
+        // sorted by contents, or ordered by the first occurence in the module.
         let mut id_bound = NonZeroU32::new(1).unwrap();
         let ids = needs_ids_collector.alloc_ids(|| {
             let id = id_bound;
@@ -208,7 +208,7 @@ impl crate::Module {
                 opcode: wk.OpExtInstImport,
                 result_type_id: None,
                 result_id: Some(id),
-                operands: spv::encode_literal_string(&cx[name]).collect(),
+                operands: spv::encode_literal_string(name).collect(),
             })?;
         }
         emitter.push_inst(&spv::Inst {
@@ -315,7 +315,7 @@ impl crate::Module {
                 opcode: wk.OpString,
                 result_type_id: None,
                 result_id: Some(id),
-                operands: spv::encode_literal_string(&cx[s]).collect(),
+                operands: spv::encode_literal_string(s).collect(),
             })?;
         }
         for (lang, sources) in &debug_info.source_languages {
@@ -334,7 +334,7 @@ impl crate::Module {
                     operands: lang_operands().collect(),
                 })?;
             } else {
-                for (file, contents) in &sources.file_contents {
+                for (&file, contents) in &sources.file_contents {
                     // The maximum word count is `2**16 - 1`, the first word is
                     // taken up by the opcode & word count, and one extra byte is
                     // taken up by the nil byte at the end of the LiteralString.
@@ -353,7 +353,7 @@ impl crate::Module {
                         result_type_id: None,
                         result_id: None,
                         operands: lang_operands()
-                            .chain([spv::Operand::Id(wk.IdRef, ids.debug_strings[file])])
+                            .chain([spv::Operand::Id(wk.IdRef, ids.debug_strings[&cx[file]])])
                             .chain(spv::encode_literal_string(contents_initial))
                             .collect(),
                     })?;
@@ -425,7 +425,7 @@ impl crate::Module {
                             spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
                         }
                         MiscInput::SpvExtInstImport(name) => {
-                            spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&name])
+                            spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
                         }
                     })
                     .collect(),
@@ -453,7 +453,7 @@ impl crate::Module {
                     file_path,
                     line,
                     col,
-                } => Some((ids.debug_strings[&file_path], line, col)),
+                } => Some((ids.debug_strings[&cx[file_path.0]], line, col)),
                 _ => None,
             });
             if current_debug_line != new_debug_line {

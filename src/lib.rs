@@ -135,8 +135,31 @@ pub enum Attr {
     },
 
     SpvDebugLine {
-        file_path: InternedStr,
+        file_path: OrdAssertEq<InternedStr>,
         line: u32,
         col: u32,
     },
+}
+
+// HACK(eddyb) wrapper to limit `Ord` for interned index types (e.g. `InternedStr`)
+// to only situations where the interned index reflects contents (i.e. equality).
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct OrdAssertEq<T>(pub T);
+
+impl<T: Eq> PartialOrd for OrdAssertEq<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: Eq> Ord for OrdAssertEq<T> {
+    #[track_caller]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        assert!(
+            self == other,
+            "OrdAssertEq<{}>::cmp called with unequal values",
+            std::any::type_name::<T>(),
+        );
+        std::cmp::Ordering::Equal
+    }
 }

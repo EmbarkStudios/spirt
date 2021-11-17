@@ -1,4 +1,5 @@
 use crate::InternedStr;
+use indexmap::IndexMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
@@ -39,7 +40,7 @@ pub struct DebugSourceLang {
 
 #[derive(Default)]
 pub struct DebugSources {
-    pub file_contents: BTreeMap<InternedStr, String>,
+    pub file_contents: IndexMap<InternedStr, String>,
 }
 
 pub struct Inst {
