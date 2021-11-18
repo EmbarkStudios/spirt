@@ -44,7 +44,7 @@ pub struct DebugSources {
 }
 
 pub struct Inst {
-    pub opcode: u16,
+    pub opcode: spec::Opcode,
 
     // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
     pub result_type_id: Option<Id>,

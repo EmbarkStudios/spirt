@@ -24,7 +24,7 @@ impl ModuleEmitter {
             + (inst.result_type_id.is_some() as usize)
             + (inst.result_id.is_some() as usize)
             + inst.operands.len();
-        let opcode = u32::from(inst.opcode)
+        let opcode = u32::from(inst.opcode.as_u16())
             | u32::from(u16::try_from(total_word_count).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,

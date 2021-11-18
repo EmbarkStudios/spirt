@@ -130,12 +130,7 @@ fn main() -> std::io::Result<()> {
                     }
                 }
 
-                let name = match misc.kind {
-                    spirt::MiscKind::SpvInst { opcode } => {
-                        spv_spec.instructions.get_named(opcode).unwrap().0
-                    }
-                };
-                eprint!("{}", name);
+                eprint!("{}", misc.kind.name());
                 if !misc.inputs.is_empty() {
                     eprint!(" ");
                 }
@@ -169,8 +164,7 @@ fn main() -> std::io::Result<()> {
                             eprintln!();
                         }
                         spirt::Attr::SpvAnnotation { opcode, params } => {
-                            let name = spv_spec.instructions.get_named(*opcode).unwrap().0;
-                            eprint!("{} ", name);
+                            eprint!("{} ", opcode.name());
 
                             print_operands(params.iter().map(|&imm| PrintOperand::Imm(imm)));
                             eprintln!();

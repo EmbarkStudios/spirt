@@ -10,40 +10,12 @@ pub const HEADER_LEN: usize = 5;
 pub struct Spec {
     pub magic: u32,
 
-    pub instructions: indexed::NamedIdxMap<u16, InstructionDef, indexed::KhrSegmented>,
-
     /// Pre-cached IDs for "well-known" names.
     pub well_known: WellKnown,
 
+    pub instructions: indexed::NamedIdxMap<Opcode, InstructionDef, indexed::KhrSegmented>,
+
     pub operand_kinds: indexed::NamedIdxMap<OperandKind, OperandKindDef, indexed::Flat>,
-}
-
-#[derive(PartialEq, Eq)]
-pub struct InstructionDef {
-    pub category: InstructionCategory,
-
-    // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
-    pub has_result_type_id: bool,
-    pub has_result_id: bool,
-
-    pub req_operands: ArrayVec<OperandKind, 16>,
-    pub opt_operands: ArrayVec<OperandKind, 2>,
-    pub rest_operands: Option<RestOperandsUnit>,
-}
-
-#[derive(PartialEq, Eq)]
-pub enum InstructionCategory {
-    Type,
-    Const,
-    Other,
-}
-
-/// Whether the trailing `*` "operand" (i.e. repeated arbitrarily many times),
-/// consists of just one operand, or two per repeat (used by e.g. `OpPhi`).
-#[derive(PartialEq, Eq)]
-pub enum RestOperandsUnit {
-    One(OperandKind),
-    Two([OperandKind; 2]),
 }
 
 macro_rules! def_well_known {
@@ -69,8 +41,9 @@ macro_rules! def_well_known {
     };
 }
 
+// FIXME(eddyb) maybe sort some of these groups alphabetically.
 def_well_known! {
-    opcode: u16 = [
+    opcode: Opcode = [
         OpCapability,
         OpExtension,
         OpExtInstImport,
@@ -128,6 +101,77 @@ def_well_known! {
     storage_class: u32 = [
         Function,
     ],
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Opcode(u16);
+
+impl indexed::FlatIdx for Opcode {
+    fn to_usize(self) -> usize {
+        self.0.into()
+    }
+}
+
+impl Opcode {
+    /// Lookup the name & definition for `opcode` in the lazily-loaded `Spec`,
+    /// returning `None` if it's not a known opcode.
+    pub fn try_from_u16_with_name_and_def(
+        opcode: u16,
+    ) -> Option<(Self, &'static str, &'static InstructionDef)> {
+        let opcode = Self(opcode);
+        let (name, def) = Spec::get().instructions.get_named(opcode)?;
+        Some((opcode, name, def))
+    }
+
+    pub fn as_u16(self) -> u16 {
+        self.0
+    }
+
+    /// Lookup the name & definition for this opcode in the lazily-loaded `Spec`.
+    #[inline]
+    pub fn name_and_def(self) -> (&'static str, &'static InstructionDef) {
+        Spec::get().instructions.get_named(self).unwrap()
+    }
+
+    /// Lookup the name for this opcode in the lazily-loaded `Spec`.
+    #[inline]
+    pub fn name(self) -> &'static str {
+        self.name_and_def().0
+    }
+
+    /// Lookup the definition for this opcode in the lazily-loaded `Spec`.
+    #[inline]
+    pub fn def(self) -> &'static InstructionDef {
+        self.name_and_def().1
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub struct InstructionDef {
+    pub category: InstructionCategory,
+
+    // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
+    pub has_result_type_id: bool,
+    pub has_result_id: bool,
+
+    pub req_operands: ArrayVec<OperandKind, 16>,
+    pub opt_operands: ArrayVec<OperandKind, 2>,
+    pub rest_operands: Option<RestOperandsUnit>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum InstructionCategory {
+    Type,
+    Const,
+    Other,
+}
+
+/// Whether the trailing `*` "operand" (i.e. repeated arbitrarily many times),
+/// consists of just one operand, or two per repeat (used by e.g. `OpPhi`).
+#[derive(PartialEq, Eq)]
+pub enum RestOperandsUnit {
+    One(OperandKind),
+    Two([OperandKind; 2]),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -569,7 +613,7 @@ impl Spec {
             idx_by_name: raw_core_grammar
                 .instructions
                 .iter()
-                .map(|inst| (inst.opname, inst.opcode))
+                .map(|inst| (inst.opname, Opcode(inst.opcode)))
                 .collect(),
             storage: instructions,
         };
@@ -772,6 +816,12 @@ pub mod indexed {
         fn to_usize(self) -> usize;
     }
 
+    impl FlatIdx for u16 {
+        fn to_usize(self) -> usize {
+            self.into()
+        }
+    }
+
     /// Flat array (`Vec`) storage, likely used with compact indices.
     pub enum Flat {}
 
@@ -921,10 +971,11 @@ pub mod indexed {
         }
     }
 
-    impl<T> StorageShape<u16, T> for KhrSegmented {
+    impl<I: FlatIdx, T> StorageShape<I, T> for KhrSegmented {
         type Storage = KhrSegmentedVec<T>;
-        fn get_by_idx(storage: &Self::Storage, idx: u16) -> Option<&T> {
-            let (seg_range, intra_seg_idx) = storage.idx_to_segmented(idx)?;
+        fn get_by_idx(storage: &Self::Storage, idx: I) -> Option<&T> {
+            let (seg_range, intra_seg_idx) =
+                storage.idx_to_segmented(idx.to_usize().try_into().ok()?)?;
 
             storage
                 .flattened

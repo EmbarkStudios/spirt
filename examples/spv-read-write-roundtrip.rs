@@ -12,7 +12,6 @@ fn main() -> std::io::Result<()> {
                 eprintln!("SPIR-V {}.{} module:", v >> 16, (v >> 8) & 0xff);
             }
 
-            let spv_spec = spirt::spv::spec::Spec::get();
             for inst in parser {
                 let inst = inst.unwrap();
 
@@ -26,11 +25,7 @@ fn main() -> std::io::Result<()> {
                     eprint!(" = ");
                 }
 
-                eprint!(
-                    "{}",
-                    spv_spec.instructions.get_named(inst.opcode).unwrap().0
-                );
-
+                eprint!("{}", inst.opcode.name());
                 spirt::spv::print::operands(inst.operands.iter().map(|operand| match *operand {
                     spirt::spv::Operand::Imm(imm) => PrintOperand::Imm(imm),
                     spirt::spv::Operand::Id(_, id) => PrintOperand::IdLike(format!("%{}", id)),

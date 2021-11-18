@@ -81,7 +81,15 @@ pub struct Misc {
 }
 
 pub enum MiscKind {
-    SpvInst { opcode: u16 },
+    SpvInst(spv::spec::Opcode),
+}
+
+impl MiscKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SpvInst(opcode) => opcode.name(),
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -128,7 +136,7 @@ pub enum Attr {
 
     SpvAnnotation {
         // FIXME(eddyb) determine this based on the annotation.
-        opcode: u16,
+        opcode: spv::spec::Opcode,
         // FIXME(eddyb) this cannot represent IDs - is that desirable?
         // (for now we don't support `Op{ExecutionMode,Decorate}Id`)
         params: SmallVec<[spv::Imm; 2]>,

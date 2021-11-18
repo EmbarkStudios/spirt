@@ -399,7 +399,7 @@ impl crate::Module {
         for misc in globals_and_func_insts {
             let inst = spv::Inst {
                 opcode: match misc.kind {
-                    crate::MiscKind::SpvInst { opcode } => opcode,
+                    crate::MiscKind::SpvInst(opcode) => opcode,
                 },
                 result_type_id: misc
                     .output

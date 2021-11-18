@@ -131,10 +131,7 @@ impl crate::Module {
         while let Some(inst) = spv_insts.next().transpose()? {
             let opcode = inst.opcode;
 
-            let invalid = |msg: &str| {
-                let inst_name = spv_spec.instructions.get_named(opcode).unwrap().0;
-                invalid(&format!("in {}: {}", inst_name, msg))
-            };
+            let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
 
             // Handle line debuginfo early, as it doesn't have its own section,
             // but rather can go almost anywhere among globals and functions.
@@ -475,9 +472,7 @@ impl crate::Module {
                 // FIXME(eddyb) pull out this information from the first entry
                 // in the `insts` field, into new fields of `Func`.
                 let func_inst = crate::Misc {
-                    kind: crate::MiscKind::SpvInst {
-                        opcode: inst.opcode,
-                    },
+                    kind: crate::MiscKind::SpvInst(inst.opcode),
                     output: Some(crate::MiscOutput::SpvResult {
                         result_type_id: Some(func_ret_type_id),
                         result_id: func_id,
@@ -506,9 +501,7 @@ impl crate::Module {
 
                 // FIXME(eddyb) don't keep this instruction explicitly.
                 func.insts.push(crate::Misc {
-                    kind: crate::MiscKind::SpvInst {
-                        opcode: inst.opcode,
-                    },
+                    kind: crate::MiscKind::SpvInst(inst.opcode),
                     output: None,
                     inputs: [].into_iter().collect(),
                     attrs: crate::AttrSet::default(),
@@ -519,9 +512,7 @@ impl crate::Module {
                 Seq::Functions
             } else {
                 let misc = crate::Misc {
-                    kind: crate::MiscKind::SpvInst {
-                        opcode: inst.opcode,
-                    },
+                    kind: crate::MiscKind::SpvInst(inst.opcode),
                     output: inst
                         .result_id
                         .map(|result_id| crate::MiscOutput::SpvResult {

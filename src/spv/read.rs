@@ -16,7 +16,7 @@ enum KnownIdDef {
     TypeInt(NonZeroU32),
     TypeFloat(NonZeroU32),
     Uncategorized {
-        opcode: u16,
+        opcode: spec::Opcode,
         result_type_id: Option<spv::Id>,
     },
 }
@@ -63,7 +63,7 @@ enum InstParseError {
 
     /// The type of a `LiteralContextDependentNumber` was not a supported type
     /// (one of either `OpTypeInt` or `OpTypeFloat`).
-    UnsupportedContextSensitiveLiteralType { type_opcode: u16 },
+    UnsupportedContextSensitiveLiteralType { type_opcode: spec::Opcode },
 }
 
 impl InstParseError {
@@ -94,15 +94,9 @@ impl InstParseError {
                 format!("ID %{} used as result type before definition", id).into()
             }
             Self::MissingContextSensitiveLiteralType => "missing type for literal".into(),
-            Self::UnsupportedContextSensitiveLiteralType { type_opcode } => format!(
-                "{} is not a supported literal type",
-                spec::Spec::get()
-                    .instructions
-                    .get_named(type_opcode)
-                    .unwrap()
-                    .0
-            )
-            .into(),
+            Self::UnsupportedContextSensitiveLiteralType { type_opcode } => {
+                format!("{} is not a supported literal type", type_opcode.name()).into()
+            }
         }
     }
 }
@@ -372,8 +366,8 @@ impl Iterator for ModuleParser {
 
         let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
-        let (inst_name, def) = match spv_spec.instructions.get_named(opcode) {
-            Some((name, def)) => (name, def),
+        let (opcode, inst_name, def) = match spec::Opcode::try_from_u16_with_name_and_def(opcode) {
+            Some(opcode_name_and_def) => opcode_name_and_def,
             None => return Some(Err(invalid(&format!("unsupported opcode {}", opcode)))),
         };
 
