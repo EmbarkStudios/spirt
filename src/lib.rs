@@ -2,7 +2,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
-pub use context::{AttrSet, Context, InternedStr};
+pub use context::{AttrSet, Const, Context, InternedStr, Type};
 
 pub mod print;
 pub mod visit;
@@ -64,6 +64,84 @@ pub enum ModuleDebugInfo {
     Spv(spv::ModuleDebugInfo),
 }
 
+// FIXME(eddyb) maybe special-case some basic types like integers.
+#[derive(PartialEq, Eq, Hash)]
+pub struct TypeDef {
+    pub ctor: TypeCtor,
+    pub ctor_args: SmallVec<[TypeCtorArg; 2]>,
+    pub attrs: AttrSet,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub enum TypeCtor {
+    SpvInst(spv::spec::Opcode),
+}
+
+impl TypeCtor {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SpvInst(opcode) => opcode.name(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum TypeCtorArg {
+    Type(Type),
+    Const(Const),
+
+    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investingating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    SpvImm(spv::Imm),
+}
+
+// FIXME(eddyb) maybe special-case some basic consts like integer literals.
+#[derive(PartialEq, Eq, Hash)]
+pub struct ConstDef {
+    pub ty: Type,
+    pub ctor: ConstCtor,
+    pub ctor_args: SmallVec<[ConstCtorArg; 2]>,
+    pub attrs: AttrSet,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub enum ConstCtor {
+    SpvInst(spv::spec::Opcode),
+}
+
+impl ConstCtor {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SpvInst(opcode) => opcode.name(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ConstCtorArg {
+    Const(Const),
+
+    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investingating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    SpvImm(spv::Imm),
+
+    // FIXME(eddyb) this is really bad because it's interned and shouldn't have
+    // an ID, but it's hard to determine ahead of time whether an `OpVariable`
+    // can plausibly be considered "constant data", instead of having an identity,
+    // and even then, there may be an usecase for pointers to mutable global vars
+    // in constants. Probably the only way to make it work in the most general
+    // case is to make it point to a `Module` global variable, by either:
+    // * having different "link-time constants" that are kept in `Module` instead
+    // * introducing a notion of "generics", with the real variable pointer being
+    //   "passed in" into the "generic" constant as a "generic parameter"
+    // FIXME(eddyb) consider introducing a "deferred error" system, where the
+    // producer (or `spv::lower`) can keep around errors in the SPIR-T IR, and
+    // still have the opportunity of silencing them e.g. by removing dead code.
+    SpvUntrackedGlobalVarId(spv::Id),
+}
+
 pub enum Global {
     Misc(Misc),
 }
@@ -100,13 +178,16 @@ impl MiscKind {
 #[derive(Copy, Clone)]
 pub enum MiscOutput {
     SpvResult {
-        result_type_id: Option<spv::Id>,
+        result_type: Option<Type>,
         result_id: spv::Id,
     },
 }
 
 #[derive(Copy, Clone)]
 pub enum MiscInput {
+    Type(Type),
+    Const(Const),
+
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investingating the performance implications
     // of interning "long immediates", compared to the flattened representation.

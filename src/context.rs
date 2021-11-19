@@ -1,4 +1,3 @@
-use crate::AttrSetDef;
 use elsa::FrozenIndexSet;
 use std::convert::TryInto;
 use std::hash::Hash;
@@ -90,7 +89,11 @@ macro_rules! interners {
             // NOTE(eddyb) never derive `PartialOrd, Ord` for these types, as
             // observing the interning order shouldn't be allowed.
             #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-            pub struct $name(u32);
+            pub struct $name(
+                // FIXME(eddyb) figure out how to sneak niches into these types, to
+                // allow e.g. `Option` around them to not increase the size.
+                u32,
+            );
 
             impl std::ops::Index<$name> for Context {
                 type Output = $ty;
@@ -105,16 +108,20 @@ macro_rules! interners {
 
 interners! {
     needs_as_ref {
-        AttrSetDef,
+        crate::AttrSetDef,
+        crate::TypeDef,
+        crate::ConstDef,
     }
     needs_default {
-        AttrSet => AttrSetDef,
+        AttrSet => crate::AttrSetDef,
     }
 
     // FIXME(eddyb) consider a more uniform naming scheme than the combination
     // of `InternedFoo => Foo` and `Foo => FooDef`.
     InternedStr => str,
-    AttrSet => AttrSetDef,
+    AttrSet => crate::AttrSetDef,
+    Type => crate::TypeDef,
+    Const => crate::ConstDef,
 }
 
 impl InternInCx for &'_ str {
@@ -134,10 +141,28 @@ impl InternInCx for String {
 }
 
 // FIXME(eddyb) automate the common form of this away.
-impl InternInCx for AttrSetDef {
+impl InternInCx for crate::AttrSetDef {
     type Interned = AttrSet;
 
     fn intern_in_cx(self, cx: &Context) -> Self::Interned {
         AttrSet(cx.interners.AttrSet.intern(self))
+    }
+}
+
+// FIXME(eddyb) automate the common form of this away.
+impl InternInCx for crate::TypeDef {
+    type Interned = Type;
+
+    fn intern_in_cx(self, cx: &Context) -> Self::Interned {
+        Type(cx.interners.Type.intern(self))
+    }
+}
+
+// FIXME(eddyb) automate the common form of this away.
+impl InternInCx for crate::ConstDef {
+    type Interned = Const;
+
+    fn intern_in_cx(self, cx: &Context) -> Self::Interned {
+        Const(cx.interners.Const.intern(self))
     }
 }

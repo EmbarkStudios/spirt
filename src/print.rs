@@ -1,7 +1,7 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    spv, Attr, AttrSet, AttrSetDef, Context, Func, Global, Misc, MiscInput, MiscOutput, Module,
-    ModuleDebugInfo, ModuleDialect,
+    spv, Attr, AttrSet, AttrSetDef, Const, ConstCtorArg, ConstDef, Context, Func, Global, Misc,
+    MiscInput, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -46,12 +46,16 @@ enum Node<'a> {
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum InternedNode {
     AttrSet(AttrSet),
+    Type(Type),
+    Const(Const),
 }
 
 impl InternedNode {
     fn category(self) -> &'static str {
         match self {
             Self::AttrSet(_) => "attrs",
+            Self::Type(_) => "type",
+            Self::Const(_) => "const",
         }
     }
 }
@@ -116,6 +120,12 @@ impl<'a> Plan<'a> {
             Node::Interned(InternedNode::AttrSet(attrs)) => {
                 self.cx[attrs].inner_visit_with(self);
             }
+            Node::Interned(InternedNode::Type(ty)) => {
+                self.cx[ty].inner_visit_with(self);
+            }
+            Node::Interned(InternedNode::Const(ct)) => {
+                self.cx[ct].inner_visit_with(self);
+            }
 
             Node::Dyn(node) => node.dyn_inner_visit_with(self),
         }
@@ -132,6 +142,13 @@ impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
         self.use_node(Node::Interned(InternedNode::AttrSet(attrs)));
     }
+    fn visit_type_use(&mut self, ty: Type) {
+        self.use_node(Node::Interned(InternedNode::Type(ty)));
+    }
+    fn visit_const_use(&mut self, ct: Const) {
+        self.use_node(Node::Interned(InternedNode::Const(ct)));
+    }
+
     fn visit_module(&mut self, module: &'a Module) {
         self.use_node(Node::Dyn(module));
     }
@@ -148,25 +165,23 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Dyn(func));
     }
 
-    fn visit_misc_output(&mut self, output: MiscOutput) {
-        match output {
-            MiscOutput::SpvResult {
-                result_id: _,
-                result_type_id,
-            } => {
-                // HACK(eddyb) assume that this ID matches `MiscOutput` of a `Misc`,
-                // but this should be replaced by a proper non-ID def-use graph.
-                if let Some(type_id) = result_type_id {
-                    *self
-                        .use_counts
-                        .entry(Use::MiscOutput { result_id: type_id })
-                        .or_default() += 1;
-                }
+    fn visit_const_def(&mut self, ct_def: &'a ConstDef) {
+        for &arg in &ct_def.ctor_args {
+            // HACK(eddyb) assume that this ID matches `MiscOutput` of a `Misc`,
+            // but this should be replaced by a proper non-ID def-use graph.
+            if let ConstCtorArg::SpvUntrackedGlobalVarId(id) = arg {
+                *self
+                    .use_counts
+                    .entry(Use::MiscOutput { result_id: id })
+                    .or_default() += 1;
             }
         }
+        ct_def.inner_visit_with(self);
     }
-    fn visit_misc_input(&mut self, input: MiscInput) {
-        match input {
+    fn visit_misc_input(&mut self, input: &'a MiscInput) {
+        match *input {
+            MiscInput::Type(_) | MiscInput::Const(_) => {}
+
             MiscInput::SpvImm(_) | MiscInput::SpvExtInstImport(_) => {}
 
             // HACK(eddyb) assume that this ID matches `MiscOutput` of a `Misc`,
@@ -178,6 +193,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
                     .or_default() += 1;
             }
         }
+        input.inner_visit_with(self);
     }
     fn visit_attr(&mut self, attr: &Attr) {
         match attr {
@@ -253,6 +269,8 @@ impl<'a> Printer<'a> {
         #[derive(Default)]
         struct AnonCounters {
             attr_sets: usize,
+            types: usize,
+            consts: usize,
 
             misc_outputs: usize,
         }
@@ -263,11 +281,26 @@ impl<'a> Printer<'a> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 let inline = match use_kind {
-                    Use::Interned(node) => match node {
-                        _ if use_count == 1 => true,
-
-                        InternedNode::AttrSet(attrs) => cx[attrs].attrs.len() <= 1,
-                    },
+                    Use::Interned(node) => {
+                        use_count == 1
+                            || match node {
+                                InternedNode::AttrSet(attrs) => cx[attrs].attrs.len() <= 1,
+                                InternedNode::Type(ty) => {
+                                    let ty_def = &cx[ty];
+                                    ty_def
+                                        .ctor_args
+                                        .iter()
+                                        .all(|arg| matches!(arg, TypeCtorArg::SpvImm(_)))
+                                }
+                                InternedNode::Const(ct) => {
+                                    let ct_def = &cx[ct];
+                                    ct_def
+                                        .ctor_args
+                                        .iter()
+                                        .all(|arg| matches!(arg, ConstCtorArg::SpvImm(_)))
+                                }
+                            }
+                    }
                     Use::MiscOutput { .. } => false,
                 };
                 let style = if inline {
@@ -276,6 +309,8 @@ impl<'a> Printer<'a> {
                     let ac = &mut anon_counters;
                     let counter = match use_kind {
                         Use::Interned(InternedNode::AttrSet(_)) => &mut ac.attr_sets,
+                        Use::Interned(InternedNode::Type(_)) => &mut ac.types,
+                        Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::MiscOutput { .. } => &mut ac.misc_outputs,
                     };
                     let idx = *counter;
@@ -334,16 +369,49 @@ impl<'a> Printer<'a> {
     }
 
     fn interned_node_def_to_string(&self, node: InternedNode, style: UseStyle) -> String {
-        let def = match node {
-            InternedNode::AttrSet(attrs) => self.cx[attrs].print_to_string(self),
+        let (attrs_of_def, def) = match node {
+            InternedNode::AttrSet(attrs) => (None, self.cx[attrs].print_to_string(self)),
+            InternedNode::Type(ty) => {
+                let ty_def = &self.cx[ty];
+                (Some(ty_def.attrs), ty_def.print_to_string(self))
+            }
+            InternedNode::Const(ct) => {
+                let ct_def = &self.cx[ct];
+                (Some(ct_def.attrs), ct_def.print_to_string(self))
+            }
         };
+        let attrs_of_def = attrs_of_def.map_or(String::new(), |attrs| attrs.print_to_string(self));
 
         match style {
             UseStyle::Anon { idx } => {
-                format!("{}{} = {}", node.category(), idx, def)
+                // FIXME(eddyb) automate reindenting (and make it configurable).
+                let reindent_def = match node {
+                    InternedNode::AttrSet(_) => false,
+                    InternedNode::Type(_) | InternedNode::Const(_) => def.contains("\n"),
+                };
+                if reindent_def {
+                    format!(
+                        "{}{}{} =\n  {}",
+                        attrs_of_def,
+                        node.category(),
+                        idx,
+                        def.replace("\n", "\n  ")
+                    )
+                } else {
+                    format!("{}{}{} = {}", attrs_of_def, node.category(), idx, def)
+                }
             }
             UseStyle::Inline => match node {
                 InternedNode::AttrSet(_) => def,
+                InternedNode::Type(_) | InternedNode::Const(_) => {
+                    let def = attrs_of_def + &def;
+                    // FIXME(eddyb) automate reindenting (and make it configurable).
+                    if def.contains("\n") {
+                        format!("(\n  {}\n)", def.replace("\n", "\n  "))
+                    } else {
+                        format!("({})", def)
+                    }
+                }
             },
         }
     }
@@ -389,6 +457,16 @@ impl Print for Use {
 impl Print for AttrSet {
     fn print_to_string(&self, printer: &Printer<'_>) -> String {
         Use::Interned(InternedNode::AttrSet(*self)).print_to_string(printer)
+    }
+}
+impl Print for Type {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        Use::Interned(InternedNode::Type(*self)).print_to_string(printer)
+    }
+}
+impl Print for Const {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        Use::Interned(InternedNode::Const(*self)).print_to_string(printer)
     }
 }
 
@@ -508,6 +586,56 @@ impl Print for ModuleDebugInfo {
     }
 }
 
+impl Print for TypeDef {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        let Self {
+            ctor,
+            ctor_args,
+            attrs: _,
+        } = self;
+
+        printer.pretty_join_space(
+            ctor.name(),
+            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                TypeCtorArg::Type(ty) => {
+                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
+                }
+                TypeCtorArg::Const(ct) => {
+                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
+                }
+
+                TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+            })),
+        )
+    }
+}
+
+impl Print for ConstDef {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        let Self {
+            ty,
+            ctor,
+            ctor_args,
+            attrs: _,
+        } = self;
+
+        printer.pretty_join_space(
+            ctor.name(),
+            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                ConstCtorArg::Const(ct) => {
+                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
+                }
+
+                ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                ConstCtorArg::SpvUntrackedGlobalVarId(id) => spv::print::PrintOperand::IdLike(
+                    Use::MiscOutput { result_id: id }.print_to_string(printer),
+                ),
+            }))
+            .chain([format!(": {}", ty.print_to_string(printer))]),
+        )
+    }
+}
+
 impl Print for Global {
     fn print_to_string(&self, printer: &Printer<'_>) -> String {
         lazy_format!(|f| {
@@ -558,12 +686,12 @@ impl Print for Misc {
 
         let lhs = output.map(|output| match output {
             MiscOutput::SpvResult {
-                result_type_id,
+                result_type,
                 result_id,
             } => {
                 let result = spv_id_to_string(result_id);
-                match result_type_id {
-                    Some(type_id) => format!("{}: {}", result, spv_id_to_string(type_id)),
+                match result_type {
+                    Some(ty) => format!("{}: {}", result, ty.print_to_string(printer)),
                     None => result,
                 }
             }
@@ -572,6 +700,13 @@ impl Print for Misc {
         let rhs = printer.pretty_join_space(
             kind.name(),
             spv::print::operands(inputs.iter().map(|input| match *input {
+                MiscInput::Type(ty) => {
+                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
+                }
+                MiscInput::Const(ct) => {
+                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
+                }
+
                 MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
                 MiscInput::SpvUntrackedId(id) => {
                     spv::print::PrintOperand::IdLike(spv_id_to_string(id))

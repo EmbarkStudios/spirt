@@ -73,6 +73,7 @@ def_well_known! {
 
         OpTypeInt,
         OpTypeFloat,
+        OpTypeForwardPointer,
 
         OpUndef,
 
@@ -159,7 +160,7 @@ pub struct InstructionDef {
     pub rest_operands: Option<RestOperandsUnit>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum InstructionCategory {
     Type,
     Const,

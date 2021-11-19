@@ -1,8 +1,11 @@
 //! SPIR-T to SPIR-V lifting.
 
 use crate::spv::{self, spec};
-use crate::visit::Visitor;
-use crate::{Attr, AttrSet, Context, MiscInput, MiscOutput};
+use crate::visit::{InnerVisit, Visitor};
+use crate::{
+    Attr, AttrSet, Const, ConstCtor, ConstCtorArg, Context, Global, MiscInput, MiscKind,
+    MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+};
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
@@ -55,14 +58,40 @@ impl spv::ModuleDebugInfo {
 
 struct NeedsIdsCollector<'a> {
     cx: &'a Context,
+
     ext_inst_imports: BTreeSet<&'a str>,
     debug_strings: BTreeSet<&'a str>,
+
+    interned_globals: IndexSet<InternedGlobal>,
+
     old_outputs: IndexSet<spv::Id>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum InternedGlobal {
+    Type(Type),
+    Const(Const),
 }
 
 impl Visitor<'_> for NeedsIdsCollector<'_> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
         self.visit_attr_set_def(&self.cx[attrs]);
+    }
+    fn visit_type_use(&mut self, ty: Type) {
+        let global = InternedGlobal::Type(ty);
+        if self.interned_globals.contains(&global) {
+            return;
+        }
+        self.visit_type_def(&self.cx[ty]);
+        self.interned_globals.insert(global);
+    }
+    fn visit_const_use(&mut self, ct: Const) {
+        let global = InternedGlobal::Const(ct);
+        if self.interned_globals.contains(&global) {
+            return;
+        }
+        self.visit_const_def(&self.cx[ct]);
+        self.interned_globals.insert(global);
     }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
@@ -72,20 +101,25 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                 .extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
         }
     }
-    fn visit_misc_output(&mut self, output: MiscOutput) {
-        match output {
+    fn visit_misc_output(&mut self, output: &MiscOutput) {
+        match *output {
             MiscOutput::SpvResult { result_id, .. } => {
                 self.old_outputs.insert(result_id);
             }
         }
+        output.inner_visit_with(self);
     }
-    fn visit_misc_input(&mut self, input: MiscInput) {
-        match input {
-            MiscInput::SpvImm(_) | MiscInput::SpvUntrackedId(_) => {}
+    fn visit_misc_input(&mut self, input: &MiscInput) {
+        match *input {
+            MiscInput::Type(_)
+            | MiscInput::Const(_)
+            | MiscInput::SpvImm(_)
+            | MiscInput::SpvUntrackedId(_) => {}
             MiscInput::SpvExtInstImport(name) => {
                 self.ext_inst_imports.insert(&self.cx[name]);
             }
         }
+        input.inner_visit_with(self);
     }
     fn visit_attr(&mut self, attr: &Attr) {
         match *attr {
@@ -100,6 +134,9 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
 struct AllocatedIds<'a> {
     ext_inst_imports: BTreeMap<&'a str, spv::Id>,
     debug_strings: BTreeMap<&'a str, spv::Id>,
+
+    interned_globals: IndexMap<InternedGlobal, spv::Id>,
+
     old_outputs: IndexMap<spv::Id, spv::Id>,
 }
 
@@ -112,6 +149,7 @@ impl<'a> NeedsIdsCollector<'a> {
             cx: _,
             ext_inst_imports,
             debug_strings,
+            interned_globals,
             old_outputs,
         } = self;
 
@@ -124,6 +162,10 @@ impl<'a> NeedsIdsCollector<'a> {
                 .into_iter()
                 .map(|s| Ok((s, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
+            interned_globals: interned_globals
+                .into_iter()
+                .map(|g| Ok((g, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
             old_outputs: old_outputs
                 .into_iter()
                 .map(|old_id| Ok((old_id, alloc_id()?)))
@@ -132,7 +174,7 @@ impl<'a> NeedsIdsCollector<'a> {
     }
 }
 
-impl crate::Module {
+impl Module {
     pub fn lift_to_spv_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
         self.lift_to_spv_module_emitter()?.write_to_spv_file(path)
     }
@@ -143,7 +185,7 @@ impl crate::Module {
 
         let cx = self.cx();
         let (dialect, debug_info) = match (&self.dialect, &self.debug_info) {
-            (crate::ModuleDialect::Spv(dialect), crate::ModuleDebugInfo::Spv(debug_info)) => {
+            (ModuleDialect::Spv(dialect), ModuleDebugInfo::Spv(debug_info)) => {
                 (dialect, debug_info)
             }
 
@@ -163,6 +205,7 @@ impl crate::Module {
             cx: &cx,
             ext_inst_imports: BTreeSet::new(),
             debug_strings: BTreeSet::new(),
+            interned_globals: IndexSet::new(),
             old_outputs: IndexSet::new(),
         };
         needs_ids_collector.visit_module(self);
@@ -185,6 +228,137 @@ impl crate::Module {
                 )),
             }
         })?;
+
+        // HACK(eddyb) allow `move` closures below to reference `cx` or `ids`
+        // without causing unwanted moves out of them.
+        let (cx, ids) = (&*cx, &ids);
+
+        // Set up iterators for the bulk of the module's instructions, to make
+        // it easier to generate decorations, `OpName`s, etc. for them.
+        // To avoid wastefully recomputing the unneeded parts of `Inst`, or
+        // having to allocate all of the `Inst`s ahead of time, the `mk_inst`
+        // field of each `InstGen` is a closure that should only be called when
+        // the `Inst` is eventually needed, but can be cheaply ignored before.
+        struct InstGen<MI: FnOnce() -> spv::Inst> {
+            attrs: AttrSet,
+            result_id: Option<spv::Id>,
+            mk_inst: MI,
+        }
+        let interned_globals_inst_gens =
+            ids.interned_globals
+                .iter()
+                .map(|(&global, &result_id)| InstGen {
+                    attrs: match global {
+                        InternedGlobal::Type(ty) => cx[ty].attrs,
+                        InternedGlobal::Const(ct) => cx[ct].attrs,
+                    },
+                    result_id: Some(result_id),
+                    mk_inst: move || match global {
+                        InternedGlobal::Type(ty) => {
+                            let ty_def = &cx[ty];
+                            spv::Inst {
+                                opcode: match ty_def.ctor {
+                                    TypeCtor::SpvInst(opcode) => opcode,
+                                },
+                                result_type_id: None,
+                                result_id: Some(result_id),
+                                operands: ty_def
+                                    .ctor_args
+                                    .iter()
+                                    .map(|&arg| match arg {
+                                        TypeCtorArg::Type(ty) => spv::Operand::Id(
+                                            wk.IdRef,
+                                            ids.interned_globals[&InternedGlobal::Type(ty)],
+                                        ),
+                                        TypeCtorArg::Const(ct) => spv::Operand::Id(
+                                            wk.IdRef,
+                                            ids.interned_globals[&InternedGlobal::Const(ct)],
+                                        ),
+                                        TypeCtorArg::SpvImm(imm) => spv::Operand::Imm(imm),
+                                    })
+                                    .collect(),
+                            }
+                        }
+                        InternedGlobal::Const(ct) => {
+                            let ct_def = &cx[ct];
+                            spv::Inst {
+                                opcode: match ct_def.ctor {
+                                    ConstCtor::SpvInst(opcode) => opcode,
+                                },
+                                result_type_id: Some(
+                                    ids.interned_globals[&InternedGlobal::Type(ct_def.ty)],
+                                ),
+                                result_id: Some(result_id),
+                                operands: ct_def
+                                    .ctor_args
+                                    .iter()
+                                    .map(|&arg| match arg {
+                                        ConstCtorArg::Const(ct) => spv::Operand::Id(
+                                            wk.IdRef,
+                                            ids.interned_globals[&InternedGlobal::Const(ct)],
+                                        ),
+                                        ConstCtorArg::SpvImm(imm) => spv::Operand::Imm(imm),
+                                        ConstCtorArg::SpvUntrackedGlobalVarId(old_id) => {
+                                            spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
+                                        }
+                                    })
+                                    .collect(),
+                            }
+                        }
+                    },
+                });
+        let misc_inst_gens = self
+            .globals
+            .iter()
+            .map(|global| match global {
+                Global::Misc(misc) => misc,
+            })
+            .chain(self.funcs.iter().flat_map(|func| &func.insts))
+            .map(|misc| {
+                let result_id = misc.output.as_ref().map(|old_output| match *old_output {
+                    MiscOutput::SpvResult {
+                        result_id: old_result_id,
+                        ..
+                    } => ids.old_outputs[&old_result_id],
+                });
+                InstGen {
+                    attrs: misc.attrs,
+                    result_id,
+                    mk_inst: move || spv::Inst {
+                        opcode: match misc.kind {
+                            MiscKind::SpvInst(opcode) => opcode,
+                        },
+                        result_type_id: misc.output.as_ref().and_then(
+                            |old_output| match *old_output {
+                                MiscOutput::SpvResult { result_type, .. } => result_type
+                                    .map(|ty| ids.interned_globals[&InternedGlobal::Type(ty)]),
+                            },
+                        ),
+                        result_id,
+                        operands: misc
+                            .inputs
+                            .iter()
+                            .map(|input| match *input {
+                                MiscInput::Type(ty) => spv::Operand::Id(
+                                    wk.IdRef,
+                                    ids.interned_globals[&InternedGlobal::Type(ty)],
+                                ),
+                                MiscInput::Const(ct) => spv::Operand::Id(
+                                    wk.IdRef,
+                                    ids.interned_globals[&InternedGlobal::Const(ct)],
+                                ),
+                                MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                                MiscInput::SpvUntrackedId(old_id) => {
+                                    spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
+                                }
+                                MiscInput::SpvExtInstImport(name) => {
+                                    spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
+                                }
+                            })
+                            .collect(),
+                    },
+                }
+            });
 
         let reserved_inst_schema = 0;
         let header = [
@@ -275,29 +449,20 @@ impl crate::Module {
             }
             Attr::SpvDebugLine { .. } => unreachable!(),
         };
-        let globals_and_func_insts = self
-            .globals
-            .iter()
-            .map(|global| match global {
-                crate::Global::Misc(misc) => misc,
-            })
-            .chain(self.funcs.iter().flat_map(|func| &func.insts));
-        for misc in globals_and_func_insts {
-            for attr in cx[misc.attrs].attrs.iter() {
+        let result_ids_with_attrs = interned_globals_inst_gens
+            .clone()
+            .map(|gen| (gen.result_id, gen.attrs))
+            .chain(misc_inst_gens.clone().map(|gen| (gen.result_id, gen.attrs)));
+        for (result_id, attrs) in result_ids_with_attrs {
+            for attr in cx[attrs].attrs.iter() {
                 if let Attr::SpvDebugLine { .. } = attr {
                     continue;
                 }
 
-                let target_id = match misc.output {
-                    Some(MiscOutput::SpvResult {
-                        result_id: old_result_id,
-                        ..
-                    }) => ids.old_outputs[&old_result_id],
-                    None => unreachable!(
-                        "FIXME: it shouldn't be possible to attach \
-                         attributes to instructions without an output"
-                    ),
-                };
+                let target_id = result_id.expect(
+                    "FIXME: it shouldn't be possible to attach \
+                         attributes to instructions without an output",
+                );
                 push_attr(target_id, attr);
             }
         }
@@ -389,48 +554,10 @@ impl crate::Module {
 
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
-        let globals_and_func_insts = self
-            .globals
-            .iter()
-            .map(|global| match global {
-                crate::Global::Misc(misc) => misc,
-            })
-            .chain(self.funcs.iter().flat_map(|func| &func.insts));
-        for misc in globals_and_func_insts {
-            let inst = spv::Inst {
-                opcode: match misc.kind {
-                    crate::MiscKind::SpvInst(opcode) => opcode,
-                },
-                result_type_id: misc
-                    .output
-                    .as_ref()
-                    .and_then(|old_output| match *old_output {
-                        MiscOutput::SpvResult {
-                            result_type_id: old_result_type_id,
-                            ..
-                        } => old_result_type_id.map(|old_id| ids.old_outputs[&old_id]),
-                    }),
-                result_id: misc.output.as_ref().map(|old_output| match *old_output {
-                    MiscOutput::SpvResult {
-                        result_id: old_result_id,
-                        ..
-                    } => ids.old_outputs[&old_result_id],
-                }),
-                operands: misc
-                    .inputs
-                    .iter()
-                    .map(|input| match *input {
-                        MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                        MiscInput::SpvUntrackedId(old_id) => {
-                            spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
-                        }
-                        MiscInput::SpvExtInstImport(name) => {
-                            spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
-                        }
-                    })
-                    .collect(),
-            };
-
+        let insts_with_attrs = interned_globals_inst_gens
+            .map(|gen| ((gen.mk_inst)(), gen.attrs))
+            .chain(misc_inst_gens.map(|gen| ((gen.mk_inst)(), gen.attrs)));
+        for (inst, attrs) in insts_with_attrs {
             // Reset line debuginfo when crossing/leaving blocks.
             let new_block_id = if inst.opcode == wk.OpLabel {
                 Some(inst.result_id.unwrap())
@@ -448,7 +575,7 @@ impl crate::Module {
             // in order to end up with the expected line debuginfo.
             // FIXME(eddyb) make this less of a search and more of a
             // lookup by splitting attrs into key and value parts.
-            let new_debug_line = cx[misc.attrs].attrs.iter().find_map(|attr| match *attr {
+            let new_debug_line = cx[attrs].attrs.iter().find_map(|attr| match *attr {
                 Attr::SpvDebugLine {
                     file_path,
                     line,

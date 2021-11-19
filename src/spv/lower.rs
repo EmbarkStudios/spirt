@@ -1,7 +1,11 @@
 //! SPIR-V to SPIR-T lowering.
 
 use crate::spv::{self, spec};
-use crate::{Context, InternedStr};
+// FIXME(eddyb) import more to avoid `crate::` everywhere.
+use crate::{
+    Const, ConstCtor, ConstCtorArg, ConstDef, Context, InternedStr, Module, Type, TypeCtor,
+    TypeCtorArg, TypeDef,
+};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +16,11 @@ use std::{io, iter, mem};
 
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
+    Type(Type),
+    Const(Const),
+
+    UnknownGlobal(spec::Opcode),
+
     SpvExtInstImport(InternedStr),
     SpvDebugString(InternedStr),
 }
@@ -24,7 +33,10 @@ fn invalid(reason: &str) -> io::Error {
     )
 }
 
-impl crate::Module {
+// FIXME(eddyb) provide more information about any normalization that happened:
+// * stats about deduplication that occured through interning
+// * sets of unused global vars and functions (and types+consts only they use)
+impl Module {
     pub fn lower_from_spv_file(cx: Rc<Context>, path: impl AsRef<Path>) -> io::Result<Self> {
         Self::lower_from_spv_module_parser(cx, spv::read::ModuleParser::read_from_spv_file(path)?)
     }
@@ -115,8 +127,8 @@ impl crate::Module {
             // instructions following `OpLine`/`OpNoLine` into later sections.
             DebugLine,
 
-            Globals,
-            Functions,
+            TypeConstOrGlobalVar,
+            Function,
         }
         let mut seq = None;
 
@@ -200,6 +212,19 @@ impl crate::Module {
             }
 
             let mut attr_set = cx.intern(attr_set);
+
+            // FIXME(eddyb) move this kind of lookup into methods on some sort
+            // of "lowering context" type.
+            let result_type = inst
+                .result_type_id
+                .map(|type_id| match id_defs.get(&type_id) {
+                    Some(&IdDef::Type(ty)) => Ok(ty),
+                    Some(_) => Err(invalid(&format!("result type %{} not an OpType*", type_id))),
+                    None => Err(invalid(&format!("result type %{} not defined", type_id))),
+                })
+                .transpose()?;
+
+            let inst_category = spv_spec.instructions[opcode].category;
 
             let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
@@ -448,6 +473,115 @@ impl crate::Module {
                 } else {
                     Seq::Decoration
                 }
+            } else if opcode == wk.OpTypeForwardPointer {
+                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
+                let (id, sc) = match inst.operands[..] {
+                    [spv::Operand::Id(kind, id), spv::Operand::Imm(sc)] => {
+                        assert!(kind == wk.IdRef);
+                        (id, sc)
+                    }
+                    _ => unreachable!(),
+                };
+
+                // HACK(eddyb) this is not a proper implementation - one would
+                // require fixpoint (aka "μ" aka "mu") types - but for now this
+                // serves as a first approximation for a "deferred error".
+                let ty = cx.intern(TypeDef {
+                    ctor: TypeCtor::SpvInst(opcode),
+                    ctor_args: [TypeCtorArg::SpvImm(sc)].into_iter().collect(),
+                    attrs: mem::take(&mut attr_set),
+                });
+                id_defs.insert(id, IdDef::Type(ty));
+
+                Seq::TypeConstOrGlobalVar
+            } else if inst_category == spec::InstructionCategory::Type {
+                assert!(inst.result_type_id.is_none());
+                let id = inst.result_id.unwrap();
+                let type_ctor_args = inst
+                    .operands
+                    .iter()
+                    .map(|operand| match *operand {
+                        spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                            // FIXME(eddyb) deduplicate these descriptions.
+                            Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
+                            Some(&IdDef::Const(ct)) => Ok(TypeCtorArg::Const(ct)),
+                            Some(&IdDef::UnknownGlobal(opcode)) => {
+                                Err(format!("`{}`", opcode.name()))
+                            }
+                            Some(&IdDef::SpvExtInstImport(name)) => {
+                                Err(format!("`OpExtInstImport {:?}`", &cx[name]))
+                            }
+                            Some(&IdDef::SpvDebugString(s)) => {
+                                Err(format!("`OpString {:?}`", &cx[s]))
+                            }
+                            None => Err(format!("a forward reference to %{}", id)),
+                        },
+                        spv::Operand::Imm(imm) => Ok(TypeCtorArg::SpvImm(imm)),
+                    })
+                    .map(|result| {
+                        result.map_err(|descr| {
+                            invalid(&format!("unsupported use of {} in a type", descr))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                let ty = cx.intern(TypeDef {
+                    ctor: TypeCtor::SpvInst(opcode),
+                    ctor_args: type_ctor_args,
+                    attrs: mem::take(&mut attr_set),
+                });
+                id_defs.insert(id, IdDef::Type(ty));
+
+                Seq::TypeConstOrGlobalVar
+            } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
+                let id = inst.result_id.unwrap();
+                let const_ctor_args = inst
+                    .operands
+                    .iter()
+                    .map(|operand| match *operand {
+                        spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                            // FIXME(eddyb) deduplicate these descriptions.
+                            Some(&IdDef::Type(_)) => Err("a type".into()),
+                            Some(&IdDef::Const(ct)) => Ok(ConstCtorArg::Const(ct)),
+                            Some(&IdDef::UnknownGlobal(opcode)) => {
+                                if opcode == wk.OpVariable {
+                                    Ok(ConstCtorArg::SpvUntrackedGlobalVarId(id))
+                                } else {
+                                    Err(format!("`{}`", opcode.name()))
+                                }
+                            }
+                            Some(&IdDef::SpvExtInstImport(name)) => {
+                                Err(format!("`OpExtInstImport {:?}`", &cx[name]))
+                            }
+                            Some(&IdDef::SpvDebugString(s)) => {
+                                Err(format!("`OpString {:?}`", &cx[s]))
+                            }
+                            None => Err(format!("a forward reference to %{}", id)),
+                        },
+                        spv::Operand::Imm(imm) => Ok(ConstCtorArg::SpvImm(imm)),
+                    })
+                    .map(|result| {
+                        result.map_err(|descr| {
+                            invalid(&format!("unsupported use of {} in a constant", descr))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+
+                let ct = cx.intern(ConstDef {
+                    ty: result_type.unwrap(),
+                    ctor: ConstCtor::SpvInst(opcode),
+                    ctor_args: const_ctor_args,
+                    attrs: mem::take(&mut attr_set),
+                });
+                id_defs.insert(id, IdDef::Const(ct));
+
+                if opcode == wk.OpUndef {
+                    // `OpUndef` can appear either among constants, or in a
+                    // function, so at most advance `seq` to globals.
+                    seq.max(Some(Seq::TypeConstOrGlobalVar)).unwrap()
+                } else {
+                    Seq::TypeConstOrGlobalVar
+                }
             } else if opcode == wk.OpFunction {
                 if current_func.is_some() {
                     return Err(invalid("nested OpFunction while still in a function"));
@@ -455,8 +589,8 @@ impl crate::Module {
 
                 let func_id = inst.result_id.unwrap();
                 // FIXME(eddyb) hide this from SPIR-T, it's the function return
-                // type, *not* the function type, which is in `func_type_id`.
-                let func_ret_type_id = inst.result_type_id.unwrap();
+                // type, *not* the function type, which is in `func_type`.
+                let func_ret_type = result_type.unwrap();
 
                 let (func_ctrl, func_type_id) = match inst.operands[..] {
                     [
@@ -469,17 +603,35 @@ impl crate::Module {
                     _ => unreachable!(),
                 };
 
+                // FIXME(eddyb) move this kind of lookup into methods on some sort
+                // of "lowering context" type.
+                let func_type = match id_defs.get(&func_type_id) {
+                    Some(&IdDef::Type(ty)) => ty,
+                    Some(_) => {
+                        return Err(invalid(&format!(
+                            "function type %{} not an OpType*",
+                            func_type_id
+                        )));
+                    }
+                    None => {
+                        return Err(invalid(&format!(
+                            "function type %{} not defined",
+                            func_type_id
+                        )));
+                    }
+                };
+
                 // FIXME(eddyb) pull out this information from the first entry
                 // in the `insts` field, into new fields of `Func`.
                 let func_inst = crate::Misc {
-                    kind: crate::MiscKind::SpvInst(inst.opcode),
+                    kind: crate::MiscKind::SpvInst(opcode),
                     output: Some(crate::MiscOutput::SpvResult {
-                        result_type_id: Some(func_ret_type_id),
+                        result_type: Some(func_ret_type),
                         result_id: func_id,
                     }),
                     inputs: [
                         crate::MiscInput::SpvImm(spv::Imm::Short(wk.FunctionControl, func_ctrl)),
-                        crate::MiscInput::SpvUntrackedId(func_type_id),
+                        crate::MiscInput::Type(func_type),
                     ]
                     .into_iter()
                     .collect(),
@@ -490,7 +642,7 @@ impl crate::Module {
                     insts: vec![func_inst],
                 });
 
-                Seq::Functions
+                Seq::Function
             } else if opcode == wk.OpFunctionEnd {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 assert!(inst.operands.is_empty());
@@ -501,7 +653,7 @@ impl crate::Module {
 
                 // FIXME(eddyb) don't keep this instruction explicitly.
                 func.insts.push(crate::Misc {
-                    kind: crate::MiscKind::SpvInst(inst.opcode),
+                    kind: crate::MiscKind::SpvInst(opcode),
                     output: None,
                     inputs: [].into_iter().collect(),
                     attrs: crate::AttrSet::default(),
@@ -509,14 +661,14 @@ impl crate::Module {
 
                 module.funcs.push(func);
 
-                Seq::Functions
+                Seq::Function
             } else {
                 let misc = crate::Misc {
-                    kind: crate::MiscKind::SpvInst(inst.opcode),
+                    kind: crate::MiscKind::SpvInst(opcode),
                     output: inst
                         .result_id
                         .map(|result_id| crate::MiscOutput::SpvResult {
-                            result_type_id: inst.result_type_id,
+                            result_type,
                             result_id,
                         }),
                     inputs: inst
@@ -526,6 +678,8 @@ impl crate::Module {
                             Ok(match *operand {
                                 spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
                                 spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                                    Some(&IdDef::Type(ty)) => crate::MiscInput::Type(ty),
+                                    Some(&IdDef::Const(ct)) => crate::MiscInput::Const(ct),
                                     Some(&IdDef::SpvExtInstImport(name)) => {
                                         crate::MiscInput::SpvExtInstImport(name)
                                     }
@@ -536,7 +690,9 @@ impl crate::Module {
                                             &cx[s]
                                         )));
                                     }
-                                    None => crate::MiscInput::SpvUntrackedId(id),
+                                    Some(IdDef::UnknownGlobal(_)) | None => {
+                                        crate::MiscInput::SpvUntrackedId(id)
+                                    }
                                 },
                             })
                         })
@@ -546,30 +702,23 @@ impl crate::Module {
 
                 match &mut current_func {
                     Some(func) => {
-                        assert_eq!(seq, Some(Seq::Functions));
-                        func.insts.push(misc)
+                        assert_eq!(seq, Some(Seq::Function));
+                        func.insts.push(misc);
                     }
-                    None => module.globals.push(crate::Global::Misc(misc)),
+                    None => {
+                        if let Some(id) = inst.result_id {
+                            id_defs.insert(id, IdDef::UnknownGlobal(opcode));
+                        }
+                        module.globals.push(crate::Global::Misc(misc));
+                    }
                 }
 
-                match spv_spec.instructions[opcode].category {
-                    spec::InstructionCategory::Type | spec::InstructionCategory::Const => {
-                        Seq::Globals
-                    }
-
-                    // Where `OpVariable` belongs depends on its `StorageClass`
-                    // operand is `Function` (function-local) or not (global).
-                    _ if opcode == wk.OpVariable
-                        && inst.operands[0] != storage_class_function_operand =>
-                    {
-                        Seq::Globals
-                    }
-
-                    // `OpUndef` can appear either among constants, or in a
-                    // function, so at most advance `seq` to globals.
-                    _ if opcode == wk.OpUndef => seq.max(Some(Seq::Globals)).unwrap(),
-
-                    spec::InstructionCategory::Other => Seq::Functions,
+                // Where `OpVariable` belongs depends on its `StorageClass`
+                // operand is `Function` (function-local) or not (global).
+                if opcode == wk.OpVariable && inst.operands[0] != storage_class_function_operand {
+                    Seq::TypeConstOrGlobalVar
+                } else {
+                    Seq::Function
                 }
             };
             if !(seq <= Some(next_seq)) {
