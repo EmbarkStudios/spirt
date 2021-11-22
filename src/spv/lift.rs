@@ -3,8 +3,9 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    Attr, AttrSet, Const, ConstCtor, ConstCtorArg, Context, Global, MiscInput, MiscKind,
-    MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, GlobalVar,
+    MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor,
+    TypeCtorArg,
 };
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,17 +59,18 @@ impl spv::ModuleDebugInfo {
 
 struct NeedsIdsCollector<'a> {
     cx: &'a Context,
+    module: &'a Module,
 
     ext_inst_imports: BTreeSet<&'a str>,
     debug_strings: BTreeSet<&'a str>,
 
-    interned_globals: IndexSet<InternedGlobal>,
+    globals: IndexSet<Global>,
 
     old_outputs: IndexSet<spv::Id>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-enum InternedGlobal {
+enum Global {
     Type(Type),
     Const(Const),
 }
@@ -78,20 +80,24 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         self.visit_attr_set_def(&self.cx[attrs]);
     }
     fn visit_type_use(&mut self, ty: Type) {
-        let global = InternedGlobal::Type(ty);
-        if self.interned_globals.contains(&global) {
+        let global = Global::Type(ty);
+        if self.globals.contains(&global) {
             return;
         }
         self.visit_type_def(&self.cx[ty]);
-        self.interned_globals.insert(global);
+        self.globals.insert(global);
     }
     fn visit_const_use(&mut self, ct: Const) {
-        let global = InternedGlobal::Const(ct);
-        if self.interned_globals.contains(&global) {
+        let global = Global::Const(ct);
+        if self.globals.contains(&global) {
             return;
         }
         self.visit_const_def(&self.cx[ct]);
-        self.interned_globals.insert(global);
+        self.globals.insert(global);
+    }
+
+    fn visit_global_var_use(&mut self, gv: GlobalVar) {
+        self.visit_global_var_def(&self.module.global_vars[gv]);
     }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
@@ -135,7 +141,7 @@ struct AllocatedIds<'a> {
     ext_inst_imports: BTreeMap<&'a str, spv::Id>,
     debug_strings: BTreeMap<&'a str, spv::Id>,
 
-    interned_globals: IndexMap<InternedGlobal, spv::Id>,
+    globals: IndexMap<Global, spv::Id>,
 
     old_outputs: IndexMap<spv::Id, spv::Id>,
 }
@@ -147,9 +153,10 @@ impl<'a> NeedsIdsCollector<'a> {
     ) -> Result<AllocatedIds<'a>, E> {
         let Self {
             cx: _,
+            module: _,
             ext_inst_imports,
             debug_strings,
-            interned_globals,
+            globals,
             old_outputs,
         } = self;
 
@@ -162,7 +169,7 @@ impl<'a> NeedsIdsCollector<'a> {
                 .into_iter()
                 .map(|s| Ok((s, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
-            interned_globals: interned_globals
+            globals: globals
                 .into_iter()
                 .map(|g| Ok((g, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
@@ -203,9 +210,10 @@ impl Module {
         // Collect uses scattered throughout the module, that require def IDs.
         let mut needs_ids_collector = NeedsIdsCollector {
             cx: &cx,
+            module: self,
             ext_inst_imports: BTreeSet::new(),
             debug_strings: BTreeSet::new(),
-            interned_globals: IndexSet::new(),
+            globals: IndexSet::new(),
             old_outputs: IndexSet::new(),
         };
         needs_ids_collector.visit_module(self);
@@ -244,121 +252,133 @@ impl Module {
             result_id: Option<spv::Id>,
             mk_inst: MI,
         }
-        let interned_globals_inst_gens =
-            ids.interned_globals
-                .iter()
-                .map(|(&global, &result_id)| InstGen {
-                    attrs: match global {
-                        InternedGlobal::Type(ty) => cx[ty].attrs,
-                        InternedGlobal::Const(ct) => cx[ct].attrs,
-                    },
-                    result_id: Some(result_id),
-                    mk_inst: move || match global {
-                        InternedGlobal::Type(ty) => {
-                            let ty_def = &cx[ty];
-                            spv::Inst {
-                                opcode: match ty_def.ctor {
-                                    TypeCtor::SpvInst(opcode) => opcode,
-                                },
-                                result_type_id: None,
-                                result_id: Some(result_id),
-                                operands: ty_def
-                                    .ctor_args
-                                    .iter()
-                                    .map(|&arg| match arg {
-                                        TypeCtorArg::Type(ty) => spv::Operand::Id(
-                                            wk.IdRef,
-                                            ids.interned_globals[&InternedGlobal::Type(ty)],
-                                        ),
-                                        TypeCtorArg::Const(ct) => spv::Operand::Id(
-                                            wk.IdRef,
-                                            ids.interned_globals[&InternedGlobal::Const(ct)],
-                                        ),
-                                        TypeCtorArg::SpvImm(imm) => spv::Operand::Imm(imm),
-                                    })
-                                    .collect(),
-                            }
-                        }
-                        InternedGlobal::Const(ct) => {
-                            let ct_def = &cx[ct];
-                            spv::Inst {
-                                opcode: match ct_def.ctor {
-                                    ConstCtor::SpvInst(opcode) => opcode,
-                                },
-                                result_type_id: Some(
-                                    ids.interned_globals[&InternedGlobal::Type(ct_def.ty)],
-                                ),
-                                result_id: Some(result_id),
-                                operands: ct_def
-                                    .ctor_args
-                                    .iter()
-                                    .map(|&arg| match arg {
-                                        ConstCtorArg::Const(ct) => spv::Operand::Id(
-                                            wk.IdRef,
-                                            ids.interned_globals[&InternedGlobal::Const(ct)],
-                                        ),
-                                        ConstCtorArg::SpvImm(imm) => spv::Operand::Imm(imm),
-                                        ConstCtorArg::SpvUntrackedGlobalVarId(old_id) => {
-                                            spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
-                                        }
-                                    })
-                                    .collect(),
-                            }
-                        }
-                    },
-                });
-        let misc_inst_gens = self
-            .globals
-            .iter()
-            .map(|global| match global {
-                Global::Misc(misc) => misc,
-            })
-            .chain(self.funcs.iter().flat_map(|func| &func.insts))
-            .map(|misc| {
-                let result_id = misc.output.as_ref().map(|old_output| match *old_output {
-                    MiscOutput::SpvResult {
-                        result_id: old_result_id,
-                        ..
-                    } => ids.old_outputs[&old_result_id],
-                });
-                InstGen {
-                    attrs: misc.attrs,
-                    result_id,
-                    mk_inst: move || spv::Inst {
-                        opcode: match misc.kind {
-                            MiscKind::SpvInst(opcode) => opcode,
+        let globals_inst_gens = ids.globals.iter().map(|(&global, &result_id)| InstGen {
+            attrs: match global {
+                Global::Type(ty) => cx[ty].attrs,
+                Global::Const(ct) => {
+                    let ct_def = &cx[ct];
+                    match ct_def.ctor {
+                        ConstCtor::PtrToGlobalVar(gv) => self.global_vars[gv].attrs,
+                        ConstCtor::SpvInst(_) => ct_def.attrs,
+                    }
+                }
+            },
+            result_id: Some(result_id),
+            mk_inst: move || match global {
+                Global::Type(ty) => {
+                    let ty_def = &cx[ty];
+                    spv::Inst {
+                        opcode: match ty_def.ctor {
+                            TypeCtor::SpvInst(opcode) => opcode,
                         },
-                        result_type_id: misc.output.as_ref().and_then(
-                            |old_output| match *old_output {
-                                MiscOutput::SpvResult { result_type, .. } => result_type
-                                    .map(|ty| ids.interned_globals[&InternedGlobal::Type(ty)]),
-                            },
-                        ),
-                        result_id,
-                        operands: misc
-                            .inputs
+                        result_type_id: None,
+                        result_id: Some(result_id),
+                        operands: ty_def
+                            .ctor_args
                             .iter()
-                            .map(|input| match *input {
-                                MiscInput::Type(ty) => spv::Operand::Id(
-                                    wk.IdRef,
-                                    ids.interned_globals[&InternedGlobal::Type(ty)],
-                                ),
-                                MiscInput::Const(ct) => spv::Operand::Id(
-                                    wk.IdRef,
-                                    ids.interned_globals[&InternedGlobal::Const(ct)],
-                                ),
-                                MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                                MiscInput::SpvUntrackedId(old_id) => {
-                                    spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
+                            .map(|&arg| match arg {
+                                TypeCtorArg::Type(ty) => {
+                                    spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(ty)])
                                 }
-                                MiscInput::SpvExtInstImport(name) => {
-                                    spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
+                                TypeCtorArg::Const(ct) => {
+                                    spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
                                 }
+                                TypeCtorArg::SpvImm(imm) => spv::Operand::Imm(imm),
                             })
                             .collect(),
-                    },
+                    }
                 }
+                Global::Const(ct) => {
+                    let ct_def = &cx[ct];
+                    match ct_def.ctor {
+                        ConstCtor::PtrToGlobalVar(gv) => {
+                            assert!(ct_def.ctor_args.is_empty());
+                            assert!(ct_def.attrs == AttrSet::default());
+
+                            let gv_def = &self.global_vars[gv];
+
+                            assert!(ct_def.ty == gv_def.type_of_ptr_to);
+
+                            let storage_class = match gv_def.addr_space {
+                                AddrSpace::SpvStorageClass(sc) => {
+                                    spv::Operand::Imm(spv::Imm::Short(wk.StorageClass, sc))
+                                }
+                            };
+                            let initializer = gv_def.initializer.map(|initializer| {
+                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(initializer)])
+                            });
+                            spv::Inst {
+                                opcode: wk.OpVariable,
+                                result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
+                                result_id: Some(result_id),
+                                operands: iter::once(storage_class).chain(initializer).collect(),
+                            }
+                        }
+
+                        ConstCtor::SpvInst(opcode) => spv::Inst {
+                            opcode,
+                            result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
+                            result_id: Some(result_id),
+                            operands: ct_def
+                                .ctor_args
+                                .iter()
+                                .map(|&arg| match arg {
+                                    ConstCtorArg::Const(ct) => {
+                                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
+                                    }
+                                    ConstCtorArg::SpvImm(imm) => spv::Operand::Imm(imm),
+                                })
+                                .collect(),
+                        },
+                    }
+                }
+            },
+        });
+        let func_inst_gens = self.funcs.iter().flat_map(|func| &func.insts).map(|misc| {
+            let result_id = misc.output.as_ref().map(|old_output| match *old_output {
+                MiscOutput::SpvResult {
+                    result_id: old_result_id,
+                    ..
+                } => ids.old_outputs[&old_result_id],
             });
+            InstGen {
+                attrs: misc.attrs,
+                result_id,
+                mk_inst: move || spv::Inst {
+                    opcode: match misc.kind {
+                        MiscKind::SpvInst(opcode) => opcode,
+                    },
+                    result_type_id: misc
+                        .output
+                        .as_ref()
+                        .and_then(|old_output| match *old_output {
+                            MiscOutput::SpvResult { result_type, .. } => {
+                                result_type.map(|ty| ids.globals[&Global::Type(ty)])
+                            }
+                        }),
+                    result_id,
+                    operands: misc
+                        .inputs
+                        .iter()
+                        .map(|input| match *input {
+                            MiscInput::Type(ty) => {
+                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(ty)])
+                            }
+                            MiscInput::Const(ct) => {
+                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
+                            }
+                            MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                            MiscInput::SpvUntrackedId(old_id) => {
+                                spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
+                            }
+                            MiscInput::SpvExtInstImport(name) => {
+                                spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
+                            }
+                        })
+                        .collect(),
+                },
+            }
+        });
 
         let reserved_inst_schema = 0;
         let header = [
@@ -409,7 +429,7 @@ impl Module {
         let mut push_attr = |target_id, attr: &Attr| match attr {
             Attr::SpvEntryPoint {
                 params,
-                interface_ids,
+                interface_global_vars,
             } => {
                 entry_point_insts.push(spv::Inst {
                     opcode: wk.OpEntryPoint,
@@ -421,11 +441,16 @@ impl Module {
                     ]
                     .into_iter()
                     .chain(params[1..].iter().map(|&imm| spv::Operand::Imm(imm)))
-                    .chain(
-                        interface_ids
-                            .iter()
-                            .map(|&old_id| spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])),
-                    )
+                    .chain(interface_global_vars.0.iter().map(|&gv| {
+                        let type_of_ptr_to_global_var = self.global_vars[gv].type_of_ptr_to;
+                        let ptr_to_global_var = cx.intern(ConstDef {
+                            ty: type_of_ptr_to_global_var,
+                            ctor: ConstCtor::PtrToGlobalVar(gv),
+                            ctor_args: [].into_iter().collect(),
+                            attrs: AttrSet::default(),
+                        });
+                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ptr_to_global_var)])
+                    }))
                     .collect(),
                 });
             }
@@ -449,10 +474,10 @@ impl Module {
             }
             Attr::SpvDebugLine { .. } => unreachable!(),
         };
-        let result_ids_with_attrs = interned_globals_inst_gens
+        let result_ids_with_attrs = globals_inst_gens
             .clone()
             .map(|gen| (gen.result_id, gen.attrs))
-            .chain(misc_inst_gens.clone().map(|gen| (gen.result_id, gen.attrs)));
+            .chain(func_inst_gens.clone().map(|gen| (gen.result_id, gen.attrs)));
         for (result_id, attrs) in result_ids_with_attrs {
             for attr in cx[attrs].attrs.iter() {
                 if let Attr::SpvDebugLine { .. } = attr {
@@ -554,9 +579,9 @@ impl Module {
 
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
-        let insts_with_attrs = interned_globals_inst_gens
+        let insts_with_attrs = globals_inst_gens
             .map(|gen| ((gen.mk_inst)(), gen.attrs))
-            .chain(misc_inst_gens.map(|gen| ((gen.mk_inst)(), gen.attrs)));
+            .chain(func_inst_gens.map(|gen| ((gen.mk_inst)(), gen.attrs)));
         for (inst, attrs) in insts_with_attrs {
             // Reset line debuginfo when crossing/leaving blocks.
             let new_block_id = if inst.opcode == wk.OpLabel {

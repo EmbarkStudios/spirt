@@ -3,9 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    Const, ConstCtor, ConstCtorArg, ConstDef, Context, InternedStr, Module, Type, TypeCtor,
-    TypeCtorArg, TypeDef,
+    AddrSpace, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, GlobalVarDef,
+    InternedStr, Module, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
+use format::lazy_format;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,10 +20,30 @@ enum IdDef {
     Type(Type),
     Const(Const),
 
-    UnknownGlobal(spec::Opcode),
-
     SpvExtInstImport(InternedStr),
     SpvDebugString(InternedStr),
+}
+
+impl IdDef {
+    fn descr(&self, cx: &Context) -> String {
+        match *self {
+            // FIXME(eddyb) print these with some kind of "maximum depth",
+            // instead of just describing the kind of definition.
+            IdDef::Type(_) => "a type".into(),
+            IdDef::Const(_) => "a constant".into(),
+
+            IdDef::SpvExtInstImport(name) => {
+                format!("`OpExtInstImport {:?}`", &cx[name])
+            }
+            IdDef::SpvDebugString(s) => format!("`OpString {:?}`", &cx[s]),
+        }
+    }
+}
+
+/// Deferred `OpEntryPoint`, needed because the IDs are initially forward refs.
+struct EntryPoint {
+    params: SmallVec<[spv::Imm; 2]>,
+    interface_ids: SmallVec<[spv::Id; 4]>,
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -134,6 +155,7 @@ impl Module {
 
         let mut has_memory_model = false;
         let mut pending_attr_sets = FxHashMap::<spv::Id, crate::AttrSetDef>::default();
+        let mut pending_entry_points = FxHashMap::<spv::Id, Vec<EntryPoint>>::default();
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         let mut id_defs = FxHashMap::default();
@@ -202,6 +224,41 @@ impl Module {
                 .and_then(|id| pending_attr_sets.remove(&id))
                 .unwrap_or_default();
 
+            if let Some(entries) = inst
+                .result_id
+                .and_then(|id| pending_entry_points.remove(&id))
+            {
+                for entry in entries {
+                    let EntryPoint {
+                        params,
+                        interface_ids,
+                    } = entry;
+                    let interface_global_vars = interface_ids
+                        .into_iter()
+                        .map(|id| match id_defs.get(&id) {
+                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
+                                ConstCtor::PtrToGlobalVar(gv) => Ok(gv),
+                                _ => Err(id_def.descr(&cx)),
+                            },
+                            Some(id_def) => Err(id_def.descr(&cx)),
+                            None => Err(format!("a forward reference to %{}", id)),
+                        })
+                        .map(|result| {
+                            result.map_err(|descr| {
+                                invalid(&format!(
+                                    "unsupported use of {} as an `OpEntryPoint` interface variable",
+                                    descr
+                                ))
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    attr_set.attrs.insert(crate::Attr::SpvEntryPoint {
+                        params,
+                        interface_global_vars: crate::OrdAssertEq(interface_global_vars),
+                    });
+                }
+            }
+
             if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
                 attr_set.attrs.insert(crate::Attr::SpvDebugLine {
@@ -219,7 +276,11 @@ impl Module {
                 .result_type_id
                 .map(|type_id| match id_defs.get(&type_id) {
                     Some(&IdDef::Type(ty)) => Ok(ty),
-                    Some(_) => Err(invalid(&format!("result type %{} not an OpType*", type_id))),
+                    Some(id_def) => Err(invalid(&format!(
+                        "result type %{} should be a type, not a {}",
+                        type_id,
+                        id_def.descr(&cx)
+                    ))),
                     None => Err(invalid(&format!("result type %{} not defined", type_id))),
                 })
                 .transpose()?;
@@ -421,11 +482,10 @@ impl Module {
                     }
                 }
 
-                pending_attr_sets
+                pending_entry_points
                     .entry(target_id)
                     .or_default()
-                    .attrs
-                    .insert(crate::Attr::SpvEntryPoint {
+                    .push(EntryPoint {
                         params,
                         interface_ids,
                     });
@@ -502,18 +562,9 @@ impl Module {
                     .iter()
                     .map(|operand| match *operand {
                         spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                            // FIXME(eddyb) deduplicate these descriptions.
                             Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
                             Some(&IdDef::Const(ct)) => Ok(TypeCtorArg::Const(ct)),
-                            Some(&IdDef::UnknownGlobal(opcode)) => {
-                                Err(format!("`{}`", opcode.name()))
-                            }
-                            Some(&IdDef::SpvExtInstImport(name)) => {
-                                Err(format!("`OpExtInstImport {:?}`", &cx[name]))
-                            }
-                            Some(&IdDef::SpvDebugString(s)) => {
-                                Err(format!("`OpString {:?}`", &cx[s]))
-                            }
+                            Some(id_def) => Err(id_def.descr(&cx)),
                             None => Err(format!("a forward reference to %{}", id)),
                         },
                         spv::Operand::Imm(imm) => Ok(TypeCtorArg::SpvImm(imm)),
@@ -540,22 +591,8 @@ impl Module {
                     .iter()
                     .map(|operand| match *operand {
                         spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                            // FIXME(eddyb) deduplicate these descriptions.
-                            Some(&IdDef::Type(_)) => Err("a type".into()),
                             Some(&IdDef::Const(ct)) => Ok(ConstCtorArg::Const(ct)),
-                            Some(&IdDef::UnknownGlobal(opcode)) => {
-                                if opcode == wk.OpVariable {
-                                    Ok(ConstCtorArg::SpvUntrackedGlobalVarId(id))
-                                } else {
-                                    Err(format!("`{}`", opcode.name()))
-                                }
-                            }
-                            Some(&IdDef::SpvExtInstImport(name)) => {
-                                Err(format!("`OpExtInstImport {:?}`", &cx[name]))
-                            }
-                            Some(&IdDef::SpvDebugString(s)) => {
-                                Err(format!("`OpString {:?}`", &cx[s]))
-                            }
+                            Some(id_def) => Err(id_def.descr(&cx)),
                             None => Err(format!("a forward reference to %{}", id)),
                         },
                         spv::Operand::Imm(imm) => Ok(ConstCtorArg::SpvImm(imm)),
@@ -582,6 +619,62 @@ impl Module {
                 } else {
                     Seq::TypeConstOrGlobalVar
                 }
+            } else if opcode == wk.OpVariable && current_func.is_none() {
+                let global_var_id = inst.result_id.unwrap();
+                let type_of_ptr_to_global_var = result_type.unwrap();
+
+                if inst.operands[0] == storage_class_function_operand {
+                    return Err(invalid("`Function` storage class outside function"));
+                }
+
+                let storage_class = match inst.operands[0] {
+                    spv::Operand::Imm(spv::Imm::Short(kind, storage_class)) => {
+                        assert!(kind == wk.StorageClass);
+                        storage_class
+                    }
+                    _ => unreachable!(),
+                };
+                let initializer = match inst.operands[1..] {
+                    [spv::Operand::Id(kind, initializer)] => {
+                        assert!(kind == wk.IdRef);
+                        Some(initializer)
+                    }
+                    [] => None,
+                    _ => unreachable!(),
+                };
+
+                let initializer = initializer
+                    .map(|id| match id_defs.get(&id) {
+                        Some(&IdDef::Const(ct)) => Ok(ct),
+                        Some(id_def) => Err(id_def.descr(&cx)),
+                        None => Err(format!("a forward reference to %{}", id)),
+                    })
+                    .transpose()
+                    .map_err(|descr| {
+                        invalid(&format!(
+                            "unsupported use of {} as the initializer of a global variable",
+                            descr
+                        ))
+                    })?;
+
+                let global_var = module.global_vars.insert(
+                    &cx,
+                    GlobalVarDef {
+                        type_of_ptr_to: type_of_ptr_to_global_var,
+                        addr_space: AddrSpace::SpvStorageClass(storage_class),
+                        initializer,
+                        attrs: mem::take(&mut attr_set),
+                    },
+                );
+                let ptr_to_global_var = cx.intern(ConstDef {
+                    ty: type_of_ptr_to_global_var,
+                    ctor: ConstCtor::PtrToGlobalVar(global_var),
+                    ctor_args: [].into_iter().collect(),
+                    attrs: AttrSet::default(),
+                });
+                id_defs.insert(global_var_id, IdDef::Const(ptr_to_global_var));
+
+                Seq::TypeConstOrGlobalVar
             } else if opcode == wk.OpFunction {
                 if current_func.is_some() {
                     return Err(invalid("nested OpFunction while still in a function"));
@@ -663,6 +756,11 @@ impl Module {
 
                 Seq::Function
             } else {
+                let func = current_func
+                    .as_mut()
+                    .ok_or_else(|| invalid("expected only inside a function"))?;
+                assert_eq!(seq, Some(Seq::Function));
+
                 let misc = crate::Misc {
                     kind: crate::MiscKind::SpvInst(opcode),
                     output: inst
@@ -683,16 +781,14 @@ impl Module {
                                     Some(&IdDef::SpvExtInstImport(name)) => {
                                         crate::MiscInput::SpvExtInstImport(name)
                                     }
-                                    Some(&IdDef::SpvDebugString(s)) => {
+                                    Some(id_def @ IdDef::SpvDebugString(_)) => {
                                         return Err(invalid(&format!(
-                                            "unsupported use of `OpString {:?}` \
+                                            "unsupported use of {} \
                                              outside `OpSource` or `OpLine`",
-                                            &cx[s]
+                                            id_def.descr(&cx),
                                         )));
                                     }
-                                    Some(IdDef::UnknownGlobal(_)) | None => {
-                                        crate::MiscInput::SpvUntrackedId(id)
-                                    }
+                                    None => crate::MiscInput::SpvUntrackedId(id),
                                 },
                             })
                         })
@@ -700,26 +796,9 @@ impl Module {
                     attrs: mem::take(&mut attr_set),
                 };
 
-                match &mut current_func {
-                    Some(func) => {
-                        assert_eq!(seq, Some(Seq::Function));
-                        func.insts.push(misc);
-                    }
-                    None => {
-                        if let Some(id) = inst.result_id {
-                            id_defs.insert(id, IdDef::UnknownGlobal(opcode));
-                        }
-                        module.globals.push(crate::Global::Misc(misc));
-                    }
-                }
+                func.insts.push(misc);
 
-                // Where `OpVariable` belongs depends on its `StorageClass`
-                // operand is `Function` (function-local) or not (global).
-                if opcode == wk.OpVariable && inst.operands[0] != storage_class_function_operand {
-                    Seq::TypeConstOrGlobalVar
-                } else {
-                    Seq::Function
-                }
+                Seq::Function
             };
             if !(seq <= Some(next_seq)) {
                 return Err(invalid(&format!(
@@ -741,6 +820,37 @@ impl Module {
         if !pending_attr_sets.is_empty() {
             let ids = pending_attr_sets.keys().collect::<BTreeSet<_>>();
             return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
+        }
+
+        if !pending_entry_points.is_empty() {
+            let id_to_entries = pending_entry_points
+                .iter()
+                .map(|(&id, entries)| {
+                    (
+                        id,
+                        entries
+                            .iter()
+                            .map(|entry| {
+                                lazy_format!(
+                                    "`OpEntryPoint {}`",
+                                    spv::print::operands(
+                                        entry
+                                            .params
+                                            .iter()
+                                            .map(|&imm| spv::print::PrintOperand::Imm(imm))
+                                    )
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            return Err(invalid(&format!(
+                "entry-point IDs never defined: {:?}",
+                id_to_entries
+            )));
         }
 
         if current_func.is_some() {

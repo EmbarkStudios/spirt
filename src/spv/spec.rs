@@ -74,6 +74,7 @@ def_well_known! {
         OpTypeInt,
         OpTypeFloat,
         OpTypeForwardPointer,
+        OpTypePointer,
 
         OpUndef,
 

@@ -1,10 +1,17 @@
 use elsa::FrozenIndexSet;
+use rustc_hash::FxHashMap;
+use std::cell::Cell;
 use std::convert::TryInto;
 use std::hash::Hash;
 
-/// Context object with global resources for SPIR-T, such as interners.
+/// Context object with global resources for SPIR-T.
+///
+/// Those resources currently are:
+/// * interners, for anything without an identity, and which can be deduplicated
+/// * unique index allocators, for everything else (i.e. with an identity)
 pub struct Context {
     interners: Interners,
+    uniq_idx_allocs: UniqIdxAllocs,
 }
 
 /// Dispatch helper, to allow implementing interning logic on
@@ -19,12 +26,41 @@ impl Context {
     pub fn new() -> Self {
         Context {
             interners: Interners::default(),
+            uniq_idx_allocs: UniqIdxAllocs::default(),
         }
     }
 
     pub fn intern<T: InternInCx>(&self, x: T) -> T::Interned {
         x.intern_in_cx(self)
     }
+}
+
+/// Map keyed by unique indices allocated from a `Context`.
+///
+/// Only a small number of index and value type combinations are supported, and
+/// by design there is no way to iterate the map, or generate unique indices
+/// without inserting into the map.
+pub struct UniqIdxMap<I, V> {
+    // FIXME(eddyb) use more efficient storage by optimizing for compact ranges,
+    // allowing the use of `Vec` (plus the base index) for the fast path, and
+    // keeping the map as a fallback.
+    map: FxHashMap<I, V>,
+}
+
+impl<I, V> Default for UniqIdxMap<I, V> {
+    fn default() -> Self {
+        Self {
+            map: FxHashMap::default(),
+        }
+    }
+}
+
+impl<I, V> UniqIdxMap<I, V> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // NOTE(eddyb) `insert`/`index` is defined by the `uniq_indices!` macro below.
 }
 
 struct Interner<T: ?Sized>(FrozenIndexSet<Box<T>>);
@@ -71,7 +107,7 @@ macro_rules! interners {
 
         impl Default for Interners {
             fn default() -> Self {
-                let interners = Interners {
+                let interners = Self {
                     $($name: Default::default()),*
                 };
 
@@ -165,4 +201,58 @@ impl InternInCx for crate::ConstDef {
     fn intern_in_cx(self, cx: &Context) -> Self::Interned {
         Const(cx.interners.Const.intern(self))
     }
+}
+
+macro_rules! uniq_indices {
+    (
+        $($name:ident => $ty:ty),+ $(,)?
+    ) => {
+        #[allow(non_snake_case)]
+        struct UniqIdxAllocs {
+            $($name: Cell<u32>),*
+        }
+
+        impl Default for UniqIdxAllocs {
+            fn default() -> Self {
+                Self {
+                    $($name: Default::default()),*
+                }
+            }
+        }
+
+        $(
+            // NOTE(eddyb) never derive `PartialOrd, Ord` for these types, as
+            // observing the unique index allocation order shouldn't be allowed.
+            #[derive(Copy, Clone, PartialEq, Eq, Hash)]
+            pub struct $name(
+                // FIXME(eddyb) figure out how to sneak niches into these types, to
+                // allow e.g. `Option` around them to not increase the size.
+                u32,
+            );
+
+            impl UniqIdxMap<$name, $ty> {
+                pub fn insert(&mut self, cx: &Context, value: $ty) -> $name {
+                    let idx = $name(cx.uniq_idx_allocs.$name.get());
+                    let next_idx = idx.0.checked_add(1).expect("unique index overflowed u32");
+                    cx.uniq_idx_allocs.$name.set(next_idx);
+
+                    assert!(self.map.insert(idx, value).is_none());
+
+                    idx
+                }
+            }
+
+            impl std::ops::Index<$name> for UniqIdxMap<$name, $ty> {
+                type Output = $ty;
+
+                fn index(&self, idx: $name) -> &Self::Output {
+                    &self.map[&idx]
+                }
+            }
+        )*
+    };
+}
+
+uniq_indices! {
+    GlobalVar => crate::GlobalVarDef
 }

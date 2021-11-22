@@ -1,10 +1,12 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    spv, Attr, AttrSet, AttrSetDef, Const, ConstCtorArg, ConstDef, Context, Func, Global, Misc,
-    MiscInput, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtorArg, TypeDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
+    Func, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscOutput, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{fmt, iter};
 
@@ -22,6 +24,12 @@ use std::{fmt, iter};
 /// `Plan` value with `fmt::Display` will print all of the nodes in the `Plan`.
 pub struct Plan<'a> {
     cx: &'a Context,
+
+    /// When visiting anything module-stored (such as global vars), the module
+    /// is needed to go from the index to the definition, which is then cached.
+    current_module: Option<&'a Module>,
+    global_var_def_cache: FxHashMap<GlobalVar, &'a GlobalVarDef>,
+
     nodes: Vec<Node<'a>>,
     use_counts: IndexMap<Use, usize>,
 }
@@ -32,6 +40,8 @@ enum Node<'a> {
     /// Nodes that involve interning and require extra processing to print
     /// (see also `InternedNode`).
     Interned(InternedNode),
+
+    GlobalVar(GlobalVar),
 
     /// Other nodes, which only need to provide a way to collect dependencies
     /// (via `InnerVisit`) and then print the node itself.
@@ -67,6 +77,8 @@ impl<'a, T: DynInnerVisit<'a, Plan<'a>> + Print> DynNode<'a> for T {}
 enum Use {
     Interned(InternedNode),
 
+    GlobalVar(GlobalVar),
+
     // HACK(eddyb) this should be replaced by a proper non-ID def-use graph.
     MiscOutput { result_id: spv::Id },
 }
@@ -75,41 +87,74 @@ impl Use {
     fn category(self) -> &'static str {
         match self {
             Self::Interned(node) => node.category(),
+            Self::GlobalVar(..) => "global_var",
             Self::MiscOutput { .. } => "misc",
         }
     }
 }
 
 impl<'a> Plan<'a> {
-    pub fn empty(cx: &'a Context) -> Self {
+    pub fn empty(module: &'a Module) -> Self {
+        Self {
+            cx: module.cx_ref(),
+            current_module: Some(module),
+            global_var_def_cache: FxHashMap::default(),
+            nodes: vec![],
+            use_counts: IndexMap::new(),
+        }
+    }
+
+    /// Like `empty`, but without supporting anything module-stored (like global vars).
+    pub fn empty_outside_module(cx: &'a Context) -> Self {
         Self {
             cx,
+            current_module: None,
+            global_var_def_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
         }
     }
 
     /// Create a `Plan` with all of `root`'s dependencies, followed by `root` itself.
-    pub fn for_root(cx: &'a Context, root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print)) -> Self {
-        let mut plan = Self::empty(cx);
+    pub fn for_root(
+        module: &'a Module,
+        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print),
+    ) -> Self {
+        let mut plan = Self::empty(module);
+        plan.use_node(Node::Dyn(root));
+        plan
+    }
+
+    /// Like `for_root`, but without supporting anything module-stored (like global vars).
+    pub fn for_root_outside_module(
+        cx: &'a Context,
+        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print),
+    ) -> Self {
+        let mut plan = Self::empty_outside_module(cx);
         plan.use_node(Node::Dyn(root));
         plan
     }
 
     /// Create a `Plan` with all of `module`'s contents.
     ///
-    /// Shorthand for `Plan::for_root(module.cx_ref(), module)`.
+    /// Shorthand for `Plan::for_root(module, module)`.
     pub fn for_module(module: &'a Module) -> Self {
-        Self::for_root(module.cx_ref(), module)
+        Self::for_root(module, module)
     }
 
     /// Add `node` to the plan, after all of its dependencies.
     ///
-    /// For `Node::Interned`, only the first call recurses into the definition,
-    /// subsequent calls only update its (internally tracked) "use count".
+    /// For `Node::Interned` (and the `Node` variants that are module-stored),
+    /// only the first call recurses into the definition, subsequent calls only
+    /// update its (internally tracked) "use count".
     fn use_node(&mut self, node: Node<'a>) {
-        if let Node::Interned(interned) = node {
-            if let Some(use_count) = self.use_counts.get_mut(&Use::Interned(interned)) {
+        let visit_once_use = match node {
+            Node::Interned(node) => Some(Use::Interned(node)),
+            Node::GlobalVar(gv) => Some(Use::GlobalVar(gv)),
+            Node::Dyn(_) => None,
+        };
+        if let Some(visit_once_use) = visit_once_use {
+            if let Some(use_count) = self.use_counts.get_mut(&visit_once_use) {
                 *use_count += 1;
                 return;
             }
@@ -118,22 +163,31 @@ impl<'a> Plan<'a> {
         // FIXME(eddyb) should this be a generic `inner_visit` method on `Node`?
         match node {
             Node::Interned(InternedNode::AttrSet(attrs)) => {
-                self.cx[attrs].inner_visit_with(self);
+                self.visit_attr_set_def(&self.cx[attrs]);
             }
             Node::Interned(InternedNode::Type(ty)) => {
-                self.cx[ty].inner_visit_with(self);
+                self.visit_type_def(&self.cx[ty]);
             }
             Node::Interned(InternedNode::Const(ct)) => {
-                self.cx[ct].inner_visit_with(self);
+                self.visit_const_def(&self.cx[ct]);
             }
 
+            Node::GlobalVar(gv) => match self.global_var_def_cache.get(&gv).copied() {
+                Some(gv_def) => self.visit_global_var_def(gv_def),
+
+                // FIXME(eddyb) should this be a hard error?
+                None => {}
+            },
+
+            // FIXME(eddyb) this could be an issue if `Visitor::visit_...` should
+            // be intercepting this before the `inner_visit_with` part.
             Node::Dyn(node) => node.dyn_inner_visit_with(self),
         }
 
         self.nodes.push(node);
 
-        if let Node::Interned(interned) = node {
-            *self.use_counts.entry(Use::Interned(interned)).or_default() += 1;
+        if let Some(visit_once_use) = visit_once_use {
+            *self.use_counts.entry(visit_once_use).or_default() += 1;
         }
     }
 }
@@ -149,8 +203,23 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Interned(InternedNode::Const(ct)));
     }
 
+    fn visit_global_var_use(&mut self, gv: GlobalVar) {
+        match self.current_module {
+            Some(module) => {
+                self.global_var_def_cache
+                    .insert(gv, &module.global_vars[gv]);
+            }
+
+            // FIXME(eddyb) should this be a hard error?
+            None => {}
+        }
+        self.use_node(Node::GlobalVar(gv));
+    }
+
     fn visit_module(&mut self, module: &'a Module) {
+        let old_module = self.current_module.replace(module);
         self.use_node(Node::Dyn(module));
+        self.current_module = old_module;
     }
     fn visit_module_dialect(&mut self, dialect: &'a ModuleDialect) {
         self.use_node(Node::Dyn(dialect));
@@ -158,26 +227,10 @@ impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_module_debug_info(&mut self, debug_info: &'a ModuleDebugInfo) {
         self.use_node(Node::Dyn(debug_info));
     }
-    fn visit_global(&mut self, global: &'a Global) {
-        self.use_node(Node::Dyn(global));
-    }
     fn visit_func(&mut self, func: &'a Func) {
         self.use_node(Node::Dyn(func));
     }
 
-    fn visit_const_def(&mut self, ct_def: &'a ConstDef) {
-        for &arg in &ct_def.ctor_args {
-            // HACK(eddyb) assume that this ID matches `MiscOutput` of a `Misc`,
-            // but this should be replaced by a proper non-ID def-use graph.
-            if let ConstCtorArg::SpvUntrackedGlobalVarId(id) = arg {
-                *self
-                    .use_counts
-                    .entry(Use::MiscOutput { result_id: id })
-                    .or_default() += 1;
-            }
-        }
-        ct_def.inner_visit_with(self);
-    }
     fn visit_misc_input(&mut self, input: &'a MiscInput) {
         match *input {
             MiscInput::Type(_) | MiscInput::Const(_) => {}
@@ -195,33 +248,6 @@ impl<'a> Visitor<'a> for Plan<'a> {
         }
         input.inner_visit_with(self);
     }
-    fn visit_attr(&mut self, attr: &Attr) {
-        match attr {
-            Attr::SpvEntryPoint {
-                params: _,
-                interface_ids,
-            } => {
-                // HACK(eddyb) assume that these IDs match `MiscOutput` of `Misc`s,
-                // but this should be replaced by a proper non-ID def-use graph.
-                for &id in interface_ids {
-                    *self
-                        .use_counts
-                        .entry(Use::MiscOutput { result_id: id })
-                        .or_default() += 1;
-                }
-            }
-
-            Attr::SpvAnnotation {
-                opcode: _,
-                params: _,
-            }
-            | Attr::SpvDebugLine {
-                file_path: _,
-                line: _,
-                col: _,
-            } => {}
-        }
-    }
 }
 
 impl fmt::Display for Plan<'_> {
@@ -235,6 +261,18 @@ impl fmt::Display for Plan<'_> {
                         printer.interned_node_def_to_string(node, style)
                     }
                     _ => String::new(),
+                },
+
+                Node::GlobalVar(gv) => match self.global_var_def_cache.get(&gv) {
+                    Some(gv_def) => {
+                        let attrs = gv_def.attrs.print_to_string(&printer);
+                        let def = printer.pretty_join_space(
+                            &format!("{} =", gv.print_to_string(&printer)),
+                            [gv_def.print_to_string(&printer)],
+                        );
+                        attrs + &def
+                    }
+                    None => String::new(),
                 },
 
                 Node::Dyn(node) => node.print_to_string(&printer),
@@ -272,6 +310,8 @@ impl<'a> Printer<'a> {
             types: usize,
             consts: usize,
 
+            global_vars: usize,
+
             misc_outputs: usize,
         }
         let mut anon_counters = AnonCounters::default();
@@ -301,7 +341,7 @@ impl<'a> Printer<'a> {
                                 }
                             }
                     }
-                    Use::MiscOutput { .. } => false,
+                    Use::GlobalVar(_) | Use::MiscOutput { .. } => false,
                 };
                 let style = if inline {
                     UseStyle::Inline
@@ -311,6 +351,7 @@ impl<'a> Printer<'a> {
                         Use::Interned(InternedNode::AttrSet(_)) => &mut ac.attr_sets,
                         Use::Interned(InternedNode::Type(_)) => &mut ac.types,
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
+                        Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::MiscOutput { .. } => &mut ac.misc_outputs,
                     };
                     let idx = *counter;
@@ -438,6 +479,7 @@ impl Print for Use {
             }
             UseStyle::Inline => match *self {
                 Self::Interned(node) => printer.interned_node_def_to_string(node, style),
+                Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::MiscOutput { result_id } => format!("/* unused %{} */_", result_id),
             },
         };
@@ -453,7 +495,7 @@ impl Print for Use {
     }
 }
 
-// Interned nodes dispatch through the `Use` impl above.
+// Interned/module-stored nodes dispatch through the `Use` impl above.
 impl Print for AttrSet {
     fn print_to_string(&self, printer: &Printer<'_>) -> String {
         Use::Interned(InternedNode::AttrSet(*self)).print_to_string(printer)
@@ -467,6 +509,11 @@ impl Print for Type {
 impl Print for Const {
     fn print_to_string(&self, printer: &Printer<'_>) -> String {
         Use::Interned(InternedNode::Const(*self)).print_to_string(printer)
+    }
+}
+impl Print for GlobalVar {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        Use::GlobalVar(*self).print_to_string(printer)
     }
 }
 
@@ -620,32 +667,62 @@ impl Print for ConstDef {
         } = self;
 
         printer.pretty_join_space(
-            ctor.name(),
+            &match ctor {
+                ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print_to_string(printer)),
+                ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
+            },
             spv::print::operands(ctor_args.iter().map(|&arg| match arg {
                 ConstCtorArg::Const(ct) => {
                     spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
                 }
 
                 ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                ConstCtorArg::SpvUntrackedGlobalVarId(id) => spv::print::PrintOperand::IdLike(
-                    Use::MiscOutput { result_id: id }.print_to_string(printer),
-                ),
             }))
             .chain([format!(": {}", ty.print_to_string(printer))]),
         )
     }
 }
 
-impl Print for Global {
+impl Print for GlobalVarDef {
     fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        lazy_format!(|f| {
-            match self {
-                Self::Misc(misc) => {
-                    write!(f, "{}", misc.print_to_string(printer))
+        let Self {
+            type_of_ptr_to,
+            addr_space,
+            initializer,
+            attrs: _,
+        } = self;
+
+        let wk = &spv::spec::Spec::get().well_known;
+
+        let ty = {
+            // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
+            // ideally the `GlobalVarDef` would hold that type itself.
+            let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
+
+            if type_of_ptr_to_def.ctor == TypeCtor::SpvInst(wk.OpTypePointer) {
+                match type_of_ptr_to_def.ctor_args[1] {
+                    TypeCtorArg::Type(ty) => ty.print_to_string(printer),
+                    _ => unreachable!(),
                 }
+            } else {
+                format!(
+                    "pointee type of {}",
+                    type_of_ptr_to.print_to_string(printer)
+                )
             }
-        })
-        .to_string()
+        };
+        let addr_space = match *addr_space {
+            AddrSpace::SpvStorageClass(sc) => spv::print::imm(wk.StorageClass, sc),
+        };
+        let initializer = initializer.map(|initializer| {
+            // FIXME(eddyb) find a better syntax for this.
+            format!("init={}", initializer.print_to_string(printer))
+        });
+
+        printer.pretty_join_space(
+            &format!("var({})", addr_space),
+            initializer.into_iter().chain([format!(": {}", ty)]),
+        )
     }
 }
 
@@ -718,16 +795,12 @@ impl Print for Misc {
             })),
         );
 
-        match lhs {
-            Some(lhs) => {
-                if rhs.contains("\n") {
-                    format!("{}{} =\n  {}", attrs, lhs, rhs.replace("\n", "\n  "))
-                } else {
-                    format!("{}{} = {}", attrs, lhs, rhs)
-                }
-            }
-            None => format!("{}{}", attrs, rhs),
-        }
+        let def = match lhs {
+            Some(lhs) => printer.pretty_join_space(&format!("{} =", lhs), [rhs]),
+            None => rhs,
+        };
+
+        attrs + &def
     }
 }
 
@@ -750,17 +823,15 @@ impl Print for AttrSetDef {
                 let attr = match attr {
                     Attr::SpvEntryPoint {
                         params,
-                        interface_ids,
+                        interface_global_vars,
                     } => printer.pretty_join_space(
                         "OpEntryPoint",
                         spv::print::operands(
                             params
                                 .iter()
                                 .map(|&imm| spv::print::PrintOperand::Imm(imm))
-                                .chain(interface_ids.iter().map(|&id| {
-                                    spv::print::PrintOperand::IdLike(
-                                        Use::MiscOutput { result_id: id }.print_to_string(printer),
-                                    )
+                                .chain(interface_global_vars.0.iter().map(|&gv| {
+                                    spv::print::PrintOperand::IdLike(gv.print_to_string(printer))
                                 })),
                         ),
                     ),

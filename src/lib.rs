@@ -2,7 +2,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
-pub use context::{AttrSet, Const, Context, InternedStr, Type};
+pub use context::{AttrSet, Const, Context, GlobalVar, InternedStr, Type};
 
 pub mod print;
 pub mod visit;
@@ -26,7 +26,7 @@ mod sealed {
         pub dialect: ModuleDialect,
         pub debug_info: ModuleDebugInfo,
 
-        pub globals: Vec<Global>,
+        pub global_vars: context::UniqIdxMap<GlobalVar, GlobalVarDef>,
         pub funcs: Vec<Func>,
     }
 
@@ -38,7 +38,7 @@ mod sealed {
                 dialect,
                 debug_info,
 
-                globals: vec![],
+                global_vars: Default::default(),
                 funcs: vec![],
             }
         }
@@ -107,15 +107,9 @@ pub struct ConstDef {
 
 #[derive(PartialEq, Eq, Hash)]
 pub enum ConstCtor {
-    SpvInst(spv::spec::Opcode),
-}
+    PtrToGlobalVar(GlobalVar),
 
-impl ConstCtor {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::SpvInst(opcode) => opcode.name(),
-        }
-    }
+    SpvInst(spv::spec::Opcode),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -126,26 +120,26 @@ pub enum ConstCtorArg {
     // FIXME(eddyb) it might be worth investingating the performance implications
     // of interning "long immediates", compared to the flattened representation.
     SpvImm(spv::Imm),
-
-    // FIXME(eddyb) this is really bad because it's interned and shouldn't have
-    // an ID, but it's hard to determine ahead of time whether an `OpVariable`
-    // can plausibly be considered "constant data", instead of having an identity,
-    // and even then, there may be an usecase for pointers to mutable global vars
-    // in constants. Probably the only way to make it work in the most general
-    // case is to make it point to a `Module` global variable, by either:
-    // * having different "link-time constants" that are kept in `Module` instead
-    // * introducing a notion of "generics", with the real variable pointer being
-    //   "passed in" into the "generic" constant as a "generic parameter"
-    // FIXME(eddyb) consider introducing a "deferred error" system, where the
-    // producer (or `spv::lower`) can keep around errors in the SPIR-T IR, and
-    // still have the opportunity of silencing them e.g. by removing dead code.
-    SpvUntrackedGlobalVarId(spv::Id),
 }
 
-pub enum Global {
-    Misc(Misc),
+pub struct GlobalVarDef {
+    /// The type of a pointer to the global variable (as opposed to the value type).
+    // FIXME(eddyb) try to replace with value type (or at least have that too).
+    pub type_of_ptr_to: Type,
+
+    /// The address space the global variable will be allocated into.
+    pub addr_space: AddrSpace,
+
+    /// If `Some`, the global variable will start out with the specified value.
+    pub initializer: Option<Const>,
+
+    pub attrs: AttrSet,
 }
 
+#[derive(Copy, Clone)]
+pub enum AddrSpace {
+    SpvStorageClass(u32),
+}
 pub struct Func {
     pub insts: Vec<Misc>,
 }
@@ -214,10 +208,10 @@ pub struct AttrSetDef {
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
-    // FIXME(eddyb) de-special-case this by recomputing the interface IDs.
+    // FIXME(eddyb) de-special-case this by recomputing the interface vars.
     SpvEntryPoint {
         params: SmallVec<[spv::Imm; 2]>,
-        interface_ids: SmallVec<[spv::Id; 4]>,
+        interface_global_vars: OrdAssertEq<SmallVec<[GlobalVar; 4]>>,
     },
 
     SpvAnnotation {
