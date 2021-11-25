@@ -70,8 +70,8 @@ impl InternedNode {
     }
 }
 
-trait DynNode<'a>: DynInnerVisit<'a, Plan<'a>> + Print {}
-impl<'a, T: DynInnerVisit<'a, Plan<'a>> + Print> DynNode<'a> for T {}
+trait DynNode<'a>: DynInnerVisit<'a, Plan<'a>> + Print<Output = String> {}
+impl<'a, T: DynInnerVisit<'a, Plan<'a>> + Print<Output = String>> DynNode<'a> for T {}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Use {
@@ -118,7 +118,7 @@ impl<'a> Plan<'a> {
     /// Create a `Plan` with all of `root`'s dependencies, followed by `root` itself.
     pub fn for_root(
         module: &'a Module,
-        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print),
+        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print<Output = String>),
     ) -> Self {
         let mut plan = Self::empty(module);
         plan.use_node(Node::Dyn(root));
@@ -128,7 +128,7 @@ impl<'a> Plan<'a> {
     /// Like `for_root`, but without supporting anything module-stored (like global vars).
     pub fn for_root_outside_module(
         cx: &'a Context,
-        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print),
+        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print<Output = String>),
     ) -> Self {
         let mut plan = Self::empty_outside_module(cx);
         plan.use_node(Node::Dyn(root));
@@ -265,17 +265,15 @@ impl fmt::Display for Plan<'_> {
 
                 Node::GlobalVar(gv) => match self.global_var_def_cache.get(&gv) {
                     Some(gv_def) => {
-                        let attrs = gv_def.attrs.print_to_string(&printer);
-                        let def = printer.pretty_join_space(
-                            &format!("{} =", gv.print_to_string(&printer)),
-                            [gv_def.print_to_string(&printer)],
-                        );
+                        let AttrsAndDef { attrs, def } = gv_def.print(&printer);
+                        let def =
+                            printer.pretty_join_space(&format!("{} =", gv.print(&printer)), [def]);
                         attrs + &def
                     }
                     None => String::new(),
                 },
 
-                Node::Dyn(node) => node.print_to_string(&printer),
+                Node::Dyn(node) => node.print(&printer),
             };
             if !def.is_empty() {
                 writeln!(f, "{}", def)?;
@@ -410,18 +408,17 @@ impl<'a> Printer<'a> {
     }
 
     fn interned_node_def_to_string(&self, node: InternedNode, style: UseStyle) -> String {
-        let (attrs_of_def, def) = match node {
-            InternedNode::AttrSet(attrs) => (None, self.cx[attrs].print_to_string(self)),
-            InternedNode::Type(ty) => {
-                let ty_def = &self.cx[ty];
-                (Some(ty_def.attrs), ty_def.print_to_string(self))
-            }
-            InternedNode::Const(ct) => {
-                let ct_def = &self.cx[ct];
-                (Some(ct_def.attrs), ct_def.print_to_string(self))
-            }
+        let AttrsAndDef {
+            attrs: attrs_of_def,
+            def,
+        } = match node {
+            InternedNode::AttrSet(attrs) => AttrsAndDef {
+                attrs: String::new(),
+                def: self.cx[attrs].print(self),
+            },
+            InternedNode::Type(ty) => self.cx[ty].print(self),
+            InternedNode::Const(ct) => self.cx[ct].print(self),
         };
-        let attrs_of_def = attrs_of_def.map_or(String::new(), |attrs| attrs.print_to_string(self));
 
         match style {
             UseStyle::Anon { idx } => {
@@ -459,11 +456,20 @@ impl<'a> Printer<'a> {
 }
 
 pub trait Print {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String;
+    type Output;
+    fn print(&self, printer: &Printer<'_>) -> Self::Output;
+}
+
+/// A `Print` `Output` type that splits the attributes from the main body of the
+/// definition, allowing additional processing before they get concatenated.
+pub struct AttrsAndDef {
+    pub attrs: String,
+    pub def: String,
 }
 
 impl Print for Use {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
         let style = printer
             .use_styles
             .get(self)
@@ -497,28 +503,33 @@ impl Print for Use {
 
 // Interned/module-stored nodes dispatch through the `Use` impl above.
 impl Print for AttrSet {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        Use::Interned(InternedNode::AttrSet(*self)).print_to_string(printer)
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        Use::Interned(InternedNode::AttrSet(*self)).print(printer)
     }
 }
 impl Print for Type {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        Use::Interned(InternedNode::Type(*self)).print_to_string(printer)
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        Use::Interned(InternedNode::Type(*self)).print(printer)
     }
 }
 impl Print for Const {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        Use::Interned(InternedNode::Const(*self)).print_to_string(printer)
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        Use::Interned(InternedNode::Const(*self)).print(printer)
     }
 }
 impl Print for GlobalVar {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        Use::GlobalVar(*self).print_to_string(printer)
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        Use::GlobalVar(*self).print(printer)
     }
 }
 
 impl Print for Module {
-    fn print_to_string(&self, _printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, _printer: &Printer<'_>) -> String {
         lazy_format!(|_f| {
             // Nothing left to print at the end of the module.
             Ok(())
@@ -528,7 +539,8 @@ impl Print for Module {
 }
 
 impl Print for ModuleDialect {
-    fn print_to_string(&self, _printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, _printer: &Printer<'_>) -> String {
         lazy_format!(|f| {
             write!(f, "module.dialect = ")?;
             match self {
@@ -575,7 +587,8 @@ impl Print for ModuleDialect {
 }
 
 impl Print for ModuleDebugInfo {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
         lazy_format!(|f| {
             write!(f, "module.debug_info = ")?;
             match self {
@@ -634,7 +647,8 @@ impl Print for ModuleDebugInfo {
 }
 
 impl Print for AttrSetDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
         lazy_format!(|f| {
             let Self { attrs } = self;
 
@@ -660,7 +674,7 @@ impl Print for AttrSetDef {
                                 .iter()
                                 .map(|&imm| spv::print::PrintOperand::Imm(imm))
                                 .chain(interface_global_vars.0.iter().map(|&gv| {
-                                    spv::print::PrintOperand::IdLike(gv.print_to_string(printer))
+                                    spv::print::PrintOperand::IdLike(gv.print(printer))
                                 })),
                         ),
                     ),
@@ -708,59 +722,62 @@ impl Print for AttrSetDef {
 }
 
 impl Print for TypeDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
-            attrs: _,
+            attrs,
             ctor,
             ctor_args,
         } = self;
 
-        printer.pretty_join_space(
-            ctor.name(),
-            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                TypeCtorArg::Type(ty) => {
-                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
-                }
-                TypeCtorArg::Const(ct) => {
-                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
-                }
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def: printer.pretty_join_space(
+                ctor.name(),
+                spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                    TypeCtorArg::Type(ty) => spv::print::PrintOperand::IdLike(ty.print(printer)),
+                    TypeCtorArg::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
 
-                TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-            })),
-        )
+                    TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                })),
+            ),
+        }
     }
 }
 
 impl Print for ConstDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
-            attrs: _,
+            attrs,
             ty,
             ctor,
             ctor_args,
         } = self;
 
-        printer.pretty_join_space(
-            &match ctor {
-                ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print_to_string(printer)),
-                ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
-            },
-            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                ConstCtorArg::Const(ct) => {
-                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
-                }
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def: printer.pretty_join_space(
+                &match ctor {
+                    ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
+                    ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
+                },
+                spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                    ConstCtorArg::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
 
-                ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-            }))
-            .chain([format!(": {}", ty.print_to_string(printer))]),
-        )
+                    ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                }))
+                .chain([format!(": {}", ty.print(printer))]),
+            ),
+        }
     }
 }
 
 impl Print for GlobalVarDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
-            attrs: _,
+            attrs,
             type_of_ptr_to,
             addr_space,
             initializer,
@@ -775,14 +792,11 @@ impl Print for GlobalVarDef {
 
             if type_of_ptr_to_def.ctor == TypeCtor::SpvInst(wk.OpTypePointer) {
                 match type_of_ptr_to_def.ctor_args[1] {
-                    TypeCtorArg::Type(ty) => ty.print_to_string(printer),
+                    TypeCtorArg::Type(ty) => ty.print(printer),
                     _ => unreachable!(),
                 }
             } else {
-                format!(
-                    "pointee type of {}",
-                    type_of_ptr_to.print_to_string(printer)
-                )
+                format!("pointee type of {}", type_of_ptr_to.print(printer))
             }
         };
         let addr_space = match *addr_space {
@@ -790,29 +804,29 @@ impl Print for GlobalVarDef {
         };
         let initializer = initializer.map(|initializer| {
             // FIXME(eddyb) find a better syntax for this.
-            format!("init={}", initializer.print_to_string(printer))
+            format!("init={}", initializer.print(printer))
         });
 
-        printer.pretty_join_space(
-            &format!("var({})", addr_space),
-            initializer.into_iter().chain([format!(": {}", ty)]),
-        )
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def: printer.pretty_join_space(
+                &format!("var({})", addr_space),
+                initializer.into_iter().chain([format!(": {}", ty)]),
+            ),
+        }
     }
 }
 
 impl Print for Func {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
         lazy_format!(|f| {
             let Self { insts } = self;
 
             // FIXME(eddyb) describe the function outside of its `insts`.
             writeln!(f, "func {{")?;
             for misc in insts {
-                writeln!(
-                    f,
-                    "  {}",
-                    misc.print_to_string(printer).replace("\n", "\n  ")
-                )?;
+                writeln!(f, "  {}", misc.print(printer).replace("\n", "\n  "))?;
             }
             write!(f, "}}")
         })
@@ -821,7 +835,8 @@ impl Print for Func {
 }
 
 impl Print for Misc {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
         let Self {
             attrs,
             kind,
@@ -829,11 +844,11 @@ impl Print for Misc {
             inputs,
         } = self;
 
-        let attrs = attrs.print_to_string(printer);
+        let attrs = attrs.print(printer);
 
         // HACK(eddyb) assume that these IDs match `MiscOutput` of `Misc`s,
         // but this should be replaced by a proper non-ID def-use graph.
-        let spv_id_to_string = |id| Use::MiscOutput { result_id: id }.print_to_string(printer);
+        let spv_id_to_string = |id| Use::MiscOutput { result_id: id }.print(printer);
 
         let lhs = output.map(|output| match output {
             MiscOutput::SpvResult {
@@ -842,7 +857,7 @@ impl Print for Misc {
             } => {
                 let result = spv_id_to_string(result_id);
                 match result_type {
-                    Some(ty) => format!("{}: {}", result, ty.print_to_string(printer)),
+                    Some(ty) => format!("{}: {}", result, ty.print(printer)),
                     None => result,
                 }
             }
@@ -851,12 +866,8 @@ impl Print for Misc {
         let rhs = printer.pretty_join_space(
             kind.name(),
             spv::print::operands(inputs.iter().map(|input| match *input {
-                MiscInput::Type(ty) => {
-                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
-                }
-                MiscInput::Const(ct) => {
-                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
-                }
+                MiscInput::Type(ty) => spv::print::PrintOperand::IdLike(ty.print(printer)),
+                MiscInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
 
                 MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
                 MiscInput::SpvUntrackedId(id) => {
