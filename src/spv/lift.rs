@@ -107,6 +107,15 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                 .extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
         }
     }
+
+    fn visit_attr(&mut self, attr: &Attr) {
+        match *attr {
+            Attr::SpvEntryPoint { .. } | Attr::SpvAnnotation { .. } => {}
+            Attr::SpvDebugLine { file_path, .. } => {
+                self.debug_strings.insert(&self.cx[file_path.0]);
+            }
+        }
+    }
     fn visit_misc_output(&mut self, output: &MiscOutput) {
         match *output {
             MiscOutput::SpvResult { result_id, .. } => {
@@ -126,14 +135,6 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             }
         }
         input.inner_visit_with(self);
-    }
-    fn visit_attr(&mut self, attr: &Attr) {
-        match *attr {
-            Attr::SpvEntryPoint { .. } | Attr::SpvAnnotation { .. } => {}
-            Attr::SpvDebugLine { file_path, .. } => {
-                self.debug_strings.insert(&self.cx[file_path.0]);
-            }
-        }
     }
 }
 
@@ -292,8 +293,8 @@ impl Module {
                     let ct_def = &cx[ct];
                     match ct_def.ctor {
                         ConstCtor::PtrToGlobalVar(gv) => {
-                            assert!(ct_def.ctor_args.is_empty());
                             assert!(ct_def.attrs == AttrSet::default());
+                            assert!(ct_def.ctor_args.is_empty());
 
                             let gv_def = &self.global_vars[gv];
 
@@ -444,10 +445,10 @@ impl Module {
                     .chain(interface_global_vars.0.iter().map(|&gv| {
                         let type_of_ptr_to_global_var = self.global_vars[gv].type_of_ptr_to;
                         let ptr_to_global_var = cx.intern(ConstDef {
+                            attrs: AttrSet::default(),
                             ty: type_of_ptr_to_global_var,
                             ctor: ConstCtor::PtrToGlobalVar(gv),
                             ctor_args: [].into_iter().collect(),
-                            attrs: AttrSet::default(),
                         });
                         spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ptr_to_global_var)])
                     }))

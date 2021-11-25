@@ -633,177 +633,6 @@ impl Print for ModuleDebugInfo {
     }
 }
 
-impl Print for TypeDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        let Self {
-            ctor,
-            ctor_args,
-            attrs: _,
-        } = self;
-
-        printer.pretty_join_space(
-            ctor.name(),
-            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                TypeCtorArg::Type(ty) => {
-                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
-                }
-                TypeCtorArg::Const(ct) => {
-                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
-                }
-
-                TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-            })),
-        )
-    }
-}
-
-impl Print for ConstDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        let Self {
-            ty,
-            ctor,
-            ctor_args,
-            attrs: _,
-        } = self;
-
-        printer.pretty_join_space(
-            &match ctor {
-                ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print_to_string(printer)),
-                ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
-            },
-            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                ConstCtorArg::Const(ct) => {
-                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
-                }
-
-                ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-            }))
-            .chain([format!(": {}", ty.print_to_string(printer))]),
-        )
-    }
-}
-
-impl Print for GlobalVarDef {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        let Self {
-            type_of_ptr_to,
-            addr_space,
-            initializer,
-            attrs: _,
-        } = self;
-
-        let wk = &spv::spec::Spec::get().well_known;
-
-        let ty = {
-            // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
-            // ideally the `GlobalVarDef` would hold that type itself.
-            let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
-
-            if type_of_ptr_to_def.ctor == TypeCtor::SpvInst(wk.OpTypePointer) {
-                match type_of_ptr_to_def.ctor_args[1] {
-                    TypeCtorArg::Type(ty) => ty.print_to_string(printer),
-                    _ => unreachable!(),
-                }
-            } else {
-                format!(
-                    "pointee type of {}",
-                    type_of_ptr_to.print_to_string(printer)
-                )
-            }
-        };
-        let addr_space = match *addr_space {
-            AddrSpace::SpvStorageClass(sc) => spv::print::imm(wk.StorageClass, sc),
-        };
-        let initializer = initializer.map(|initializer| {
-            // FIXME(eddyb) find a better syntax for this.
-            format!("init={}", initializer.print_to_string(printer))
-        });
-
-        printer.pretty_join_space(
-            &format!("var({})", addr_space),
-            initializer.into_iter().chain([format!(": {}", ty)]),
-        )
-    }
-}
-
-impl Print for Func {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        lazy_format!(|f| {
-            let Self { insts } = self;
-
-            // FIXME(eddyb) describe the function outside of its `insts`.
-            writeln!(f, "func {{")?;
-            for misc in insts {
-                writeln!(
-                    f,
-                    "  {}",
-                    misc.print_to_string(printer).replace("\n", "\n  ")
-                )?;
-            }
-            write!(f, "}}")
-        })
-        .to_string()
-    }
-}
-
-impl Print for Misc {
-    fn print_to_string(&self, printer: &Printer<'_>) -> String {
-        let Self {
-            kind,
-            output,
-            inputs,
-            attrs,
-        } = self;
-
-        let attrs = attrs.print_to_string(printer);
-
-        // HACK(eddyb) assume that these IDs match `MiscOutput` of `Misc`s,
-        // but this should be replaced by a proper non-ID def-use graph.
-        let spv_id_to_string = |id| Use::MiscOutput { result_id: id }.print_to_string(printer);
-
-        let lhs = output.map(|output| match output {
-            MiscOutput::SpvResult {
-                result_type,
-                result_id,
-            } => {
-                let result = spv_id_to_string(result_id);
-                match result_type {
-                    Some(ty) => format!("{}: {}", result, ty.print_to_string(printer)),
-                    None => result,
-                }
-            }
-        });
-
-        let rhs = printer.pretty_join_space(
-            kind.name(),
-            spv::print::operands(inputs.iter().map(|input| match *input {
-                MiscInput::Type(ty) => {
-                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
-                }
-                MiscInput::Const(ct) => {
-                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
-                }
-
-                MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                MiscInput::SpvUntrackedId(id) => {
-                    spv::print::PrintOperand::IdLike(spv_id_to_string(id))
-                }
-                MiscInput::SpvExtInstImport(name) => spv::print::PrintOperand::IdLike(format!(
-                    "(OpExtInstImport {:?})",
-                    &printer.cx[name]
-                )),
-            })),
-        );
-
-        let def = match lhs {
-            Some(lhs) => printer.pretty_join_space(&format!("{} =", lhs), [rhs]),
-            None => rhs,
-        };
-
-        attrs + &def
-    }
-}
-
 impl Print for AttrSetDef {
     fn print_to_string(&self, printer: &Printer<'_>) -> String {
         lazy_format!(|f| {
@@ -875,5 +704,176 @@ impl Print for AttrSetDef {
             write!(f, "}}")
         })
         .to_string()
+    }
+}
+
+impl Print for TypeDef {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        let Self {
+            attrs: _,
+            ctor,
+            ctor_args,
+        } = self;
+
+        printer.pretty_join_space(
+            ctor.name(),
+            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                TypeCtorArg::Type(ty) => {
+                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
+                }
+                TypeCtorArg::Const(ct) => {
+                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
+                }
+
+                TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+            })),
+        )
+    }
+}
+
+impl Print for ConstDef {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        let Self {
+            attrs: _,
+            ty,
+            ctor,
+            ctor_args,
+        } = self;
+
+        printer.pretty_join_space(
+            &match ctor {
+                ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print_to_string(printer)),
+                ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
+            },
+            spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                ConstCtorArg::Const(ct) => {
+                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
+                }
+
+                ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+            }))
+            .chain([format!(": {}", ty.print_to_string(printer))]),
+        )
+    }
+}
+
+impl Print for GlobalVarDef {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        let Self {
+            attrs: _,
+            type_of_ptr_to,
+            addr_space,
+            initializer,
+        } = self;
+
+        let wk = &spv::spec::Spec::get().well_known;
+
+        let ty = {
+            // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
+            // ideally the `GlobalVarDef` would hold that type itself.
+            let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
+
+            if type_of_ptr_to_def.ctor == TypeCtor::SpvInst(wk.OpTypePointer) {
+                match type_of_ptr_to_def.ctor_args[1] {
+                    TypeCtorArg::Type(ty) => ty.print_to_string(printer),
+                    _ => unreachable!(),
+                }
+            } else {
+                format!(
+                    "pointee type of {}",
+                    type_of_ptr_to.print_to_string(printer)
+                )
+            }
+        };
+        let addr_space = match *addr_space {
+            AddrSpace::SpvStorageClass(sc) => spv::print::imm(wk.StorageClass, sc),
+        };
+        let initializer = initializer.map(|initializer| {
+            // FIXME(eddyb) find a better syntax for this.
+            format!("init={}", initializer.print_to_string(printer))
+        });
+
+        printer.pretty_join_space(
+            &format!("var({})", addr_space),
+            initializer.into_iter().chain([format!(": {}", ty)]),
+        )
+    }
+}
+
+impl Print for Func {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        lazy_format!(|f| {
+            let Self { insts } = self;
+
+            // FIXME(eddyb) describe the function outside of its `insts`.
+            writeln!(f, "func {{")?;
+            for misc in insts {
+                writeln!(
+                    f,
+                    "  {}",
+                    misc.print_to_string(printer).replace("\n", "\n  ")
+                )?;
+            }
+            write!(f, "}}")
+        })
+        .to_string()
+    }
+}
+
+impl Print for Misc {
+    fn print_to_string(&self, printer: &Printer<'_>) -> String {
+        let Self {
+            attrs,
+            kind,
+            output,
+            inputs,
+        } = self;
+
+        let attrs = attrs.print_to_string(printer);
+
+        // HACK(eddyb) assume that these IDs match `MiscOutput` of `Misc`s,
+        // but this should be replaced by a proper non-ID def-use graph.
+        let spv_id_to_string = |id| Use::MiscOutput { result_id: id }.print_to_string(printer);
+
+        let lhs = output.map(|output| match output {
+            MiscOutput::SpvResult {
+                result_type,
+                result_id,
+            } => {
+                let result = spv_id_to_string(result_id);
+                match result_type {
+                    Some(ty) => format!("{}: {}", result, ty.print_to_string(printer)),
+                    None => result,
+                }
+            }
+        });
+
+        let rhs = printer.pretty_join_space(
+            kind.name(),
+            spv::print::operands(inputs.iter().map(|input| match *input {
+                MiscInput::Type(ty) => {
+                    spv::print::PrintOperand::IdLike(ty.print_to_string(printer))
+                }
+                MiscInput::Const(ct) => {
+                    spv::print::PrintOperand::IdLike(ct.print_to_string(printer))
+                }
+
+                MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                MiscInput::SpvUntrackedId(id) => {
+                    spv::print::PrintOperand::IdLike(spv_id_to_string(id))
+                }
+                MiscInput::SpvExtInstImport(name) => spv::print::PrintOperand::IdLike(format!(
+                    "(OpExtInstImport {:?})",
+                    &printer.cx[name]
+                )),
+            })),
+        );
+
+        let def = match lhs {
+            Some(lhs) => printer.pretty_join_space(&format!("{} =", lhs), [rhs]),
+            None => rhs,
+        };
+
+        attrs + &def
     }
 }

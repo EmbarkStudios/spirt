@@ -154,7 +154,7 @@ impl Module {
         let mut seq = None;
 
         let mut has_memory_model = false;
-        let mut pending_attr_sets = FxHashMap::<spv::Id, crate::AttrSetDef>::default();
+        let mut pending_attrs = FxHashMap::<spv::Id, crate::AttrSetDef>::default();
         let mut pending_entry_points = FxHashMap::<spv::Id, Vec<EntryPoint>>::default();
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
@@ -219,9 +219,9 @@ impl Module {
             }
             current_block_id = new_block_id;
 
-            let mut attr_set = inst
+            let mut attrs = inst
                 .result_id
-                .and_then(|id| pending_attr_sets.remove(&id))
+                .and_then(|id| pending_attrs.remove(&id))
                 .unwrap_or_default();
 
             if let Some(entries) = inst
@@ -252,7 +252,7 @@ impl Module {
                             })
                         })
                         .collect::<Result<_, _>>()?;
-                    attr_set.attrs.insert(crate::Attr::SpvEntryPoint {
+                    attrs.attrs.insert(crate::Attr::SpvEntryPoint {
                         params,
                         interface_global_vars: crate::OrdAssertEq(interface_global_vars),
                     });
@@ -261,14 +261,14 @@ impl Module {
 
             if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
-                attr_set.attrs.insert(crate::Attr::SpvDebugLine {
+                attrs.attrs.insert(crate::Attr::SpvDebugLine {
                     file_path: crate::OrdAssertEq(file_path),
                     line,
                     col,
                 });
             }
 
-            let mut attr_set = cx.intern(attr_set);
+            let mut attrs = cx.intern(attrs);
 
             // FIXME(eddyb) move this kind of lookup into methods on some sort
             // of "lowering context" type.
@@ -520,7 +520,7 @@ impl Module {
                         spv::Operand::Id(..) => Err(invalid("unsupported decoration with ID")),
                     })
                     .collect::<Result<_, _>>()?;
-                pending_attr_sets
+                pending_attrs
                     .entry(target_id)
                     .or_default()
                     .attrs
@@ -547,9 +547,9 @@ impl Module {
                 // require fixpoint (aka "μ" aka "mu") types - but for now this
                 // serves as a first approximation for a "deferred error".
                 let ty = cx.intern(TypeDef {
+                    attrs: mem::take(&mut attrs),
                     ctor: TypeCtor::SpvInst(opcode),
                     ctor_args: [TypeCtorArg::SpvImm(sc)].into_iter().collect(),
-                    attrs: mem::take(&mut attr_set),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
@@ -577,9 +577,9 @@ impl Module {
                     .collect::<Result<_, _>>()?;
 
                 let ty = cx.intern(TypeDef {
+                    attrs: mem::take(&mut attrs),
                     ctor: TypeCtor::SpvInst(opcode),
                     ctor_args: type_ctor_args,
-                    attrs: mem::take(&mut attr_set),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
@@ -605,10 +605,10 @@ impl Module {
                     .collect::<Result<_, _>>()?;
 
                 let ct = cx.intern(ConstDef {
+                    attrs: mem::take(&mut attrs),
                     ty: result_type.unwrap(),
                     ctor: ConstCtor::SpvInst(opcode),
                     ctor_args: const_ctor_args,
-                    attrs: mem::take(&mut attr_set),
                 });
                 id_defs.insert(id, IdDef::Const(ct));
 
@@ -660,17 +660,17 @@ impl Module {
                 let global_var = module.global_vars.insert(
                     &cx,
                     GlobalVarDef {
+                        attrs: mem::take(&mut attrs),
                         type_of_ptr_to: type_of_ptr_to_global_var,
                         addr_space: AddrSpace::SpvStorageClass(storage_class),
                         initializer,
-                        attrs: mem::take(&mut attr_set),
                     },
                 );
                 let ptr_to_global_var = cx.intern(ConstDef {
+                    attrs: AttrSet::default(),
                     ty: type_of_ptr_to_global_var,
                     ctor: ConstCtor::PtrToGlobalVar(global_var),
                     ctor_args: [].into_iter().collect(),
-                    attrs: AttrSet::default(),
                 });
                 id_defs.insert(global_var_id, IdDef::Const(ptr_to_global_var));
 
@@ -717,6 +717,7 @@ impl Module {
                 // FIXME(eddyb) pull out this information from the first entry
                 // in the `insts` field, into new fields of `Func`.
                 let func_inst = crate::Misc {
+                    attrs: mem::take(&mut attrs),
                     kind: crate::MiscKind::SpvInst(opcode),
                     output: Some(crate::MiscOutput::SpvResult {
                         result_type: Some(func_ret_type),
@@ -728,7 +729,6 @@ impl Module {
                     ]
                     .into_iter()
                     .collect(),
-                    attrs: mem::take(&mut attr_set),
                 };
 
                 current_func = Some(crate::Func {
@@ -746,10 +746,10 @@ impl Module {
 
                 // FIXME(eddyb) don't keep this instruction explicitly.
                 func.insts.push(crate::Misc {
+                    attrs: crate::AttrSet::default(),
                     kind: crate::MiscKind::SpvInst(opcode),
                     output: None,
                     inputs: [].into_iter().collect(),
-                    attrs: crate::AttrSet::default(),
                 });
 
                 module.funcs.push(func);
@@ -762,6 +762,7 @@ impl Module {
                 assert_eq!(seq, Some(Seq::Function));
 
                 let misc = crate::Misc {
+                    attrs: mem::take(&mut attrs),
                     kind: crate::MiscKind::SpvInst(opcode),
                     output: inst
                         .result_id
@@ -793,7 +794,6 @@ impl Module {
                             })
                         })
                         .collect::<Result<_, _>>()?,
-                    attrs: mem::take(&mut attr_set),
                 };
 
                 func.insts.push(misc);
@@ -808,7 +808,7 @@ impl Module {
             }
             seq = Some(next_seq);
 
-            if attr_set != Default::default() {
+            if attrs != Default::default() {
                 return Err(invalid("unused decorations / line debuginfo"));
             }
         }
@@ -817,8 +817,8 @@ impl Module {
             return Err(invalid("missing OpMemoryModel"));
         }
 
-        if !pending_attr_sets.is_empty() {
-            let ids = pending_attr_sets.keys().collect::<BTreeSet<_>>();
+        if !pending_attrs.is_empty() {
+            let ids = pending_attrs.keys().collect::<BTreeSet<_>>();
             return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
         }
 

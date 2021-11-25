@@ -31,6 +31,12 @@ pub trait Visitor<'a>: Sized {
     fn visit_module_debug_info(&mut self, debug_info: &'a ModuleDebugInfo) {
         debug_info.inner_visit_with(self);
     }
+    fn visit_attr_set_def(&mut self, attrs_def: &'a AttrSetDef) {
+        attrs_def.inner_visit_with(self);
+    }
+    fn visit_attr(&mut self, attr: &'a Attr) {
+        attr.inner_visit_with(self);
+    }
     fn visit_type_def(&mut self, ty_def: &'a TypeDef) {
         ty_def.inner_visit_with(self);
     }
@@ -51,12 +57,6 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_misc_input(&mut self, input: &'a MiscInput) {
         input.inner_visit_with(self);
-    }
-    fn visit_attr_set_def(&mut self, attrs_def: &'a AttrSetDef) {
-        attrs_def.inner_visit_with(self);
-    }
-    fn visit_attr(&mut self, attr: &'a Attr) {
-        attr.inner_visit_with(self);
     }
 }
 
@@ -124,14 +124,41 @@ impl InnerVisit for ModuleDebugInfo {
     }
 }
 
+impl InnerVisit for AttrSetDef {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { attrs } = self;
+
+        for attr in attrs {
+            visitor.visit_attr(attr);
+        }
+    }
+}
+
+impl InnerVisit for Attr {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            Self::SpvEntryPoint {
+                params: _,
+                interface_global_vars,
+            } => {
+                for &gv in &interface_global_vars.0 {
+                    visitor.visit_global_var_use(gv);
+                }
+            }
+            Self::SpvAnnotation { .. } | Self::SpvDebugLine { .. } => {}
+        }
+    }
+}
+
 impl InnerVisit for TypeDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
+            attrs,
             ctor,
             ctor_args,
-            attrs,
         } = self;
 
+        visitor.visit_attr_set_use(*attrs);
         match ctor {
             TypeCtor::SpvInst(_) => {}
         }
@@ -143,19 +170,19 @@ impl InnerVisit for TypeDef {
                 TypeCtorArg::SpvImm(_) => {}
             }
         }
-        visitor.visit_attr_set_use(*attrs);
     }
 }
 
 impl InnerVisit for ConstDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
+            attrs,
             ty,
             ctor,
             ctor_args,
-            attrs,
         } = self;
 
+        visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ty);
         match *ctor {
             ConstCtor::SpvInst(_) => {}
@@ -168,19 +195,19 @@ impl InnerVisit for ConstDef {
                 ConstCtorArg::SpvImm(_) => {}
             }
         }
-        visitor.visit_attr_set_use(*attrs);
     }
 }
 
 impl InnerVisit for GlobalVarDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
+            attrs,
             type_of_ptr_to,
             addr_space,
             initializer,
-            attrs,
         } = self;
 
+        visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*type_of_ptr_to);
         match addr_space {
             AddrSpace::SpvStorageClass(_) => {}
@@ -188,7 +215,6 @@ impl InnerVisit for GlobalVarDef {
         if let Some(initializer) = *initializer {
             visitor.visit_const_use(initializer);
         }
-        visitor.visit_attr_set_use(*attrs);
     }
 }
 
@@ -205,12 +231,13 @@ impl InnerVisit for Func {
 impl InnerVisit for Misc {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
+            attrs,
             kind,
             output,
             inputs,
-            attrs,
         } = self;
 
+        visitor.visit_attr_set_use(*attrs);
         match kind {
             MiscKind::SpvInst(_) => {}
         }
@@ -220,7 +247,6 @@ impl InnerVisit for Misc {
         for input in inputs {
             visitor.visit_misc_input(input);
         }
-        visitor.visit_attr_set_use(*attrs);
     }
 }
 
@@ -246,32 +272,6 @@ impl InnerVisit for MiscInput {
             Self::Const(ct) => visitor.visit_const_use(ct),
 
             Self::SpvImm(_) | Self::SpvUntrackedId(_) | Self::SpvExtInstImport(_) => {}
-        }
-    }
-}
-
-impl InnerVisit for AttrSetDef {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs } = self;
-
-        for attr in attrs {
-            visitor.visit_attr(attr);
-        }
-    }
-}
-
-impl InnerVisit for Attr {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        match self {
-            Self::SpvEntryPoint {
-                params: _,
-                interface_global_vars,
-            } => {
-                for &gv in &interface_global_vars.0 {
-                    visitor.visit_global_var_use(gv);
-                }
-            }
-            Self::SpvAnnotation { .. } | Self::SpvDebugLine { .. } => {}
         }
     }
 }

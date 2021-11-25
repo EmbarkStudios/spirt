@@ -64,135 +64,6 @@ pub enum ModuleDebugInfo {
     Spv(spv::ModuleDebugInfo),
 }
 
-// FIXME(eddyb) maybe special-case some basic types like integers.
-#[derive(PartialEq, Eq, Hash)]
-pub struct TypeDef {
-    pub ctor: TypeCtor,
-    pub ctor_args: SmallVec<[TypeCtorArg; 2]>,
-    pub attrs: AttrSet,
-}
-
-#[derive(PartialEq, Eq, Hash)]
-pub enum TypeCtor {
-    SpvInst(spv::spec::Opcode),
-}
-
-impl TypeCtor {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::SpvInst(opcode) => opcode.name(),
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum TypeCtorArg {
-    Type(Type),
-    Const(Const),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investingating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    SpvImm(spv::Imm),
-}
-
-// FIXME(eddyb) maybe special-case some basic consts like integer literals.
-#[derive(PartialEq, Eq, Hash)]
-pub struct ConstDef {
-    pub ty: Type,
-    pub ctor: ConstCtor,
-    pub ctor_args: SmallVec<[ConstCtorArg; 2]>,
-    pub attrs: AttrSet,
-}
-
-#[derive(PartialEq, Eq, Hash)]
-pub enum ConstCtor {
-    PtrToGlobalVar(GlobalVar),
-
-    SpvInst(spv::spec::Opcode),
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ConstCtorArg {
-    Const(Const),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investingating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    SpvImm(spv::Imm),
-}
-
-pub struct GlobalVarDef {
-    /// The type of a pointer to the global variable (as opposed to the value type).
-    // FIXME(eddyb) try to replace with value type (or at least have that too).
-    pub type_of_ptr_to: Type,
-
-    /// The address space the global variable will be allocated into.
-    pub addr_space: AddrSpace,
-
-    /// If `Some`, the global variable will start out with the specified value.
-    pub initializer: Option<Const>,
-
-    pub attrs: AttrSet,
-}
-
-#[derive(Copy, Clone)]
-pub enum AddrSpace {
-    SpvStorageClass(u32),
-}
-pub struct Func {
-    pub insts: Vec<Misc>,
-}
-
-pub struct Misc {
-    pub kind: MiscKind,
-
-    // FIXME(eddyb) track this entirely as a def-use graph.
-    pub output: Option<MiscOutput>,
-
-    // FIXME(eddyb) maybe split inputs into "params" and "value inputs"?
-    // (would "params" only contain immediates, or also e.g. types?)
-    pub inputs: SmallVec<[MiscInput; 2]>,
-
-    pub attrs: AttrSet,
-}
-
-pub enum MiscKind {
-    SpvInst(spv::spec::Opcode),
-}
-
-impl MiscKind {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::SpvInst(opcode) => opcode.name(),
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-pub enum MiscOutput {
-    SpvResult {
-        result_type: Option<Type>,
-        result_id: spv::Id,
-    },
-}
-
-#[derive(Copy, Clone)]
-pub enum MiscInput {
-    Type(Type),
-    Const(Const),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investingating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    SpvImm(spv::Imm),
-
-    // FIXME(eddyb) get rid of this by tracking all entities SPIR-V uses ID for.
-    SpvUntrackedId(spv::Id),
-
-    SpvExtInstImport(InternedStr),
-}
-
 #[derive(Default, PartialEq, Eq, Hash)]
 pub struct AttrSetDef {
     // FIXME(eddyb) use `BTreeMap<Attr, AttrValue>` and split some of the params
@@ -250,4 +121,133 @@ impl<T: Eq> Ord for OrdAssertEq<T> {
         );
         std::cmp::Ordering::Equal
     }
+}
+
+// FIXME(eddyb) maybe special-case some basic types like integers.
+#[derive(PartialEq, Eq, Hash)]
+pub struct TypeDef {
+    pub attrs: AttrSet,
+    pub ctor: TypeCtor,
+    pub ctor_args: SmallVec<[TypeCtorArg; 2]>,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub enum TypeCtor {
+    SpvInst(spv::spec::Opcode),
+}
+
+impl TypeCtor {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SpvInst(opcode) => opcode.name(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum TypeCtorArg {
+    Type(Type),
+    Const(Const),
+
+    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investingating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    SpvImm(spv::Imm),
+}
+
+// FIXME(eddyb) maybe special-case some basic consts like integer literals.
+#[derive(PartialEq, Eq, Hash)]
+pub struct ConstDef {
+    pub attrs: AttrSet,
+    pub ty: Type,
+    pub ctor: ConstCtor,
+    pub ctor_args: SmallVec<[ConstCtorArg; 2]>,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub enum ConstCtor {
+    PtrToGlobalVar(GlobalVar),
+
+    SpvInst(spv::spec::Opcode),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ConstCtorArg {
+    Const(Const),
+
+    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investingating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    SpvImm(spv::Imm),
+}
+
+pub struct GlobalVarDef {
+    pub attrs: AttrSet,
+
+    /// The type of a pointer to the global variable (as opposed to the value type).
+    // FIXME(eddyb) try to replace with value type (or at least have that too).
+    pub type_of_ptr_to: Type,
+
+    /// The address space the global variable will be allocated into.
+    pub addr_space: AddrSpace,
+
+    /// If `Some`, the global variable will start out with the specified value.
+    pub initializer: Option<Const>,
+}
+
+#[derive(Copy, Clone)]
+pub enum AddrSpace {
+    SpvStorageClass(u32),
+}
+pub struct Func {
+    pub insts: Vec<Misc>,
+}
+
+pub struct Misc {
+    pub attrs: AttrSet,
+
+    pub kind: MiscKind,
+
+    // FIXME(eddyb) track this entirely as a def-use graph.
+    pub output: Option<MiscOutput>,
+
+    // FIXME(eddyb) maybe split inputs into "params" and "value inputs"?
+    // (would "params" only contain immediates, or also e.g. types?)
+    pub inputs: SmallVec<[MiscInput; 2]>,
+}
+
+pub enum MiscKind {
+    SpvInst(spv::spec::Opcode),
+}
+
+impl MiscKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SpvInst(opcode) => opcode.name(),
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum MiscOutput {
+    SpvResult {
+        result_type: Option<Type>,
+        result_id: spv::Id,
+    },
+}
+
+#[derive(Copy, Clone)]
+pub enum MiscInput {
+    Type(Type),
+    Const(Const),
+
+    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investingating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    SpvImm(spv::Imm),
+
+    // FIXME(eddyb) get rid of this by tracking all entities SPIR-V uses ID for.
+    SpvUntrackedId(spv::Id),
+
+    SpvExtInstImport(InternedStr),
 }
