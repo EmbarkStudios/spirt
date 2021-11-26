@@ -1,7 +1,7 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Func,
-    GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -16,6 +16,7 @@ pub trait Visitor<'a>: Sized {
 
     // Module-stored (but context-allocated indices) leaves (no default provided).
     fn visit_global_var_use(&mut self, gv: GlobalVar);
+    fn visit_func_use(&mut self, func: Func);
 
     // Leaves (noop default behavior).
     fn visit_spv_dialect(&mut self, _dialect: &spv::Dialect) {}
@@ -46,8 +47,8 @@ pub trait Visitor<'a>: Sized {
     fn visit_global_var_def(&mut self, gv_def: &'a GlobalVarDef) {
         gv_def.inner_visit_with(self);
     }
-    fn visit_func(&mut self, func: &'a Func) {
-        func.inner_visit_with(self);
+    fn visit_func_def(&mut self, func_def: &'a FuncDef) {
+        func_def.inner_visit_with(self);
     }
     fn visit_misc(&mut self, misc: &'a Misc) {
         misc.inner_visit_with(self);
@@ -94,14 +95,15 @@ impl InnerVisit for Module {
             dialect,
             debug_info,
             global_vars: _,
-            funcs,
+            funcs: _,
+            root_funcs,
             ..
         } = self;
 
         visitor.visit_module_dialect(dialect);
         visitor.visit_module_debug_info(debug_info);
-        for func in funcs {
-            visitor.visit_func(func);
+        for &func in root_funcs {
+            visitor.visit_func_use(func);
         }
     }
 }
@@ -145,7 +147,9 @@ impl InnerVisit for Attr {
                     visitor.visit_global_var_use(gv);
                 }
             }
-            Self::SpvAnnotation { .. } | Self::SpvDebugLine { .. } => {}
+            Self::SpvAnnotation { .. }
+            | Self::SpvDebugLine { .. }
+            | Self::SpvBitflagsOperand(_) => {}
         }
     }
 }
@@ -185,8 +189,8 @@ impl InnerVisit for ConstDef {
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ty);
         match *ctor {
-            ConstCtor::SpvInst(_) => {}
             ConstCtor::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
+            ConstCtor::SpvInst(_) => {}
         }
         for &arg in ctor_args {
             match arg {
@@ -218,10 +222,18 @@ impl InnerVisit for GlobalVarDef {
     }
 }
 
-impl InnerVisit for Func {
+impl InnerVisit for FuncDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { insts } = self;
+        let Self {
+            attrs,
+            ret_type,
+            ty,
+            insts,
+        } = self;
 
+        visitor.visit_attr_set_use(*attrs);
+        visitor.visit_type_use(*ret_type);
+        visitor.visit_type_use(*ty);
         for inst in insts {
             visitor.visit_misc(inst);
         }
@@ -238,7 +250,8 @@ impl InnerVisit for Misc {
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
-        match kind {
+        match *kind {
+            MiscKind::FuncCall(func) => visitor.visit_func_use(func),
             MiscKind::SpvInst(_) => {}
         }
         if let Some(output) = output {

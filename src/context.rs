@@ -249,10 +249,17 @@ macro_rules! uniq_indices {
                     &self.map[&idx]
                 }
             }
+
+            impl std::ops::IndexMut<$name> for UniqIdxMap<$name, $ty> {
+                fn index_mut(&mut self, idx: $name) -> &mut Self::Output {
+                    self.map.get_mut(&idx).unwrap()
+                }
+            }
         )*
     };
 }
 
 uniq_indices! {
-    GlobalVar => crate::GlobalVarDef
+    GlobalVar => crate::GlobalVarDef,
+    Func => crate::FuncDef,
 }

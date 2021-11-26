@@ -3,8 +3,9 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    AddrSpace, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, GlobalVarDef,
-    InternedStr, Module, Type, TypeCtor, TypeCtorArg, TypeDef,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, Func, FuncDef,
+    GlobalVarDef, InternedStr, Misc, MiscInput, MiscKind, MiscOutput, Module, Type, TypeCtor,
+    TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use rustc_hash::FxHashMap;
@@ -20,6 +21,8 @@ enum IdDef {
     Type(Type),
     Const(Const),
 
+    Func(Func),
+
     SpvExtInstImport(InternedStr),
     SpvDebugString(InternedStr),
 }
@@ -31,6 +34,8 @@ impl IdDef {
             // instead of just describing the kind of definition.
             IdDef::Type(_) => "a type".into(),
             IdDef::Const(_) => "a constant".into(),
+
+            IdDef::Func(_) => "a function".into(),
 
             IdDef::SpvExtInstImport(name) => {
                 format!("`OpExtInstImport {:?}`", &cx[name])
@@ -44,6 +49,25 @@ impl IdDef {
 struct EntryPoint {
     params: SmallVec<[spv::Imm; 2]>,
     interface_ids: SmallVec<[spv::Id; 4]>,
+}
+
+/// Deferred `FuncDef` body, needed because some IDs are initially forward refs.
+struct FuncBody {
+    func: Func,
+    insts: Vec<IntraFuncInst>,
+}
+
+struct IntraFuncInst {
+    // Instruction aspects that can be pre-lowered:
+    attrs: AttrSet,
+    result_type: Option<Type>,
+
+    // Instruction aspects that cannot be lowered initially (due to forward refs):
+    opcode: spec::Opcode,
+    result_id: Option<spv::Id>,
+
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    operands: SmallVec<[spv::Operand; 2]>,
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -159,10 +183,11 @@ impl Module {
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         let mut id_defs = FxHashMap::default();
-        let mut current_func = None;
+        let mut pending_func_bodies = vec![];
+        let mut current_func_body = None;
 
         let mut spv_insts = parser.peekable();
-        while let Some(inst) = spv_insts.next().transpose()? {
+        while let Some(mut inst) = spv_insts.next().transpose()? {
             let opcode = inst.opcode;
 
             let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
@@ -252,7 +277,7 @@ impl Module {
                             })
                         })
                         .collect::<Result<_, _>>()?;
-                    attrs.attrs.insert(crate::Attr::SpvEntryPoint {
+                    attrs.attrs.insert(Attr::SpvEntryPoint {
                         params,
                         interface_global_vars: crate::OrdAssertEq(interface_global_vars),
                     });
@@ -261,12 +286,26 @@ impl Module {
 
             if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
-                attrs.attrs.insert(crate::Attr::SpvDebugLine {
+                attrs.attrs.insert(Attr::SpvDebugLine {
                     file_path: crate::OrdAssertEq(file_path),
                     line,
                     col,
                 });
             }
+
+            // Take certain bitflags operands out of the instruction and rewrite
+            // them into attributes instead.
+            inst.operands.retain(|operand| match *operand {
+                spv::Operand::Imm(imm @ spv::Imm::Short(kind, word))
+                    if kind == wk.FunctionControl =>
+                {
+                    if word != 0 {
+                        attrs.attrs.insert(Attr::SpvBitflagsOperand(imm));
+                    }
+                    false
+                }
+                _ => true,
+            });
 
             let mut attrs = cx.intern(attrs);
 
@@ -524,7 +563,7 @@ impl Module {
                     .entry(target_id)
                     .or_default()
                     .attrs
-                    .insert(crate::Attr::SpvAnnotation { opcode, params });
+                    .insert(Attr::SpvAnnotation { opcode, params });
 
                 if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
                     Seq::ExecutionMode
@@ -619,7 +658,7 @@ impl Module {
                 } else {
                     Seq::TypeConstOrGlobalVar
                 }
-            } else if opcode == wk.OpVariable && current_func.is_none() {
+            } else if opcode == wk.OpVariable && current_func_body.is_none() {
                 let global_var_id = inst.result_id.unwrap();
                 let type_of_ptr_to_global_var = result_type.unwrap();
 
@@ -676,7 +715,7 @@ impl Module {
 
                 Seq::TypeConstOrGlobalVar
             } else if opcode == wk.OpFunction {
-                if current_func.is_some() {
+                if current_func_body.is_some() {
                     return Err(invalid("nested OpFunction while still in a function"));
                 }
 
@@ -685,13 +724,12 @@ impl Module {
                 // type, *not* the function type, which is in `func_type`.
                 let func_ret_type = result_type.unwrap();
 
-                let (func_ctrl, func_type_id) = match inst.operands[..] {
-                    [
-                        spv::Operand::Imm(spv::Imm::Short(fc_kind, func_ctrl)),
-                        spv::Operand::Id(ft_kind, func_type_id),
-                    ] => {
-                        assert!(fc_kind == wk.FunctionControl && ft_kind == wk.IdRef);
-                        (func_ctrl, func_type_id)
+                let func_type_id = match inst.operands[..] {
+                    // NOTE(eddyb) the `FunctionControl` operand is already gone,
+                    // having been converted into an attribute above.
+                    [spv::Operand::Id(kind, func_type_id)] => {
+                        assert!(kind == wk.IdRef);
+                        func_type_id
                     }
                     _ => unreachable!(),
                 };
@@ -714,25 +752,20 @@ impl Module {
                     }
                 };
 
-                // FIXME(eddyb) pull out this information from the first entry
-                // in the `insts` field, into new fields of `Func`.
-                let func_inst = crate::Misc {
-                    attrs: mem::take(&mut attrs),
-                    kind: crate::MiscKind::SpvInst(opcode),
-                    output: Some(crate::MiscOutput::SpvResult {
-                        result_type: Some(func_ret_type),
-                        result_id: func_id,
-                    }),
-                    inputs: [
-                        crate::MiscInput::SpvImm(spv::Imm::Short(wk.FunctionControl, func_ctrl)),
-                        crate::MiscInput::Type(func_type),
-                    ]
-                    .into_iter()
-                    .collect(),
-                };
+                let func = module.funcs.insert(
+                    &cx,
+                    FuncDef {
+                        attrs: mem::take(&mut attrs),
+                        ret_type: func_ret_type,
+                        ty: func_type,
+                        insts: vec![],
+                    },
+                );
+                id_defs.insert(func_id, IdDef::Func(func));
 
-                current_func = Some(crate::Func {
-                    insts: vec![func_inst],
+                current_func_body = Some(FuncBody {
+                    func,
+                    insts: vec![],
                 });
 
                 Seq::Function
@@ -740,63 +773,27 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 assert!(inst.operands.is_empty());
 
-                let mut func = current_func
+                let func_body = current_func_body
                     .take()
                     .ok_or_else(|| invalid("nested OpFunction while still in a function"))?;
 
-                // FIXME(eddyb) don't keep this instruction explicitly.
-                func.insts.push(crate::Misc {
-                    attrs: crate::AttrSet::default(),
-                    kind: crate::MiscKind::SpvInst(opcode),
-                    output: None,
-                    inputs: [].into_iter().collect(),
-                });
-
-                module.funcs.push(func);
+                pending_func_bodies.push(func_body);
 
                 Seq::Function
             } else {
-                let func = current_func
+                let func_body = current_func_body
                     .as_mut()
                     .ok_or_else(|| invalid("expected only inside a function"))?;
                 assert_eq!(seq, Some(Seq::Function));
 
-                let misc = crate::Misc {
+                func_body.insts.push(IntraFuncInst {
                     attrs: mem::take(&mut attrs),
-                    kind: crate::MiscKind::SpvInst(opcode),
-                    output: inst
-                        .result_id
-                        .map(|result_id| crate::MiscOutput::SpvResult {
-                            result_type,
-                            result_id,
-                        }),
-                    inputs: inst
-                        .operands
-                        .iter()
-                        .map(|operand| {
-                            Ok(match *operand {
-                                spv::Operand::Imm(imm) => crate::MiscInput::SpvImm(imm),
-                                spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                    Some(&IdDef::Type(ty)) => crate::MiscInput::Type(ty),
-                                    Some(&IdDef::Const(ct)) => crate::MiscInput::Const(ct),
-                                    Some(&IdDef::SpvExtInstImport(name)) => {
-                                        crate::MiscInput::SpvExtInstImport(name)
-                                    }
-                                    Some(id_def @ IdDef::SpvDebugString(_)) => {
-                                        return Err(invalid(&format!(
-                                            "unsupported use of {} \
-                                             outside `OpSource` or `OpLine`",
-                                            id_def.descr(&cx),
-                                        )));
-                                    }
-                                    None => crate::MiscInput::SpvUntrackedId(id),
-                                },
-                            })
-                        })
-                        .collect::<Result<_, _>>()?,
-                };
+                    result_type,
 
-                func.insts.push(misc);
+                    opcode,
+                    result_id: inst.result_id,
+                    operands: inst.operands,
+                });
 
                 Seq::Function
             };
@@ -853,8 +850,118 @@ impl Module {
             )));
         }
 
-        if current_func.is_some() {
+        if current_func_body.is_some() {
             return Err(invalid("OpFunction without matching OpFunctionEnd"));
+        }
+
+        // Process function bodies, having seen the whole module.
+        for func_body in pending_func_bodies {
+            let FuncBody { func, insts } = func_body;
+            let insts = insts
+                .into_iter()
+                .map(|inst| -> io::Result<_> {
+                    let IntraFuncInst {
+                        attrs,
+                        result_type,
+                        opcode,
+                        result_id,
+                        mut operands,
+                    } = inst;
+
+                    let kind = if opcode == wk.OpFunctionCall {
+                        let callee_id = match operands[0] {
+                            spv::Operand::Id(kind, id) => {
+                                assert!(kind == wk.IdRef);
+                                id
+                            }
+                            _ => unreachable!(),
+                        };
+                        let maybe_callee = id_defs
+                            .get(&callee_id)
+                            .map(|id_def| match *id_def {
+                                IdDef::Func(func) => Ok(func),
+                                _ => Err(id_def.descr(&cx)),
+                            })
+                            .transpose()
+                            .map_err(|descr| {
+                                invalid(&format!(
+                                    "unsupported use of {} as the `OpFunctionCall` callee",
+                                    descr
+                                ))
+                            })?;
+
+                        match maybe_callee {
+                            Some(callee) => {
+                                operands.remove(0);
+                                MiscKind::FuncCall(callee)
+                            }
+
+                            // HACK(eddyb) this should be an error, but it shows
+                            // up in Rust-GPU output (likely a zombie?).
+                            None => MiscKind::SpvInst(opcode),
+                        }
+                    } else {
+                        MiscKind::SpvInst(opcode)
+                    };
+
+                    Ok(Misc {
+                        attrs,
+                        kind,
+                        output: result_id.map(|result_id| MiscOutput::SpvResult {
+                            result_type,
+                            result_id,
+                        }),
+                        inputs: operands
+                            .iter()
+                            .map(|operand| {
+                                Ok(match *operand {
+                                    spv::Operand::Imm(imm) => MiscInput::SpvImm(imm),
+                                    spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                                        Some(&IdDef::Type(ty)) => MiscInput::Type(ty),
+                                        Some(&IdDef::Const(ct)) => MiscInput::Const(ct),
+                                        Some(&IdDef::SpvExtInstImport(name)) => {
+                                            MiscInput::SpvExtInstImport(name)
+                                        }
+                                        Some(id_def @ IdDef::Func(_)) => {
+                                            return Err(invalid(&format!(
+                                                "unsupported use of {} \
+                                                 outside `OpFunctionCall`",
+                                                id_def.descr(&cx),
+                                            )));
+                                        }
+                                        Some(id_def @ IdDef::SpvDebugString(_)) => {
+                                            return Err(invalid(&format!(
+                                                "unsupported use of {} \
+                                                 outside `OpSource` or `OpLine`",
+                                                id_def.descr(&cx),
+                                            )));
+                                        }
+                                        None => MiscInput::SpvUntrackedId(id),
+                                    },
+                                })
+                            })
+                            .collect::<Result<_, _>>()?,
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+
+            let func_def = &mut module.funcs[func];
+            assert!(func_def.insts.is_empty());
+            func_def.insts = insts;
+
+            // FIXME(eddyb) replace with a proper export list.
+            let is_root = cx[func_def.attrs].attrs.iter().any(|attr| match attr {
+                Attr::SpvEntryPoint { .. } => true,
+                Attr::SpvAnnotation { opcode, params } => {
+                    *opcode == wk.OpDecorate
+                        && params[0] == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
+                        && params.last() == Some(&spv::Imm::Short(wk.LinkageType, wk.Export))
+                }
+                Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => false,
+            });
+            if is_root {
+                module.root_funcs.push(func);
+            }
         }
 
         Ok(module)

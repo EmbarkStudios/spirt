@@ -1,8 +1,8 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    Func, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscOutput, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    Func, FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -25,10 +25,11 @@ use std::{fmt, iter};
 pub struct Plan<'a> {
     cx: &'a Context,
 
-    /// When visiting anything module-stored (such as global vars), the module
+    /// When visiting anything module-stored (global vars and funcs), the module
     /// is needed to go from the index to the definition, which is then cached.
     current_module: Option<&'a Module>,
     global_var_def_cache: FxHashMap<GlobalVar, &'a GlobalVarDef>,
+    func_def_cache: FxHashMap<Func, &'a FuncDef>,
 
     nodes: Vec<Node<'a>>,
     use_counts: IndexMap<Use, usize>,
@@ -42,6 +43,7 @@ enum Node<'a> {
     Interned(InternedNode),
 
     GlobalVar(GlobalVar),
+    Func(Func),
 
     /// Other nodes, which only need to provide a way to collect dependencies
     /// (via `InnerVisit`) and then print the node itself.
@@ -78,6 +80,7 @@ enum Use {
     Interned(InternedNode),
 
     GlobalVar(GlobalVar),
+    Func(Func),
 
     // HACK(eddyb) this should be replaced by a proper non-ID def-use graph.
     MiscOutput { result_id: spv::Id },
@@ -87,7 +90,8 @@ impl Use {
     fn category(self) -> &'static str {
         match self {
             Self::Interned(node) => node.category(),
-            Self::GlobalVar(..) => "global_var",
+            Self::GlobalVar(_) => "global_var",
+            Self::Func(_) => "func",
             Self::MiscOutput { .. } => "misc",
         }
     }
@@ -99,6 +103,7 @@ impl<'a> Plan<'a> {
             cx: module.cx_ref(),
             current_module: Some(module),
             global_var_def_cache: FxHashMap::default(),
+            func_def_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
         }
@@ -110,6 +115,7 @@ impl<'a> Plan<'a> {
             cx,
             current_module: None,
             global_var_def_cache: FxHashMap::default(),
+            func_def_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
         }
@@ -151,6 +157,7 @@ impl<'a> Plan<'a> {
         let visit_once_use = match node {
             Node::Interned(node) => Some(Use::Interned(node)),
             Node::GlobalVar(gv) => Some(Use::GlobalVar(gv)),
+            Node::Func(func) => Some(Use::Func(func)),
             Node::Dyn(_) => None,
         };
         if let Some(visit_once_use) = visit_once_use {
@@ -174,6 +181,13 @@ impl<'a> Plan<'a> {
 
             Node::GlobalVar(gv) => match self.global_var_def_cache.get(&gv).copied() {
                 Some(gv_def) => self.visit_global_var_def(gv_def),
+
+                // FIXME(eddyb) should this be a hard error?
+                None => {}
+            },
+
+            Node::Func(func) => match self.func_def_cache.get(&func).copied() {
+                Some(func_def) => self.visit_func_def(func_def),
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
@@ -216,6 +230,28 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::GlobalVar(gv));
     }
 
+    fn visit_func_use(&mut self, func: Func) {
+        match self.current_module {
+            Some(module) => {
+                use std::collections::hash_map::Entry;
+
+                match self.func_def_cache.entry(func) {
+                    Entry::Occupied(_) => {
+                        // Avoid infinite recursion for recursive functions.
+                        return;
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(&module.funcs[func]);
+                    }
+                }
+            }
+
+            // FIXME(eddyb) should this be a hard error?
+            None => {}
+        }
+        self.use_node(Node::Func(func));
+    }
+
     fn visit_module(&mut self, module: &'a Module) {
         let old_module = self.current_module.replace(module);
         self.use_node(Node::Dyn(module));
@@ -226,9 +262,6 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
     fn visit_module_debug_info(&mut self, debug_info: &'a ModuleDebugInfo) {
         self.use_node(Node::Dyn(debug_info));
-    }
-    fn visit_func(&mut self, func: &'a Func) {
-        self.use_node(Node::Dyn(func));
     }
 
     fn visit_misc_input(&mut self, input: &'a MiscInput) {
@@ -273,6 +306,14 @@ impl fmt::Display for Plan<'_> {
                     None => String::new(),
                 },
 
+                Node::Func(func) => match self.func_def_cache.get(&func) {
+                    Some(func_def) => {
+                        let AttrsAndDef { attrs, def } = func_def.print(&printer);
+                        attrs + &func.print(&printer) + &def
+                    }
+                    None => String::new(),
+                },
+
                 Node::Dyn(node) => node.print(&printer),
             };
             if !def.is_empty() {
@@ -309,6 +350,7 @@ impl<'a> Printer<'a> {
             consts: usize,
 
             global_vars: usize,
+            funcs: usize,
 
             misc_outputs: usize,
         }
@@ -339,7 +381,7 @@ impl<'a> Printer<'a> {
                                 }
                             }
                     }
-                    Use::GlobalVar(_) | Use::MiscOutput { .. } => false,
+                    Use::GlobalVar(_) | Use::Func(_) | Use::MiscOutput { .. } => false,
                 };
                 let style = if inline {
                     UseStyle::Inline
@@ -350,6 +392,7 @@ impl<'a> Printer<'a> {
                         Use::Interned(InternedNode::Type(_)) => &mut ac.types,
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
+                        Use::Func(_) => &mut ac.funcs,
                         Use::MiscOutput { .. } => &mut ac.misc_outputs,
                     };
                     let idx = *counter;
@@ -486,6 +529,7 @@ impl Print for Use {
             UseStyle::Inline => match *self {
                 Self::Interned(node) => printer.interned_node_def_to_string(node, style),
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
+                Self::Func(_) => format!("/* unused func */_"),
                 Self::MiscOutput { result_id } => format!("/* unused %{} */_", result_id),
             },
         };
@@ -524,6 +568,12 @@ impl Print for GlobalVar {
     type Output = String;
     fn print(&self, printer: &Printer<'_>) -> String {
         Use::GlobalVar(*self).print(printer)
+    }
+}
+impl Print for Func {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        Use::Func(*self).print(printer)
     }
 }
 
@@ -705,6 +755,11 @@ impl Print for AttrSetDef {
                             format!("/* at {:?}:{}:{} */", file_path, line, col)
                         }
                     }
+                    &Attr::SpvBitflagsOperand(imm) => spv::print::operands(
+                        [imm].iter().map(|&imm| spv::print::PrintOperand::Imm(imm)),
+                    )
+                    .collect::<SmallVec<[_; 1]>>()
+                    .join(" "),
                 };
                 if force_multiline || attr.contains("\n") {
                     if !force_multiline {
@@ -817,20 +872,58 @@ impl Print for GlobalVarDef {
     }
 }
 
-impl Print for Func {
-    type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
-        lazy_format!(|f| {
-            let Self { insts } = self;
+impl Print for FuncDef {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+        let Self {
+            attrs,
+            ret_type: _,
+            ty,
+            insts,
+        } = self;
 
-            // FIXME(eddyb) describe the function outside of its `insts`.
-            writeln!(f, "func {{")?;
-            for misc in insts {
-                writeln!(f, "  {}", misc.print(printer).replace("\n", "\n  "))?;
+        let wk = &spv::spec::Spec::get().well_known;
+
+        let sig = {
+            // HACK(eddyb) get the signature from SPIR-V `OpTypeFunction`, but
+            // ideally the `FuncDef` would hold all of the types itself.
+            let func_ty_def = &printer.cx[*ty];
+
+            if func_ty_def.ctor == TypeCtor::SpvInst(wk.OpTypeFunction) {
+                let mut types = func_ty_def.ctor_args.iter().map(|&arg| match arg {
+                    TypeCtorArg::Type(ty) => ty.print(printer),
+                    _ => unreachable!(),
+                });
+                let ret_type = types.next().unwrap();
+                let param_types: SmallVec<[_; 16]> = types.collect();
+
+                // FIXME(eddyb) enforce a max line width - sadly, this cannot
+                // just use `pretty_join_space`, because that doesn't do commas.
+                let fits_on_single_line = param_types.iter().all(|ty| !ty.contains("\n"));
+
+                let params = if fits_on_single_line {
+                    format!("({})", param_types.join(", "))
+                } else {
+                    // FIXME(eddyb) automate reindenting (and make it configurable).
+                    format!("(\n  {},\n)", param_types.join(",\n").replace("\n", "\n  "))
+                };
+                params + " -> " + &ret_type
+            } else {
+                format!("(...): {}", ty.print(printer))
             }
-            write!(f, "}}")
-        })
-        .to_string()
+        };
+
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def: lazy_format!(|f| {
+                writeln!(f, "{} {{", sig)?;
+                for misc in insts {
+                    writeln!(f, "  {}", misc.print(printer).replace("\n", "\n  "))?;
+                }
+                write!(f, "}}")
+            })
+            .to_string(),
+        }
     }
 }
 
@@ -864,7 +957,10 @@ impl Print for Misc {
         });
 
         let rhs = printer.pretty_join_space(
-            kind.name(),
+            &match kind {
+                MiscKind::FuncCall(func) => format!("call {}", func.print(printer)),
+                MiscKind::SpvInst(opcode) => opcode.name().to_string(),
+            },
             spv::print::operands(inputs.iter().map(|input| match *input {
                 MiscInput::Type(ty) => spv::print::PrintOperand::IdLike(ty.print(printer)),
                 MiscInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),

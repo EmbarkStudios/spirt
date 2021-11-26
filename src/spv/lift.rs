@@ -3,9 +3,9 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, GlobalVar, Misc,
-    MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor,
-    TypeCtorArg,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, Func, FuncDef,
+    GlobalVar, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg,
 };
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,6 +65,7 @@ struct NeedsIdsCollector<'a> {
     debug_strings: BTreeSet<&'a str>,
 
     globals: IndexSet<Global>,
+    funcs: IndexSet<Func>,
 
     old_outputs: IndexSet<spv::Id>,
 }
@@ -99,6 +100,16 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
         self.visit_global_var_def(&self.module.global_vars[gv]);
     }
+    fn visit_func_use(&mut self, func: Func) {
+        if self.funcs.contains(&func) {
+            return;
+        }
+        // NOTE(eddyb) inserting first results in a different function ordering
+        // in the resulting module, but the order doesn't matter, and we need
+        // to avoid infinite recursion for recursive functions.
+        self.funcs.insert(func);
+        self.visit_func_def(&self.module.funcs[func]);
+    }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
         for sources in debug_info.source_languages.values() {
@@ -110,7 +121,9 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
 
     fn visit_attr(&mut self, attr: &Attr) {
         match *attr {
-            Attr::SpvEntryPoint { .. } | Attr::SpvAnnotation { .. } => {}
+            Attr::SpvEntryPoint { .. }
+            | Attr::SpvAnnotation { .. }
+            | Attr::SpvBitflagsOperand(_) => {}
             Attr::SpvDebugLine { file_path, .. } => {
                 self.debug_strings.insert(&self.cx[file_path.0]);
             }
@@ -143,6 +156,7 @@ struct AllocatedIds<'a> {
     debug_strings: BTreeMap<&'a str, spv::Id>,
 
     globals: IndexMap<Global, spv::Id>,
+    funcs: IndexMap<Func, spv::Id>,
 
     old_outputs: IndexMap<spv::Id, spv::Id>,
 }
@@ -158,6 +172,7 @@ impl<'a> NeedsIdsCollector<'a> {
             ext_inst_imports,
             debug_strings,
             globals,
+            funcs,
             old_outputs,
         } = self;
 
@@ -174,6 +189,10 @@ impl<'a> NeedsIdsCollector<'a> {
                 .into_iter()
                 .map(|g| Ok((g, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
+            funcs: funcs
+                .into_iter()
+                .map(|func| Ok((func, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
             old_outputs: old_outputs
                 .into_iter()
                 .map(|old_id| Ok((old_id, alloc_id()?)))
@@ -188,7 +207,9 @@ impl<'a> NeedsIdsCollector<'a> {
 #[derive(Copy, Clone)]
 enum LazyInst<'a> {
     Global(Global),
+    OpFunction { func: Func, func_def: &'a FuncDef },
     Misc(&'a Misc),
+    OpFunctionEnd,
 }
 
 impl LazyInst<'_> {
@@ -213,6 +234,7 @@ impl LazyInst<'_> {
                 };
                 (Some(ids.globals[&global]), attrs)
             }
+            Self::OpFunction { func, func_def } => (Some(ids.funcs[&func]), func_def.attrs),
             Self::Misc(misc) => {
                 let result_id = misc.output.as_ref().map(|old_output| match *old_output {
                     MiscOutput::SpvResult {
@@ -222,6 +244,7 @@ impl LazyInst<'_> {
                 });
                 (result_id, misc.attrs)
             }
+            Self::OpFunctionEnd => (None, AttrSet::default()),
         }
     }
 
@@ -300,39 +323,77 @@ impl LazyInst<'_> {
                     }
                 }
             },
-
-            Self::Misc(misc) => spv::Inst {
-                opcode: match misc.kind {
-                    MiscKind::SpvInst(opcode) => opcode,
-                },
-                result_type_id: misc
-                    .output
-                    .as_ref()
-                    .and_then(|old_output| match *old_output {
-                        MiscOutput::SpvResult { result_type, .. } => {
-                            result_type.map(|ty| ids.globals[&Global::Type(ty)])
-                        }
-                    }),
-                result_id,
-                operands: misc
-                    .inputs
+            Self::OpFunction { func: _, func_def } => {
+                // FIXME(eddyb) make this less of a search and more of a
+                // lookup by splitting attrs into key and value parts.
+                let func_ctrl = cx[attrs]
+                    .attrs
                     .iter()
-                    .map(|input| match *input {
-                        MiscInput::Type(ty) => {
-                            spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(ty)])
+                    .find_map(|attr| match *attr {
+                        Attr::SpvBitflagsOperand(spv::Imm::Short(kind, word))
+                            if kind == wk.FunctionControl =>
+                        {
+                            Some(word)
                         }
-                        MiscInput::Const(ct) => {
-                            spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
-                        }
-                        MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                        MiscInput::SpvUntrackedId(old_id) => {
-                            spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
-                        }
-                        MiscInput::SpvExtInstImport(name) => {
-                            spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
-                        }
+                        _ => None,
                     })
+                    .unwrap_or(0);
+                spv::Inst {
+                    opcode: wk.OpFunction,
+                    result_type_id: Some(ids.globals[&Global::Type(func_def.ret_type)]),
+                    result_id,
+                    operands: [
+                        spv::Operand::Imm(spv::Imm::Short(wk.FunctionControl, func_ctrl)),
+                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(func_def.ty)]),
+                    ]
+                    .into_iter()
                     .collect(),
+                }
+            }
+            Self::Misc(misc) => {
+                let (opcode, extra_first_operand) = match misc.kind {
+                    MiscKind::FuncCall(callee) => (
+                        wk.OpFunctionCall,
+                        Some(spv::Operand::Id(wk.IdRef, ids.funcs[&callee])),
+                    ),
+                    MiscKind::SpvInst(opcode) => (opcode, None),
+                };
+                spv::Inst {
+                    opcode,
+                    result_type_id: misc
+                        .output
+                        .as_ref()
+                        .and_then(|old_output| match *old_output {
+                            MiscOutput::SpvResult { result_type, .. } => {
+                                result_type.map(|ty| ids.globals[&Global::Type(ty)])
+                            }
+                        }),
+                    result_id,
+                    operands: extra_first_operand
+                        .into_iter()
+                        .chain(misc.inputs.iter().map(|input| match *input {
+                            MiscInput::Type(ty) => {
+                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(ty)])
+                            }
+                            MiscInput::Const(ct) => {
+                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
+                            }
+                            MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                            MiscInput::SpvUntrackedId(old_id) => {
+                                spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
+                            }
+                            MiscInput::SpvExtInstImport(name) => {
+                                spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
+                            }
+                        }))
+                        .collect(),
+                }
+            }
+            Self::OpFunctionEnd => spv::Inst {
+                opcode: wk.OpFunctionEnd,
+                result_type_id: None,
+                result_id: None,
+                operands: [].into_iter().collect(),
             },
         };
         (inst, attrs)
@@ -372,6 +433,7 @@ impl Module {
             ext_inst_imports: BTreeSet::new(),
             debug_strings: BTreeSet::new(),
             globals: IndexSet::new(),
+            funcs: IndexSet::new(),
             old_outputs: IndexSet::new(),
         };
         needs_ids_collector.visit_module(self);
@@ -399,11 +461,17 @@ impl Module {
         // without causing unwanted moves out of them.
         let (cx, ids) = (&*cx, &ids);
 
-        let global_and_func_insts = ids.globals.keys().copied().map(LazyInst::Global).chain(
-            self.funcs
-                .iter()
-                .flat_map(|func| func.insts.iter().map(LazyInst::Misc)),
-        );
+        let global_and_func_insts =
+            ids.globals
+                .keys()
+                .copied()
+                .map(LazyInst::Global)
+                .chain(ids.funcs.keys().flat_map(|&func| {
+                    let func_def = &self.funcs[func];
+                    iter::once(LazyInst::OpFunction { func, func_def })
+                        .chain(func_def.insts.iter().map(|misc| LazyInst::Misc(misc)))
+                        .chain([LazyInst::OpFunctionEnd])
+                }));
 
         let reserved_inst_schema = 0;
         let header = [
@@ -497,13 +565,13 @@ impl Module {
                     decoration_insts.push(inst);
                 }
             }
-            Attr::SpvDebugLine { .. } => unreachable!(),
+            Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => unreachable!(),
         };
         for lazy_inst in global_and_func_insts.clone() {
             let (result_id, attrs) = lazy_inst.result_id_and_attrs(self, &ids);
 
             for attr in cx[attrs].attrs.iter() {
-                if let Attr::SpvDebugLine { .. } = attr {
+                if let Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) = attr {
                     continue;
                 }
 

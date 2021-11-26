@@ -75,6 +75,7 @@ def_well_known! {
         OpTypeFloat,
         OpTypeForwardPointer,
         OpTypePointer,
+        OpTypeFunction,
 
         OpUndef,
 
@@ -83,6 +84,7 @@ def_well_known! {
         OpFunction,
         OpFunctionEnd,
         OpLabel,
+        OpFunctionCall,
     ],
     operand_kind: OperandKind = [
         Capability,
@@ -91,6 +93,8 @@ def_well_known! {
         SourceLanguage,
         StorageClass,
         FunctionControl,
+        Decoration,
+        LinkageType,
 
         LiteralInteger,
         LiteralString,
@@ -102,6 +106,12 @@ def_well_known! {
     // FIXME(eddyb) find a way to namespace these to avoid conflicts.
     storage_class: u32 = [
         Function,
+    ],
+    decoration: u32 = [
+        LinkageAttributes,
+    ],
+    linkage_type: u32 = [
+        Export,
     ],
 }
 
@@ -624,6 +634,14 @@ impl Spec {
             OperandKindDef::ValueEnum { variants } => variants,
             _ => unreachable!(),
         };
+        let decorations = match &operand_kinds[operand_kinds.lookup("Decoration").unwrap()] {
+            OperandKindDef::ValueEnum { variants } => variants,
+            _ => unreachable!(),
+        };
+        let linkage_types = match &operand_kinds[operand_kinds.lookup("LinkageType").unwrap()] {
+            OperandKindDef::ValueEnum { variants } => variants,
+            _ => unreachable!(),
+        };
 
         // FIXME(eddyb) if this is computed earlier, `IdResultType` and `IdResult`
         // wouldn't be looked up twice - but for now, this is mildly cleaner.
@@ -631,6 +649,8 @@ impl Spec {
             opcode: |name| instructions.lookup(name).unwrap(),
             operand_kind: |name| operand_kinds.lookup(name).unwrap(),
             storage_class: |name| storage_classes.lookup(name).unwrap().into(),
+            decoration: |name| decorations.lookup(name).unwrap().into(),
+            linkage_type: |name| linkage_types.lookup(name).unwrap().into(),
         });
 
         Self {

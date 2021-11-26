@@ -2,7 +2,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
-pub use context::{AttrSet, Const, Context, GlobalVar, InternedStr, Type};
+pub use context::{AttrSet, Const, Context, Func, GlobalVar, InternedStr, Type};
 
 pub mod print;
 pub mod visit;
@@ -27,7 +27,10 @@ mod sealed {
         pub debug_info: ModuleDebugInfo,
 
         pub global_vars: context::UniqIdxMap<GlobalVar, GlobalVarDef>,
-        pub funcs: Vec<Func>,
+        pub funcs: context::UniqIdxMap<Func, FuncDef>,
+
+        // FIXME(eddyb) replace with a proper export list.
+        pub root_funcs: Vec<Func>,
     }
 
     impl Module {
@@ -39,7 +42,9 @@ mod sealed {
                 debug_info,
 
                 global_vars: Default::default(),
-                funcs: vec![],
+                funcs: Default::default(),
+
+                root_funcs: vec![],
             }
         }
 
@@ -98,6 +103,11 @@ pub enum Attr {
         line: u32,
         col: u32,
     },
+
+    /// Some SPIR-V instructions, like `OpFunction`, take a bitflags operand
+    /// that is effectively an optimization over using `OpDecorate`.
+    // FIXME(eddyb) handle flags having further operands as parameters.
+    SpvBitflagsOperand(spv::Imm),
 }
 
 // HACK(eddyb) wrapper to limit `Ord` for interned index types (e.g. `InternedStr`)
@@ -199,7 +209,14 @@ pub struct GlobalVarDef {
 pub enum AddrSpace {
     SpvStorageClass(u32),
 }
-pub struct Func {
+pub struct FuncDef {
+    pub attrs: AttrSet,
+
+    pub ret_type: Type,
+
+    // FIXME(eddyb) replace with the list of typed parameters.
+    pub ty: Type,
+
     pub insts: Vec<Misc>,
 }
 
@@ -217,15 +234,11 @@ pub struct Misc {
 }
 
 pub enum MiscKind {
-    SpvInst(spv::spec::Opcode),
-}
+    // FIXME(eddyb) try to split this into recursive and non-recursive calls,
+    // to avoid needing special handling for recursion where it's impossible.
+    FuncCall(Func),
 
-impl MiscKind {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::SpvInst(opcode) => opcode.name(),
-        }
-    }
+    SpvInst(spv::spec::Opcode),
 }
 
 #[derive(Copy, Clone)]
