@@ -3,11 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, Func, FuncDef,
-    GlobalVarDef, InternedStr, Misc, MiscInput, MiscKind, MiscOutput, Module, Type, TypeCtor,
-    TypeCtorArg, TypeDef,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, ExportKey,
+    Exportee, Func, FuncDef, GlobalVarDef, InternedStr, Misc, MiscInput, MiscKind, MiscOutput,
+    Module, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
-use format::lazy_format;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,10 +44,17 @@ impl IdDef {
     }
 }
 
-/// Deferred `OpEntryPoint`, needed because the IDs are initially forward refs.
-struct EntryPoint {
-    params: SmallVec<[spv::Imm; 2]>,
-    interface_ids: SmallVec<[spv::Id; 4]>,
+/// Deferred export, needed because the IDs are initially forward refs.
+enum Export {
+    Linkage {
+        name: InternedStr,
+        target_id: spv::Id,
+    },
+    EntryPoint {
+        func_id: spv::Id,
+        params: SmallVec<[spv::Imm; 2]>,
+        interface_ids: SmallVec<[spv::Id; 4]>,
+    },
 }
 
 /// Deferred `FuncDef` body, needed because some IDs are initially forward refs.
@@ -179,7 +185,7 @@ impl Module {
 
         let mut has_memory_model = false;
         let mut pending_attrs = FxHashMap::<spv::Id, crate::AttrSetDef>::default();
-        let mut pending_entry_points = FxHashMap::<spv::Id, Vec<EntryPoint>>::default();
+        let mut pending_exports = vec![];
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         let mut id_defs = FxHashMap::default();
@@ -248,41 +254,6 @@ impl Module {
                 .result_id
                 .and_then(|id| pending_attrs.remove(&id))
                 .unwrap_or_default();
-
-            if let Some(entries) = inst
-                .result_id
-                .and_then(|id| pending_entry_points.remove(&id))
-            {
-                for entry in entries {
-                    let EntryPoint {
-                        params,
-                        interface_ids,
-                    } = entry;
-                    let interface_global_vars = interface_ids
-                        .into_iter()
-                        .map(|id| match id_defs.get(&id) {
-                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
-                                ConstCtor::PtrToGlobalVar(gv) => Ok(gv),
-                                _ => Err(id_def.descr(&cx)),
-                            },
-                            Some(id_def) => Err(id_def.descr(&cx)),
-                            None => Err(format!("a forward reference to %{}", id)),
-                        })
-                        .map(|result| {
-                            result.map_err(|descr| {
-                                invalid(&format!(
-                                    "unsupported use of {} as an `OpEntryPoint` interface variable",
-                                    descr
-                                ))
-                            })
-                        })
-                        .collect::<Result<_, _>>()?;
-                    attrs.attrs.insert(Attr::SpvEntryPoint {
-                        params,
-                        interface_global_vars: crate::OrdAssertEq(interface_global_vars),
-                    });
-                }
-            }
 
             if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
@@ -521,13 +492,11 @@ impl Module {
                     }
                 }
 
-                pending_entry_points
-                    .entry(target_id)
-                    .or_default()
-                    .push(EntryPoint {
-                        params,
-                        interface_ids,
-                    });
+                pending_exports.push(Export::EntryPoint {
+                    func_id: target_id,
+                    params,
+                    interface_ids,
+                });
 
                 Seq::EntryPoint
             } else if [
@@ -552,18 +521,42 @@ impl Module {
                     }
                     _ => unreachable!(),
                 };
-                let params = inst.operands[1..]
-                    .iter()
-                    .map(|operand| match *operand {
-                        spv::Operand::Imm(imm) => Ok(imm),
-                        spv::Operand::Id(..) => Err(invalid("unsupported decoration with ID")),
-                    })
-                    .collect::<Result<_, _>>()?;
-                pending_attrs
-                    .entry(target_id)
-                    .or_default()
-                    .attrs
-                    .insert(Attr::SpvAnnotation { opcode, params });
+
+                match inst.operands[1..] {
+                    // Special-case `OpDecorate LinkageAttributes ... Export`.
+                    [
+                        spv::Operand::Imm(decoration @ spv::Imm::Short(..)),
+                        ref name @ ..,
+                        spv::Operand::Imm(linkage_type @ spv::Imm::Short(..)),
+                    ] if opcode == wk.OpDecorate
+                        && decoration == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
+                        && linkage_type == spv::Imm::Short(wk.LinkageType, wk.Export) =>
+                    {
+                        let name = spv::extract_literal_string(name)
+                            .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+                        pending_exports.push(Export::Linkage {
+                            name: cx.intern(name),
+                            target_id,
+                        });
+                    }
+
+                    _ => {
+                        let params = inst.operands[1..]
+                            .iter()
+                            .map(|operand| match *operand {
+                                spv::Operand::Imm(imm) => Ok(imm),
+                                spv::Operand::Id(..) => {
+                                    Err(invalid("unsupported decoration with ID"))
+                                }
+                            })
+                            .collect::<Result<_, _>>()?;
+                        pending_attrs
+                            .entry(target_id)
+                            .or_default()
+                            .attrs
+                            .insert(Attr::SpvAnnotation { opcode, params });
+                    }
+                };
 
                 if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
                     Seq::ExecutionMode
@@ -819,37 +812,6 @@ impl Module {
             return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
         }
 
-        if !pending_entry_points.is_empty() {
-            let id_to_entries = pending_entry_points
-                .iter()
-                .map(|(&id, entries)| {
-                    (
-                        id,
-                        entries
-                            .iter()
-                            .map(|entry| {
-                                lazy_format!(
-                                    "`OpEntryPoint {}`",
-                                    spv::print::operands(
-                                        entry
-                                            .params
-                                            .iter()
-                                            .map(|&imm| spv::print::PrintOperand::Imm(imm))
-                                    )
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
-            return Err(invalid(&format!(
-                "entry-point IDs never defined: {:?}",
-                id_to_entries
-            )));
-        }
-
         if current_func_body.is_some() {
             return Err(invalid("OpFunction without matching OpFunctionEnd"));
         }
@@ -948,21 +910,77 @@ impl Module {
             let func_def = &mut module.funcs[func];
             assert!(func_def.insts.is_empty());
             func_def.insts = insts;
-
-            // FIXME(eddyb) replace with a proper export list.
-            let is_root = cx[func_def.attrs].attrs.iter().any(|attr| match attr {
-                Attr::SpvEntryPoint { .. } => true,
-                Attr::SpvAnnotation { opcode, params } => {
-                    *opcode == wk.OpDecorate
-                        && params[0] == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
-                        && params.last() == Some(&spv::Imm::Short(wk.LinkageType, wk.Export))
-                }
-                Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => false,
-            });
-            if is_root {
-                module.root_funcs.push(func);
-            }
         }
+
+        assert!(module.exports.is_empty());
+        module.exports = pending_exports
+            .into_iter()
+            .map(|export| match export {
+                Export::Linkage { name, target_id } => {
+                    let exportee = match id_defs.get(&target_id) {
+                        Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
+                            ConstCtor::PtrToGlobalVar(gv) => Ok(Exportee::GlobalVar(gv)),
+                            _ => Err(id_def.descr(&cx)),
+                        },
+                        Some(&IdDef::Func(func)) => Ok(Exportee::Func(func)),
+                        Some(id_def) => Err(id_def.descr(&cx)),
+                        None => Err(format!("unknown ID %{}", target_id)),
+                    }
+                    .map_err(|descr| {
+                        invalid(&format!(
+                            "unsupported use of {} as the `LinkageAttributes` target",
+                            descr
+                        ))
+                    })?;
+
+                    Ok((ExportKey::LinkName(name), exportee))
+                }
+
+                Export::EntryPoint {
+                    func_id,
+                    params,
+                    interface_ids,
+                } => {
+                    let func = match id_defs.get(&func_id) {
+                        Some(&IdDef::Func(func)) => Ok(func),
+                        Some(id_def) => Err(id_def.descr(&cx)),
+                        None => Err(format!("unknown ID %{}", func_id)),
+                    }
+                    .map_err(|descr| {
+                        invalid(&format!(
+                            "unsupported use of {} as the `OpEntryPoint` target",
+                            descr
+                        ))
+                    })?;
+                    let interface_global_vars = interface_ids
+                        .into_iter()
+                        .map(|id| match id_defs.get(&id) {
+                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
+                                ConstCtor::PtrToGlobalVar(gv) => Ok(gv),
+                                _ => Err(id_def.descr(&cx)),
+                            },
+                            Some(id_def) => Err(id_def.descr(&cx)),
+                            None => Err(format!("unknown ID %{}", id)),
+                        })
+                        .map(|result| {
+                            result.map_err(|descr| {
+                                invalid(&format!(
+                                    "unsupported use of {} as an `OpEntryPoint` interface variable",
+                                    descr
+                                ))
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    Ok((
+                        ExportKey::SpvEntryPoint {
+                            params,
+                            interface_global_vars,
+                        },
+                        Exportee::Func(func),
+                    ))
+                }
+            })
+            .collect::<io::Result<_>>()?;
 
         Ok(module)
     }

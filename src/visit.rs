@@ -1,7 +1,7 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Func,
-    FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, ExportKey,
+    Exportee, Func, FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput,
+    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -21,6 +21,7 @@ pub trait Visitor<'a>: Sized {
     // Leaves (noop default behavior).
     fn visit_spv_dialect(&mut self, _dialect: &spv::Dialect) {}
     fn visit_spv_module_debug_info(&mut self, _debug_info: &spv::ModuleDebugInfo) {}
+    fn visit_attr(&mut self, _attr: &Attr) {}
 
     // Non-leaves (defaulting to calling `.inner_visit_with(self)`).
     fn visit_module(&mut self, module: &'a Module) {
@@ -34,9 +35,6 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_attr_set_def(&mut self, attrs_def: &'a AttrSetDef) {
         attrs_def.inner_visit_with(self);
-    }
-    fn visit_attr(&mut self, attr: &'a Attr) {
-        attr.inner_visit_with(self);
     }
     fn visit_type_def(&mut self, ty_def: &'a TypeDef) {
         ty_def.inner_visit_with(self);
@@ -96,14 +94,15 @@ impl InnerVisit for Module {
             debug_info,
             global_vars: _,
             funcs: _,
-            root_funcs,
+            exports,
             ..
         } = self;
 
         visitor.visit_module_dialect(dialect);
         visitor.visit_module_debug_info(debug_info);
-        for &func in root_funcs {
-            visitor.visit_func_use(func);
+        for (export_key, exportee) in exports {
+            export_key.inner_visit_with(visitor);
+            exportee.inner_visit_with(visitor);
         }
     }
 }
@@ -126,30 +125,38 @@ impl InnerVisit for ModuleDebugInfo {
     }
 }
 
+impl InnerVisit for ExportKey {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            Self::LinkName(_) => {}
+
+            Self::SpvEntryPoint {
+                params: _,
+                interface_global_vars,
+            } => {
+                for &gv in interface_global_vars {
+                    visitor.visit_global_var_use(gv);
+                }
+            }
+        }
+    }
+}
+
+impl InnerVisit for Exportee {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match *self {
+            Self::GlobalVar(gv) => visitor.visit_global_var_use(gv),
+            Self::Func(func) => visitor.visit_func_use(func),
+        }
+    }
+}
+
 impl InnerVisit for AttrSetDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self { attrs } = self;
 
         for attr in attrs {
             visitor.visit_attr(attr);
-        }
-    }
-}
-
-impl InnerVisit for Attr {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        match self {
-            Self::SpvEntryPoint {
-                params: _,
-                interface_global_vars,
-            } => {
-                for &gv in &interface_global_vars.0 {
-                    visitor.visit_global_var_use(gv);
-                }
-            }
-            Self::SpvAnnotation { .. }
-            | Self::SpvDebugLine { .. }
-            | Self::SpvBitflagsOperand(_) => {}
         }
     }
 }

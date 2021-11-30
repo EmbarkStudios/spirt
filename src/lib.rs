@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
@@ -29,8 +30,7 @@ mod sealed {
         pub global_vars: context::UniqIdxMap<GlobalVar, GlobalVarDef>,
         pub funcs: context::UniqIdxMap<Func, FuncDef>,
 
-        // FIXME(eddyb) replace with a proper export list.
-        pub root_funcs: Vec<Func>,
+        pub exports: IndexMap<ExportKey, Exportee>,
     }
 
     impl Module {
@@ -44,7 +44,7 @@ mod sealed {
                 global_vars: Default::default(),
                 funcs: Default::default(),
 
-                root_funcs: vec![],
+                exports: Default::default(),
             }
         }
 
@@ -69,6 +69,25 @@ pub enum ModuleDebugInfo {
     Spv(spv::ModuleDebugInfo),
 }
 
+/// An unique identifier (e.g. a link name, or "symbol") for a module export.
+#[derive(PartialEq, Eq, Hash)]
+pub enum ExportKey {
+    LinkName(InternedStr),
+
+    SpvEntryPoint {
+        params: SmallVec<[spv::Imm; 2]>,
+        // FIXME(eddyb) remove this by recomputing the interface vars.
+        interface_global_vars: SmallVec<[GlobalVar; 4]>,
+    },
+}
+
+/// A definition exported out of a module (see also `ExportKey`).
+#[derive(Copy, Clone)]
+pub enum Exportee {
+    GlobalVar(GlobalVar),
+    Func(Func),
+}
+
 #[derive(Default, PartialEq, Eq, Hash)]
 pub struct AttrSetDef {
     // FIXME(eddyb) use `BTreeMap<Attr, AttrValue>` and split some of the params
@@ -84,12 +103,6 @@ pub struct AttrSetDef {
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
-    // FIXME(eddyb) de-special-case this by recomputing the interface vars.
-    SpvEntryPoint {
-        params: SmallVec<[spv::Imm; 2]>,
-        interface_global_vars: OrdAssertEq<SmallVec<[GlobalVar; 4]>>,
-    },
-
     SpvAnnotation {
         // FIXME(eddyb) determine this based on the annotation.
         opcode: spv::spec::Opcode,

@@ -3,9 +3,9 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, Func, FuncDef,
-    GlobalVar, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, ExportKey,
+    Exportee, Func, FuncDef, GlobalVar, Misc, MiscInput, MiscKind, MiscOutput, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
 };
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,6 +65,7 @@ struct NeedsIdsCollector<'a> {
     debug_strings: BTreeSet<&'a str>,
 
     globals: IndexSet<Global>,
+    global_vars_seen: IndexSet<GlobalVar>,
     funcs: IndexSet<Func>,
 
     old_outputs: IndexSet<spv::Id>,
@@ -98,7 +99,9 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
-        self.visit_global_var_def(&self.module.global_vars[gv]);
+        if self.global_vars_seen.insert(gv) {
+            self.visit_global_var_def(&self.module.global_vars[gv]);
+        }
     }
     fn visit_func_use(&mut self, func: Func) {
         if self.funcs.contains(&func) {
@@ -118,17 +121,15 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                 .extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
         }
     }
-
     fn visit_attr(&mut self, attr: &Attr) {
         match *attr {
-            Attr::SpvEntryPoint { .. }
-            | Attr::SpvAnnotation { .. }
-            | Attr::SpvBitflagsOperand(_) => {}
+            Attr::SpvAnnotation { .. } | Attr::SpvBitflagsOperand(_) => {}
             Attr::SpvDebugLine { file_path, .. } => {
                 self.debug_strings.insert(&self.cx[file_path.0]);
             }
         }
     }
+
     fn visit_misc_output(&mut self, output: &MiscOutput) {
         match *output {
             MiscOutput::SpvResult { result_id, .. } => {
@@ -172,6 +173,7 @@ impl<'a> NeedsIdsCollector<'a> {
             ext_inst_imports,
             debug_strings,
             globals,
+            global_vars_seen: _,
             funcs,
             old_outputs,
         } = self;
@@ -433,10 +435,30 @@ impl Module {
             ext_inst_imports: BTreeSet::new(),
             debug_strings: BTreeSet::new(),
             globals: IndexSet::new(),
+            global_vars_seen: IndexSet::new(),
             funcs: IndexSet::new(),
             old_outputs: IndexSet::new(),
         };
         needs_ids_collector.visit_module(self);
+
+        // Because `GlobalVar`s are given IDs by the `Const`s that point to them
+        // (i.e. `ConstCtor::PtrToGlobalVar`), any `GlobalVar`s in other positions
+        // require extra care to ensure the ID-giving `Const` is visited.
+        let global_var_to_id_giving_global = |gv| {
+            let type_of_ptr_to_global_var = self.global_vars[gv].type_of_ptr_to;
+            let ptr_to_global_var = cx.intern(ConstDef {
+                attrs: AttrSet::default(),
+                ty: type_of_ptr_to_global_var,
+                ctor: ConstCtor::PtrToGlobalVar(gv),
+                ctor_args: [].into_iter().collect(),
+            });
+            Global::Const(ptr_to_global_var)
+        };
+        for &gv in &needs_ids_collector.global_vars_seen {
+            needs_ids_collector
+                .globals
+                .insert(global_var_to_id_giving_global(gv));
+        }
 
         // IDs can be allocated once we have the full sets needing them, whether
         // sorted by contents, or ordered by the first occurence in the module.
@@ -519,67 +541,86 @@ impl Module {
         let mut debug_name_insts = vec![];
         let mut decoration_insts = vec![];
 
-        let mut push_attr = |target_id, attr: &Attr| match attr {
-            Attr::SpvEntryPoint {
-                params,
-                interface_global_vars,
-            } => {
-                entry_point_insts.push(spv::Inst {
-                    opcode: wk.OpEntryPoint,
-                    result_type_id: None,
-                    result_id: None,
-                    operands: [
-                        spv::Operand::Imm(params[0]),
-                        spv::Operand::Id(wk.IdRef, target_id),
-                    ]
-                    .into_iter()
-                    .chain(params[1..].iter().map(|&imm| spv::Operand::Imm(imm)))
-                    .chain(interface_global_vars.0.iter().map(|&gv| {
-                        let type_of_ptr_to_global_var = self.global_vars[gv].type_of_ptr_to;
-                        let ptr_to_global_var = cx.intern(ConstDef {
-                            attrs: AttrSet::default(),
-                            ty: type_of_ptr_to_global_var,
-                            ctor: ConstCtor::PtrToGlobalVar(gv),
-                            ctor_args: [].into_iter().collect(),
-                        });
-                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ptr_to_global_var)])
-                    }))
-                    .collect(),
-                });
-            }
-            Attr::SpvAnnotation { opcode, params } => {
-                let inst = spv::Inst {
-                    opcode: *opcode,
-                    result_type_id: None,
-                    result_id: None,
-                    operands: iter::once(spv::Operand::Id(wk.IdRef, target_id))
-                        .chain(params.iter().map(|&imm| spv::Operand::Imm(imm)))
-                        .collect(),
-                };
-
-                if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
-                    execution_mode_insts.push(inst);
-                } else if [wk.OpName, wk.OpMemberName].contains(&opcode) {
-                    debug_name_insts.push(inst);
-                } else {
-                    decoration_insts.push(inst);
-                }
-            }
-            Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => unreachable!(),
-        };
         for lazy_inst in global_and_func_insts.clone() {
             let (result_id, attrs) = lazy_inst.result_id_and_attrs(self, &ids);
 
             for attr in cx[attrs].attrs.iter() {
-                if let Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) = attr {
-                    continue;
-                }
+                match attr {
+                    Attr::SpvAnnotation { opcode, params } => {
+                        let target_id = result_id.expect(
+                            "FIXME: it shouldn't be possible to attach \
+                                 attributes to instructions without an output",
+                        );
 
-                let target_id = result_id.expect(
-                    "FIXME: it shouldn't be possible to attach \
-                         attributes to instructions without an output",
-                );
-                push_attr(target_id, attr);
+                        let inst = spv::Inst {
+                            opcode: *opcode,
+                            result_type_id: None,
+                            result_id: None,
+                            operands: iter::once(spv::Operand::Id(wk.IdRef, target_id))
+                                .chain(params.iter().map(|&imm| spv::Operand::Imm(imm)))
+                                .collect(),
+                        };
+
+                        if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
+                            execution_mode_insts.push(inst);
+                        } else if [wk.OpName, wk.OpMemberName].contains(&opcode) {
+                            debug_name_insts.push(inst);
+                        } else {
+                            decoration_insts.push(inst);
+                        }
+                    }
+                    Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => {}
+                }
+            }
+        }
+
+        for (export_key, &exportee) in &self.exports {
+            let target_id = match exportee {
+                Exportee::GlobalVar(gv) => ids.globals[&global_var_to_id_giving_global(gv)],
+                Exportee::Func(func) => ids.funcs[&func],
+            };
+            match export_key {
+                &ExportKey::LinkName(name) => {
+                    decoration_insts.push(spv::Inst {
+                        opcode: wk.OpDecorate,
+                        result_type_id: None,
+                        result_id: None,
+                        operands: [
+                            spv::Operand::Id(wk.IdRef, target_id),
+                            spv::Operand::Imm(spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)),
+                        ]
+                        .into_iter()
+                        .chain(spv::encode_literal_string(&cx[name]))
+                        .chain([spv::Operand::Imm(spv::Imm::Short(
+                            wk.LinkageType,
+                            wk.Export,
+                        ))])
+                        .collect(),
+                    });
+                }
+                ExportKey::SpvEntryPoint {
+                    params,
+                    interface_global_vars,
+                } => {
+                    entry_point_insts.push(spv::Inst {
+                        opcode: wk.OpEntryPoint,
+                        result_type_id: None,
+                        result_id: None,
+                        operands: [
+                            spv::Operand::Imm(params[0]),
+                            spv::Operand::Id(wk.IdRef, target_id),
+                        ]
+                        .into_iter()
+                        .chain(params[1..].iter().map(|&imm| spv::Operand::Imm(imm)))
+                        .chain(interface_global_vars.iter().map(|&gv| {
+                            spv::Operand::Id(
+                                wk.IdRef,
+                                ids.globals[&global_var_to_id_giving_global(gv)],
+                            )
+                        }))
+                        .collect(),
+                    });
+                }
             }
         }
 

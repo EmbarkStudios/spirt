@@ -1,8 +1,8 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    Func, FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    ExportKey, Exportee, Func, FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind,
+    MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -579,10 +579,21 @@ impl Print for Func {
 
 impl Print for Module {
     type Output = String;
-    fn print(&self, _printer: &Printer<'_>) -> String {
-        lazy_format!(|_f| {
-            // Nothing left to print at the end of the module.
-            Ok(())
+    fn print(&self, printer: &Printer<'_>) -> String {
+        lazy_format!(|f| {
+            if self.exports.is_empty() {
+                return Ok(());
+            }
+            writeln!(f, "export {{")?;
+            for (export_key, exportee) in &self.exports {
+                writeln!(
+                    f,
+                    "  {}: {},",
+                    export_key.print(printer).replace("\n", "\n  "),
+                    exportee.print(printer)
+                )?;
+            }
+            write!(f, "}}")
         })
         .to_string()
     }
@@ -696,6 +707,50 @@ impl Print for ModuleDebugInfo {
     }
 }
 
+impl Print for ExportKey {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        match self {
+            &Self::LinkName(name) => format!("{:?}", &printer.cx[name]),
+
+            Self::SpvEntryPoint {
+                params,
+                interface_global_vars,
+            } => {
+                let key =
+                    printer.pretty_join_space(
+                        "OpEntryPoint",
+                        spv::print::operands(
+                            params
+                                .iter()
+                                .map(|&imm| spv::print::PrintOperand::Imm(imm))
+                                .chain(interface_global_vars.iter().map(|&gv| {
+                                    spv::print::PrintOperand::IdLike(gv.print(printer))
+                                })),
+                        ),
+                    );
+
+                // FIXME(eddyb) automate reindenting (and make it configurable).
+                if key.contains("\n") {
+                    format!("(\n  {}\n)", key.replace("\n", "\n  "))
+                } else {
+                    format!("({})", key)
+                }
+            }
+        }
+    }
+}
+
+impl Print for Exportee {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_>) -> String {
+        match *self {
+            Self::GlobalVar(gv) => gv.print(printer),
+            Self::Func(func) => func.print(printer),
+        }
+    }
+}
+
 impl Print for AttrSetDef {
     type Output = String;
     fn print(&self, printer: &Printer<'_>) -> String {
@@ -714,20 +769,6 @@ impl Print for AttrSetDef {
             }
             for attr in attrs {
                 let attr = match attr {
-                    Attr::SpvEntryPoint {
-                        params,
-                        interface_global_vars,
-                    } => printer.pretty_join_space(
-                        "OpEntryPoint",
-                        spv::print::operands(
-                            params
-                                .iter()
-                                .map(|&imm| spv::print::PrintOperand::Imm(imm))
-                                .chain(interface_global_vars.0.iter().map(|&gv| {
-                                    spv::print::PrintOperand::IdLike(gv.print(printer))
-                                })),
-                        ),
-                    ),
                     Attr::SpvAnnotation { opcode, params } => printer.pretty_join_space(
                         opcode.name(),
                         spv::print::operands(
