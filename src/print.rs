@@ -286,11 +286,26 @@ impl<'a> Visitor<'a> for Plan<'a> {
 impl fmt::Display for Plan<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let printer = Printer::new(self);
+        let mut ended_with_empty_line = false;
         for &node in &self.nodes {
             let AttrsAndDef { attrs, def } = node.print(&printer);
+
+            // Visually isolate definitions with attributes.
+            let empty_lines_before_and_after = !attrs.is_empty();
+            if empty_lines_before_and_after && !ended_with_empty_line {
+                writeln!(f)?;
+            }
+
             let def = attrs + &def;
             if !def.is_empty() {
                 writeln!(f, "{}", def)?;
+
+                ended_with_empty_line = if empty_lines_before_and_after {
+                    writeln!(f)?;
+                    true
+                } else {
+                    false
+                };
             }
         }
         Ok(())
