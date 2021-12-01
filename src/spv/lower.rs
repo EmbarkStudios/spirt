@@ -3,9 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, ExportKey,
-    Exportee, Func, FuncDef, GlobalVarDef, InternedStr, Misc, MiscInput, MiscKind, MiscOutput,
-    Module, Type, TypeCtor, TypeCtorArg, TypeDef,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVarDecl, GlobalVarDefBody, Import,
+    InternedStr, Misc, MiscInput, MiscKind, MiscOutput, Module, Type, TypeCtor, TypeCtorArg,
+    TypeDef,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -57,7 +58,7 @@ enum Export {
     },
 }
 
-/// Deferred `FuncDef` body, needed because some IDs are initially forward refs.
+/// Deferred `FuncDefBody`, needed because some IDs are initially forward refs.
 struct FuncBody {
     func: Func,
     insts: Vec<IntraFuncInst>,
@@ -185,6 +186,7 @@ impl Module {
 
         let mut has_memory_model = false;
         let mut pending_attrs = FxHashMap::<spv::Id, crate::AttrSetDef>::default();
+        let mut pending_imports = FxHashMap::<spv::Id, Import>::default();
         let mut pending_exports = vec![];
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
@@ -523,21 +525,25 @@ impl Module {
                 };
 
                 match inst.operands[1..] {
-                    // Special-case `OpDecorate LinkageAttributes ... Export`.
+                    // Special-case `OpDecorate LinkageAttributes ... Import|Export`.
                     [
                         spv::Operand::Imm(decoration @ spv::Imm::Short(..)),
                         ref name @ ..,
-                        spv::Operand::Imm(linkage_type @ spv::Imm::Short(..)),
+                        spv::Operand::Imm(spv::Imm::Short(lt_kind, linkage_type)),
                     ] if opcode == wk.OpDecorate
                         && decoration == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
-                        && linkage_type == spv::Imm::Short(wk.LinkageType, wk.Export) =>
+                        && lt_kind == wk.LinkageType
+                        && [wk.Import, wk.Export].contains(&linkage_type) =>
                     {
                         let name = spv::extract_literal_string(name)
                             .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
-                        pending_exports.push(Export::Linkage {
-                            name: cx.intern(name),
-                            target_id,
-                        });
+                        let name = cx.intern(name);
+
+                        if linkage_type == wk.Import {
+                            pending_imports.insert(target_id, Import::LinkName(name));
+                        } else {
+                            pending_exports.push(Export::Linkage { name, target_id });
+                        }
                     }
 
                     _ => {
@@ -689,13 +695,26 @@ impl Module {
                         ))
                     })?;
 
+                let def = match pending_imports.remove(&global_var_id) {
+                    Some(import @ Import::LinkName(name)) => {
+                        if initializer.is_some() {
+                            return Err(invalid(&format!(
+                                "global variable with initializer decorated as `Import` of {:?}",
+                                &cx[name]
+                            )));
+                        }
+                        DeclDef::Imported(import)
+                    }
+                    None => DeclDef::Present(GlobalVarDefBody { initializer }),
+                };
+
                 let global_var = module.global_vars.insert(
                     &cx,
-                    GlobalVarDef {
+                    GlobalVarDecl {
                         attrs: mem::take(&mut attrs),
                         type_of_ptr_to: type_of_ptr_to_global_var,
                         addr_space: AddrSpace::SpvStorageClass(storage_class),
-                        initializer,
+                        def,
                     },
                 );
                 let ptr_to_global_var = cx.intern(ConstDef {
@@ -745,13 +764,18 @@ impl Module {
                     }
                 };
 
+                let def = match pending_imports.remove(&func_id) {
+                    Some(import) => DeclDef::Imported(import),
+                    None => DeclDef::Present(FuncDefBody { insts: vec![] }),
+                };
+
                 let func = module.funcs.insert(
                     &cx,
-                    FuncDef {
+                    FuncDecl {
                         attrs: mem::take(&mut attrs),
                         ret_type: func_ret_type,
                         ty: func_type,
-                        insts: vec![],
+                        def,
                     },
                 );
                 id_defs.insert(func_id, IdDef::Func(func));
@@ -819,7 +843,7 @@ impl Module {
         // Process function bodies, having seen the whole module.
         for func_body in pending_func_bodies {
             let FuncBody { func, insts } = func_body;
-            let insts = insts
+            let insts: Vec<_> = insts
                 .into_iter()
                 .map(|inst| -> io::Result<_> {
                     let IntraFuncInst {
@@ -907,9 +931,19 @@ impl Module {
                 })
                 .collect::<Result<_, _>>()?;
 
-            let func_def = &mut module.funcs[func];
-            assert!(func_def.insts.is_empty());
-            func_def.insts = insts;
+            if !insts.is_empty() {
+                let func_def_body = match &mut module.funcs[func].def {
+                    DeclDef::Imported(Import::LinkName(name)) => {
+                        return Err(invalid(&format!(
+                            "non-empty function decorated as `Import` of {:?}",
+                            &cx[*name]
+                        )));
+                    }
+                    DeclDef::Present(def) => def,
+                };
+                assert!(func_def_body.insts.is_empty());
+                func_def_body.insts = insts;
+            }
         }
 
         assert!(module.exports.is_empty());

@@ -3,9 +3,10 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, ExportKey,
-    Exportee, Func, FuncDef, GlobalVar, Misc, MiscInput, MiscKind, MiscOutput, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDefBody, Import, Misc,
+    MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor,
+    TypeCtorArg,
 };
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +101,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
         if self.global_vars_seen.insert(gv) {
-            self.visit_global_var_def(&self.module.global_vars[gv]);
+            self.visit_global_var_decl(&self.module.global_vars[gv]);
         }
     }
     fn visit_func_use(&mut self, func: Func) {
@@ -111,7 +112,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         // in the resulting module, but the order doesn't matter, and we need
         // to avoid infinite recursion for recursive functions.
         self.funcs.insert(func);
-        self.visit_func_def(&self.module.funcs[func]);
+        self.visit_func_decl(&self.module.funcs[func]);
     }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
@@ -209,34 +210,47 @@ impl<'a> NeedsIdsCollector<'a> {
 #[derive(Copy, Clone)]
 enum LazyInst<'a> {
     Global(Global),
-    OpFunction { func: Func, func_def: &'a FuncDef },
+    OpFunction { func: Func, func_decl: &'a FuncDecl },
     Misc(&'a Misc),
     OpFunctionEnd,
 }
 
 impl LazyInst<'_> {
-    fn result_id_and_attrs(
+    fn result_id_attrs_and_import(
         self,
         module: &Module,
         ids: &AllocatedIds,
-    ) -> (Option<spv::Id>, AttrSet) {
+    ) -> (Option<spv::Id>, AttrSet, Option<Import>) {
         let cx = module.cx_ref();
 
         match self {
             Self::Global(global) => {
-                let attrs = match global {
-                    Global::Type(ty) => cx[ty].attrs,
+                let (attrs, import) = match global {
+                    Global::Type(ty) => (cx[ty].attrs, None),
                     Global::Const(ct) => {
                         let ct_def = &cx[ct];
                         match ct_def.ctor {
-                            ConstCtor::PtrToGlobalVar(gv) => module.global_vars[gv].attrs,
-                            ConstCtor::SpvInst(_) => ct_def.attrs,
+                            ConstCtor::PtrToGlobalVar(gv) => {
+                                let gv_decl = &module.global_vars[gv];
+                                let import = match gv_decl.def {
+                                    DeclDef::Imported(import) => Some(import),
+                                    DeclDef::Present(_) => None,
+                                };
+                                (gv_decl.attrs, import)
+                            }
+                            ConstCtor::SpvInst(_) => (ct_def.attrs, None),
                         }
                     }
                 };
-                (Some(ids.globals[&global]), attrs)
+                (Some(ids.globals[&global]), attrs, import)
             }
-            Self::OpFunction { func, func_def } => (Some(ids.funcs[&func]), func_def.attrs),
+            Self::OpFunction { func, func_decl } => {
+                let import = match func_decl.def {
+                    DeclDef::Imported(import) => Some(import),
+                    DeclDef::Present(_) => None,
+                };
+                (Some(ids.funcs[&func]), func_decl.attrs, import)
+            }
             Self::Misc(misc) => {
                 let result_id = misc.output.as_ref().map(|old_output| match *old_output {
                     MiscOutput::SpvResult {
@@ -244,9 +258,9 @@ impl LazyInst<'_> {
                         ..
                     } => ids.old_outputs[&old_result_id],
                 });
-                (result_id, misc.attrs)
+                (result_id, misc.attrs, None)
             }
-            Self::OpFunctionEnd => (None, AttrSet::default()),
+            Self::OpFunctionEnd => (None, AttrSet::default(), None),
         }
     }
 
@@ -254,7 +268,7 @@ impl LazyInst<'_> {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
 
-        let (result_id, attrs) = self.result_id_and_attrs(module, ids);
+        let (result_id, attrs, _) = self.result_id_attrs_and_import(module, ids);
         let inst = match self {
             Self::Global(global) => match global {
                 Global::Type(ty) => {
@@ -287,18 +301,25 @@ impl LazyInst<'_> {
                             assert!(ct_def.attrs == AttrSet::default());
                             assert!(ct_def.ctor_args.is_empty());
 
-                            let gv_def = &module.global_vars[gv];
+                            let gv_decl = &module.global_vars[gv];
 
-                            assert!(ct_def.ty == gv_def.type_of_ptr_to);
+                            assert!(ct_def.ty == gv_decl.type_of_ptr_to);
 
-                            let storage_class = match gv_def.addr_space {
+                            let storage_class = match gv_decl.addr_space {
                                 AddrSpace::SpvStorageClass(sc) => {
                                     spv::Operand::Imm(spv::Imm::Short(wk.StorageClass, sc))
                                 }
                             };
-                            let initializer = gv_def.initializer.map(|initializer| {
-                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(initializer)])
-                            });
+                            let initializer = match gv_decl.def {
+                                DeclDef::Imported(_) => None,
+                                DeclDef::Present(GlobalVarDefBody { initializer }) => initializer
+                                    .map(|initializer| {
+                                        spv::Operand::Id(
+                                            wk.IdRef,
+                                            ids.globals[&Global::Const(initializer)],
+                                        )
+                                    }),
+                            };
                             spv::Inst {
                                 opcode: wk.OpVariable,
                                 result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
@@ -325,7 +346,7 @@ impl LazyInst<'_> {
                     }
                 }
             },
-            Self::OpFunction { func: _, func_def } => {
+            Self::OpFunction { func: _, func_decl } => {
                 // FIXME(eddyb) make this less of a search and more of a
                 // lookup by splitting attrs into key and value parts.
                 let func_ctrl = cx[attrs]
@@ -342,11 +363,11 @@ impl LazyInst<'_> {
                     .unwrap_or(0);
                 spv::Inst {
                     opcode: wk.OpFunction,
-                    result_type_id: Some(ids.globals[&Global::Type(func_def.ret_type)]),
+                    result_type_id: Some(ids.globals[&Global::Type(func_decl.ret_type)]),
                     result_id,
                     operands: [
                         spv::Operand::Imm(spv::Imm::Short(wk.FunctionControl, func_ctrl)),
-                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(func_def.ty)]),
+                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(func_decl.ty)]),
                     ]
                     .into_iter()
                     .collect(),
@@ -489,9 +510,13 @@ impl Module {
                 .copied()
                 .map(LazyInst::Global)
                 .chain(ids.funcs.keys().flat_map(|&func| {
-                    let func_def = &self.funcs[func];
-                    iter::once(LazyInst::OpFunction { func, func_def })
-                        .chain(func_def.insts.iter().map(|misc| LazyInst::Misc(misc)))
+                    let func_decl = &self.funcs[func];
+                    let insts = match &func_decl.def {
+                        DeclDef::Imported(_) => &[][..],
+                        DeclDef::Present(FuncDefBody { insts }) => insts,
+                    };
+                    iter::once(LazyInst::OpFunction { func, func_decl })
+                        .chain(insts.iter().map(|misc| LazyInst::Misc(misc)))
                         .chain([LazyInst::OpFunctionEnd])
                 }));
 
@@ -542,7 +567,7 @@ impl Module {
         let mut decoration_insts = vec![];
 
         for lazy_inst in global_and_func_insts.clone() {
-            let (result_id, attrs) = lazy_inst.result_id_and_attrs(self, &ids);
+            let (result_id, attrs, import) = lazy_inst.result_id_attrs_and_import(self, &ids);
 
             for attr in cx[attrs].attrs.iter() {
                 match attr {
@@ -570,6 +595,33 @@ impl Module {
                         }
                     }
                     Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => {}
+                }
+
+                if let Some(import) = import {
+                    let target_id = result_id.unwrap();
+                    match import {
+                        Import::LinkName(name) => {
+                            decoration_insts.push(spv::Inst {
+                                opcode: wk.OpDecorate,
+                                result_type_id: None,
+                                result_id: None,
+                                operands: [
+                                    spv::Operand::Id(wk.IdRef, target_id),
+                                    spv::Operand::Imm(spv::Imm::Short(
+                                        wk.Decoration,
+                                        wk.LinkageAttributes,
+                                    )),
+                                ]
+                                .into_iter()
+                                .chain(spv::encode_literal_string(&cx[name]))
+                                .chain([spv::Operand::Imm(spv::Imm::Short(
+                                    wk.LinkageType,
+                                    wk.Import,
+                                ))])
+                                .collect(),
+                            });
+                        }
+                    }
                 }
             }
         }

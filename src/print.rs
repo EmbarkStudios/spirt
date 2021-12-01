@@ -1,8 +1,9 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    ExportKey, Exportee, Func, FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind,
-    MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -28,8 +29,8 @@ pub struct Plan<'a> {
     /// When visiting anything module-stored (global vars and funcs), the module
     /// is needed to go from the index to the definition, which is then cached.
     current_module: Option<&'a Module>,
-    global_var_def_cache: FxHashMap<GlobalVar, &'a GlobalVarDef>,
-    func_def_cache: FxHashMap<Func, &'a FuncDef>,
+    global_var_decl_cache: FxHashMap<GlobalVar, &'a GlobalVarDecl>,
+    func_decl_cache: FxHashMap<Func, &'a FuncDecl>,
 
     nodes: Vec<Node<'a>>,
     use_counts: IndexMap<Use, usize>,
@@ -102,8 +103,8 @@ impl<'a> Plan<'a> {
         Self {
             cx: module.cx_ref(),
             current_module: Some(module),
-            global_var_def_cache: FxHashMap::default(),
-            func_def_cache: FxHashMap::default(),
+            global_var_decl_cache: FxHashMap::default(),
+            func_decl_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
         }
@@ -114,8 +115,8 @@ impl<'a> Plan<'a> {
         Self {
             cx,
             current_module: None,
-            global_var_def_cache: FxHashMap::default(),
-            func_def_cache: FxHashMap::default(),
+            global_var_decl_cache: FxHashMap::default(),
+            func_decl_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
         }
@@ -179,15 +180,15 @@ impl<'a> Plan<'a> {
                 self.visit_const_def(&self.cx[ct]);
             }
 
-            Node::GlobalVar(gv) => match self.global_var_def_cache.get(&gv).copied() {
-                Some(gv_def) => self.visit_global_var_def(gv_def),
+            Node::GlobalVar(gv) => match self.global_var_decl_cache.get(&gv).copied() {
+                Some(gv_decl) => self.visit_global_var_decl(gv_decl),
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
             },
 
-            Node::Func(func) => match self.func_def_cache.get(&func).copied() {
-                Some(func_def) => self.visit_func_def(func_def),
+            Node::Func(func) => match self.func_decl_cache.get(&func).copied() {
+                Some(func_decl) => self.visit_func_decl(func_decl),
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
@@ -220,7 +221,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
         match self.current_module {
             Some(module) => {
-                self.global_var_def_cache
+                self.global_var_decl_cache
                     .insert(gv, &module.global_vars[gv]);
             }
 
@@ -235,7 +236,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
             Some(module) => {
                 use std::collections::hash_map::Entry;
 
-                match self.func_def_cache.entry(func) {
+                match self.func_decl_cache.entry(func) {
                     Entry::Occupied(_) => {
                         // Avoid infinite recursion for recursive functions.
                         return;
@@ -316,8 +317,8 @@ pub struct Printer<'a, 'b> {
     cx: &'a Context,
     use_styles: IndexMap<Use, UseStyle>,
 
-    global_var_def_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDef>,
-    func_def_cache: &'b FxHashMap<Func, &'a FuncDef>,
+    global_var_decl_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDecl>,
+    func_decl_cache: &'b FxHashMap<Func, &'a FuncDecl>,
 }
 
 /// How an use of a node should be printed.
@@ -397,8 +398,8 @@ impl<'a, 'b> Printer<'a, 'b> {
         Self {
             cx,
             use_styles,
-            global_var_def_cache: &plan.global_var_def_cache,
-            func_def_cache: &plan.func_def_cache,
+            global_var_decl_cache: &plan.global_var_decl_cache,
+            func_decl_cache: &plan.func_decl_cache,
         }
     }
 
@@ -581,18 +582,20 @@ impl Print for Node<'_> {
                 _ => AttrsAndDef::default(),
             },
 
-            Self::GlobalVar(gv) => match printer.global_var_def_cache.get(&gv) {
-                Some(gv_def) => {
-                    let AttrsAndDef { attrs, def } = gv_def.print(printer);
-                    let def = printer.pretty_join_space(&format!("{} =", gv.print(printer)), [def]);
-                    AttrsAndDef { attrs, def }
+            Self::GlobalVar(gv) => match printer.global_var_decl_cache.get(&gv) {
+                Some(gv_decl) => {
+                    let AttrsAndDef { attrs, def } = gv_decl.print(printer);
+                    AttrsAndDef {
+                        attrs,
+                        def: gv.print(printer) + &def,
+                    }
                 }
                 None => AttrsAndDef::default(),
             },
 
-            Self::Func(func) => match printer.func_def_cache.get(&func) {
-                Some(func_def) => {
-                    let AttrsAndDef { attrs, def } = func_def.print(printer);
+            Self::Func(func) => match printer.func_decl_cache.get(&func) {
+                Some(func_decl) => {
+                    let AttrsAndDef { attrs, def } = func_decl.print(printer);
                     AttrsAndDef {
                         attrs,
                         def: func.print(printer) + &def,
@@ -915,21 +918,30 @@ impl Print for ConstDef {
     }
 }
 
-impl Print for GlobalVarDef {
+impl Print for Import {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        match self {
+            &Self::LinkName(name) => format!("import {:?}", &printer.cx[name]),
+        }
+    }
+}
+
+impl Print for GlobalVarDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             type_of_ptr_to,
             addr_space,
-            initializer,
+            def,
         } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
         let ty = {
             // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
-            // ideally the `GlobalVarDef` would hold that type itself.
+            // ideally the `GlobalVarDecl` would hold that type itself.
             let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
 
             if type_of_ptr_to_def.ctor == TypeCtor::SpvInst(wk.OpTypePointer) {
@@ -944,36 +956,51 @@ impl Print for GlobalVarDef {
         let addr_space = match *addr_space {
             AddrSpace::SpvStorageClass(sc) => spv::print::imm(wk.StorageClass, sc),
         };
-        let initializer = initializer.map(|initializer| {
-            // FIXME(eddyb) find a better syntax for this.
-            format!("init={}", initializer.print(printer))
-        });
+        let header = format!(" in {}: {}", addr_space, ty);
+
+        let body = match def {
+            DeclDef::Imported(import) => Some(format!("= {}", import.print(printer))),
+            DeclDef::Present(GlobalVarDefBody { initializer }) => {
+                initializer.map(|initializer| {
+                    // FIXME(eddyb) find a better syntax for this.
+                    format!("init={}", initializer.print(printer))
+                })
+            }
+        };
+
+        let def = if header.contains("\n") {
+            // The last line of `header` likely only contains a single `)`,
+            // no need to further indent the body in that case.
+            match body {
+                Some(body) => header + " " + &body,
+                None => header,
+            }
+        } else {
+            printer.pretty_join_space(&header, body)
+        };
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_join_space(
-                &format!("var({})", addr_space),
-                initializer.into_iter().chain([format!(": {}", ty)]),
-            ),
+            def,
         }
     }
 }
 
-impl Print for FuncDef {
+impl Print for FuncDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             ret_type: _,
             ty,
-            insts,
+            def,
         } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
         let sig = {
             // HACK(eddyb) get the signature from SPIR-V `OpTypeFunction`, but
-            // ideally the `FuncDef` would hold all of the types itself.
+            // ideally the `FuncDecl` would hold all of the types itself.
             let func_ty_def = &printer.cx[*ty];
 
             if func_ty_def.ctor == TypeCtor::SpvInst(wk.OpTypeFunction) {
@@ -1000,9 +1027,9 @@ impl Print for FuncDef {
             }
         };
 
-        AttrsAndDef {
-            attrs: attrs.print(printer),
-            def: lazy_format!(|f| {
+        let def = match def {
+            DeclDef::Imported(import) => sig + " = " + &import.print(printer),
+            DeclDef::Present(FuncDefBody { insts }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
                 for misc in insts {
                     writeln!(f, "  {}", misc.print(printer).replace("\n", "\n  "))?;
@@ -1010,6 +1037,11 @@ impl Print for FuncDef {
                 write!(f, "}}")
             })
             .to_string(),
+        };
+
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def,
         }
     }
 }

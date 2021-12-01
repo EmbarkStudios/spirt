@@ -111,6 +111,7 @@ def_well_known! {
         LinkageAttributes,
     ],
     linkage_type: u32 = [
+        Import,
         Export,
     ],
 }

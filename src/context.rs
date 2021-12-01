@@ -260,6 +260,6 @@ macro_rules! uniq_indices {
 }
 
 uniq_indices! {
-    GlobalVar => crate::GlobalVarDef,
-    Func => crate::FuncDef,
+    GlobalVar => crate::GlobalVarDecl,
+    Func => crate::FuncDecl,
 }

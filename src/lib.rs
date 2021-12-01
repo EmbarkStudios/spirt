@@ -27,8 +27,8 @@ mod sealed {
         pub dialect: ModuleDialect,
         pub debug_info: ModuleDebugInfo,
 
-        pub global_vars: context::UniqIdxMap<GlobalVar, GlobalVarDef>,
-        pub funcs: context::UniqIdxMap<Func, FuncDef>,
+        pub global_vars: context::UniqIdxMap<GlobalVar, GlobalVarDecl>,
+        pub funcs: context::UniqIdxMap<Func, FuncDecl>,
 
         pub exports: IndexMap<ExportKey, Exportee>,
     }
@@ -204,7 +204,20 @@ pub enum ConstCtorArg {
     SpvImm(spv::Imm),
 }
 
-pub struct GlobalVarDef {
+/// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,
+/// or only be an import of a definition (e.g. from another module).
+pub enum DeclDef<D> {
+    Imported(Import),
+    Present(D),
+}
+
+/// An identifier (e.g. a link name, or "symbol") for an import declaration.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Import {
+    LinkName(InternedStr),
+}
+
+pub struct GlobalVarDecl {
     pub attrs: AttrSet,
 
     /// The type of a pointer to the global variable (as opposed to the value type).
@@ -214,15 +227,20 @@ pub struct GlobalVarDef {
     /// The address space the global variable will be allocated into.
     pub addr_space: AddrSpace,
 
-    /// If `Some`, the global variable will start out with the specified value.
-    pub initializer: Option<Const>,
+    pub def: DeclDef<GlobalVarDefBody>,
 }
 
 #[derive(Copy, Clone)]
 pub enum AddrSpace {
     SpvStorageClass(u32),
 }
-pub struct FuncDef {
+
+pub struct GlobalVarDefBody {
+    /// If `Some`, the global variable will start out with the specified value.
+    pub initializer: Option<Const>,
+}
+
+pub struct FuncDecl {
     pub attrs: AttrSet,
 
     pub ret_type: Type,
@@ -230,6 +248,10 @@ pub struct FuncDef {
     // FIXME(eddyb) replace with the list of typed parameters.
     pub ty: Type,
 
+    pub def: DeclDef<FuncDefBody>,
+}
+
+pub struct FuncDefBody {
     pub insts: Vec<Misc>,
 }
 

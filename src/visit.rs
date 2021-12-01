@@ -1,7 +1,8 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, ExportKey,
-    Exportee, Func, FuncDef, GlobalVar, GlobalVarDef, Misc, MiscInput, MiscKind, MiscOutput,
-    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DeclDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg, TypeDef,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -42,11 +43,11 @@ pub trait Visitor<'a>: Sized {
     fn visit_const_def(&mut self, ct_def: &'a ConstDef) {
         ct_def.inner_visit_with(self);
     }
-    fn visit_global_var_def(&mut self, gv_def: &'a GlobalVarDef) {
-        gv_def.inner_visit_with(self);
+    fn visit_global_var_decl(&mut self, gv_decl: &'a GlobalVarDecl) {
+        gv_decl.inner_visit_with(self);
     }
-    fn visit_func_def(&mut self, func_def: &'a FuncDef) {
-        func_def.inner_visit_with(self);
+    fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
+        func_decl.inner_visit_with(self);
     }
     fn visit_misc(&mut self, misc: &'a Misc) {
         misc.inner_visit_with(self);
@@ -209,13 +210,24 @@ impl InnerVisit for ConstDef {
     }
 }
 
-impl InnerVisit for GlobalVarDef {
+impl<D: InnerVisit> InnerVisit for DeclDef<D> {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            Self::Imported(import) => match import {
+                Import::LinkName(_) => {}
+            },
+            Self::Present(def) => def.inner_visit_with(visitor),
+        }
+    }
+}
+
+impl InnerVisit for GlobalVarDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             attrs,
             type_of_ptr_to,
             addr_space,
-            initializer,
+            def,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
@@ -223,24 +235,40 @@ impl InnerVisit for GlobalVarDef {
         match addr_space {
             AddrSpace::SpvStorageClass(_) => {}
         }
+        def.inner_visit_with(visitor);
+    }
+}
+
+impl InnerVisit for GlobalVarDefBody {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { initializer } = self;
+
         if let Some(initializer) = *initializer {
             visitor.visit_const_use(initializer);
         }
     }
 }
 
-impl InnerVisit for FuncDef {
+impl InnerVisit for FuncDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             attrs,
             ret_type,
             ty,
-            insts,
+            def,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ret_type);
         visitor.visit_type_use(*ty);
+        def.inner_visit_with(visitor);
+    }
+}
+
+impl InnerVisit for FuncDefBody {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { insts } = self;
+
         for inst in insts {
             visitor.visit_misc(inst);
         }
