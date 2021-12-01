@@ -287,35 +287,8 @@ impl fmt::Display for Plan<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let printer = Printer::new(self);
         for &node in &self.nodes {
-            let def = match node {
-                Node::Interned(node) => match printer.use_styles.get(&Use::Interned(node)).copied()
-                {
-                    Some(style @ UseStyle::Anon { .. }) => {
-                        printer.interned_node_def_to_string(node, style)
-                    }
-                    _ => String::new(),
-                },
-
-                Node::GlobalVar(gv) => match self.global_var_def_cache.get(&gv) {
-                    Some(gv_def) => {
-                        let AttrsAndDef { attrs, def } = gv_def.print(&printer);
-                        let def =
-                            printer.pretty_join_space(&format!("{} =", gv.print(&printer)), [def]);
-                        attrs + &def
-                    }
-                    None => String::new(),
-                },
-
-                Node::Func(func) => match self.func_def_cache.get(&func) {
-                    Some(func_def) => {
-                        let AttrsAndDef { attrs, def } = func_def.print(&printer);
-                        attrs + &func.print(&printer) + &def
-                    }
-                    None => String::new(),
-                },
-
-                Node::Dyn(node) => node.print(&printer),
-            };
+            let AttrsAndDef { attrs, def } = node.print(&printer);
+            let def = attrs + &def;
             if !def.is_empty() {
                 writeln!(f, "{}", def)?;
             }
@@ -324,9 +297,12 @@ impl fmt::Display for Plan<'_> {
     }
 }
 
-pub struct Printer<'a> {
+pub struct Printer<'a, 'b> {
     cx: &'a Context,
     use_styles: IndexMap<Use, UseStyle>,
+
+    global_var_def_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDef>,
+    func_def_cache: &'b FxHashMap<Func, &'a FuncDef>,
 }
 
 /// How an use of a node should be printed.
@@ -339,8 +315,8 @@ enum UseStyle {
     Inline,
 }
 
-impl<'a> Printer<'a> {
-    fn new(plan: &Plan<'a>) -> Self {
+impl<'a, 'b> Printer<'a, 'b> {
+    fn new(plan: &'b Plan<'a>) -> Self {
         let cx = plan.cx;
 
         #[derive(Default)]
@@ -403,7 +379,12 @@ impl<'a> Printer<'a> {
             })
             .collect();
 
-        Self { cx, use_styles }
+        Self {
+            cx,
+            use_styles,
+            global_var_def_cache: &plan.global_var_def_cache,
+            func_def_cache: &plan.func_def_cache,
+        }
     }
 
     pub fn cx(&self) -> &'a Context {
@@ -449,62 +430,16 @@ impl<'a> Printer<'a> {
         combined.extend(pieces);
         combined
     }
-
-    fn interned_node_def_to_string(&self, node: InternedNode, style: UseStyle) -> String {
-        let AttrsAndDef {
-            attrs: attrs_of_def,
-            def,
-        } = match node {
-            InternedNode::AttrSet(attrs) => AttrsAndDef {
-                attrs: String::new(),
-                def: self.cx[attrs].print(self),
-            },
-            InternedNode::Type(ty) => self.cx[ty].print(self),
-            InternedNode::Const(ct) => self.cx[ct].print(self),
-        };
-
-        match style {
-            UseStyle::Anon { idx } => {
-                // FIXME(eddyb) automate reindenting (and make it configurable).
-                let reindent_def = match node {
-                    InternedNode::AttrSet(_) => false,
-                    InternedNode::Type(_) | InternedNode::Const(_) => def.contains("\n"),
-                };
-                if reindent_def {
-                    format!(
-                        "{}{}{} =\n  {}",
-                        attrs_of_def,
-                        node.category(),
-                        idx,
-                        def.replace("\n", "\n  ")
-                    )
-                } else {
-                    format!("{}{}{} = {}", attrs_of_def, node.category(), idx, def)
-                }
-            }
-            UseStyle::Inline => match node {
-                InternedNode::AttrSet(_) => def,
-                InternedNode::Type(_) | InternedNode::Const(_) => {
-                    let def = attrs_of_def + &def;
-                    // FIXME(eddyb) automate reindenting (and make it configurable).
-                    if def.contains("\n") {
-                        format!("(\n  {}\n)", def.replace("\n", "\n  "))
-                    } else {
-                        format!("({})", def)
-                    }
-                }
-            },
-        }
-    }
 }
 
 pub trait Print {
     type Output;
-    fn print(&self, printer: &Printer<'_>) -> Self::Output;
+    fn print(&self, printer: &Printer<'_, '_>) -> Self::Output;
 }
 
 /// A `Print` `Output` type that splits the attributes from the main body of the
 /// definition, allowing additional processing before they get concatenated.
+#[derive(Default)]
 pub struct AttrsAndDef {
     pub attrs: String,
     pub def: String,
@@ -512,7 +447,7 @@ pub struct AttrsAndDef {
 
 impl Print for Use {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         let style = printer
             .use_styles
             .get(self)
@@ -527,7 +462,24 @@ impl Print for Use {
                 format!("{}{}{}", prefix, self.category(), idx)
             }
             UseStyle::Inline => match *self {
-                Self::Interned(node) => printer.interned_node_def_to_string(node, style),
+                Self::Interned(node) => {
+                    let AttrsAndDef {
+                        attrs: attrs_of_def,
+                        def,
+                    } = node.print(printer);
+                    match node {
+                        InternedNode::AttrSet(_) => def,
+                        InternedNode::Type(_) | InternedNode::Const(_) => {
+                            let def = attrs_of_def + &def;
+                            // FIXME(eddyb) automate reindenting (and make it configurable).
+                            if def.contains("\n") {
+                                format!("(\n  {}\n)", def.replace("\n", "\n  "))
+                            } else {
+                                format!("({})", def)
+                            }
+                        }
+                    }
+                }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
                 Self::MiscOutput { result_id } => format!("/* unused %{} */_", result_id),
@@ -548,38 +500,103 @@ impl Print for Use {
 // Interned/module-stored nodes dispatch through the `Use` impl above.
 impl Print for AttrSet {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         Use::Interned(InternedNode::AttrSet(*self)).print(printer)
     }
 }
 impl Print for Type {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         Use::Interned(InternedNode::Type(*self)).print(printer)
     }
 }
 impl Print for Const {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         Use::Interned(InternedNode::Const(*self)).print(printer)
     }
 }
 impl Print for GlobalVar {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         Use::GlobalVar(*self).print(printer)
     }
 }
 impl Print for Func {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         Use::Func(*self).print(printer)
+    }
+}
+
+// NOTE(eddyb) the `Print` impl for `Node` is for the top-level definition,
+// *not* any uses (which go through the `Print` impls above).
+impl Print for Node<'_> {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+        match *self {
+            Self::Interned(node) => match printer.use_styles.get(&Use::Interned(node)).copied() {
+                Some(UseStyle::Anon { idx }) => {
+                    let AttrsAndDef {
+                        attrs: attrs_of_def,
+                        def,
+                    } = node.print(printer);
+
+                    // FIXME(eddyb) automate reindenting (and make it configurable).
+                    let reindent_def = match node {
+                        InternedNode::AttrSet(_) => false,
+                        InternedNode::Type(_) | InternedNode::Const(_) => def.contains("\n"),
+                    };
+                    let def = if reindent_def {
+                        format!(
+                            "{}{} =\n  {}",
+                            node.category(),
+                            idx,
+                            def.replace("\n", "\n  ")
+                        )
+                    } else {
+                        format!("{}{} = {}", node.category(), idx, def)
+                    };
+
+                    AttrsAndDef {
+                        attrs: attrs_of_def,
+                        def,
+                    }
+                }
+                _ => AttrsAndDef::default(),
+            },
+
+            Self::GlobalVar(gv) => match printer.global_var_def_cache.get(&gv) {
+                Some(gv_def) => {
+                    let AttrsAndDef { attrs, def } = gv_def.print(printer);
+                    let def = printer.pretty_join_space(&format!("{} =", gv.print(printer)), [def]);
+                    AttrsAndDef { attrs, def }
+                }
+                None => AttrsAndDef::default(),
+            },
+
+            Self::Func(func) => match printer.func_def_cache.get(&func) {
+                Some(func_def) => {
+                    let AttrsAndDef { attrs, def } = func_def.print(printer);
+                    AttrsAndDef {
+                        attrs,
+                        def: func.print(printer) + &def,
+                    }
+                }
+                None => AttrsAndDef::default(),
+            },
+
+            Self::Dyn(node) => AttrsAndDef {
+                attrs: String::new(),
+                def: node.print(printer),
+            },
+        }
     }
 }
 
 impl Print for Module {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         lazy_format!(|f| {
             if self.exports.is_empty() {
                 return Ok(());
@@ -601,7 +618,7 @@ impl Print for Module {
 
 impl Print for ModuleDialect {
     type Output = String;
-    fn print(&self, _printer: &Printer<'_>) -> String {
+    fn print(&self, _printer: &Printer<'_, '_>) -> String {
         lazy_format!(|f| {
             write!(f, "module.dialect = ")?;
             match self {
@@ -649,7 +666,7 @@ impl Print for ModuleDialect {
 
 impl Print for ModuleDebugInfo {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         lazy_format!(|f| {
             write!(f, "module.debug_info = ")?;
             match self {
@@ -709,7 +726,7 @@ impl Print for ModuleDebugInfo {
 
 impl Print for ExportKey {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         match self {
             &Self::LinkName(name) => format!("{:?}", &printer.cx[name]),
 
@@ -743,7 +760,7 @@ impl Print for ExportKey {
 
 impl Print for Exportee {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         match *self {
             Self::GlobalVar(gv) => gv.print(printer),
             Self::Func(func) => func.print(printer),
@@ -751,9 +768,23 @@ impl Print for Exportee {
     }
 }
 
+impl Print for InternedNode {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+        match *self {
+            Self::AttrSet(attrs) => AttrsAndDef {
+                attrs: String::new(),
+                def: printer.cx[attrs].print(printer),
+            },
+            Self::Type(ty) => printer.cx[ty].print(printer),
+            Self::Const(ct) => printer.cx[ct].print(printer),
+        }
+    }
+}
+
 impl Print for AttrSetDef {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         lazy_format!(|f| {
             let Self { attrs } = self;
 
@@ -819,7 +850,7 @@ impl Print for AttrSetDef {
 
 impl Print for TypeDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             ctor,
@@ -843,7 +874,7 @@ impl Print for TypeDef {
 
 impl Print for ConstDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             ty,
@@ -871,7 +902,7 @@ impl Print for ConstDef {
 
 impl Print for GlobalVarDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             type_of_ptr_to,
@@ -915,7 +946,7 @@ impl Print for GlobalVarDef {
 
 impl Print for FuncDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             ret_type: _,
@@ -970,7 +1001,7 @@ impl Print for FuncDef {
 
 impl Print for Misc {
     type Output = String;
-    fn print(&self, printer: &Printer<'_>) -> String {
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
         let Self {
             attrs,
             kind,
