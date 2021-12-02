@@ -854,6 +854,8 @@ impl Module {
                         mut operands,
                     } = inst;
 
+                    let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+
                     let kind = if opcode == wk.OpFunctionCall {
                         let callee_id = match operands[0] {
                             spv::Operand::Id(kind, id) => {
@@ -893,10 +895,25 @@ impl Module {
                     Ok(Misc {
                         attrs,
                         kind,
-                        output: result_id.map(|result_id| MiscOutput::SpvResult {
-                            result_type,
-                            result_id,
-                        }),
+                        output: result_id
+                            .map(|result_id| {
+                                if opcode == wk.OpLabel {
+                                    assert!(result_type.is_none());
+                                    Ok(MiscOutput::SpvLabelResult { result_id })
+                                } else {
+                                    match result_type {
+                                        Some(result_type) => Ok(MiscOutput::SpvValueResult {
+                                            result_type,
+                                            result_id,
+                                        }),
+                                        None => Err(invalid(
+                                            "expected value-producing instruction, \
+                                             with a result type",
+                                        )),
+                                    }
+                                }
+                            })
+                            .transpose()?,
                         inputs: operands
                             .iter()
                             .map(|operand| {

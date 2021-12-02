@@ -133,7 +133,8 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
 
     fn visit_misc_output(&mut self, output: &MiscOutput) {
         match *output {
-            MiscOutput::SpvResult { result_id, .. } => {
+            MiscOutput::SpvValueResult { result_id, .. }
+            | MiscOutput::SpvLabelResult { result_id } => {
                 self.old_outputs.insert(result_id);
             }
         }
@@ -253,9 +254,12 @@ impl LazyInst<'_> {
             }
             Self::Misc(misc) => {
                 let result_id = misc.output.as_ref().map(|old_output| match *old_output {
-                    MiscOutput::SpvResult {
+                    MiscOutput::SpvValueResult {
                         result_id: old_result_id,
                         ..
+                    }
+                    | MiscOutput::SpvLabelResult {
+                        result_id: old_result_id,
                     } => ids.old_outputs[&old_result_id],
                 });
                 (result_id, misc.attrs, None)
@@ -387,9 +391,10 @@ impl LazyInst<'_> {
                         .output
                         .as_ref()
                         .and_then(|old_output| match *old_output {
-                            MiscOutput::SpvResult { result_type, .. } => {
-                                result_type.map(|ty| ids.globals[&Global::Type(ty)])
+                            MiscOutput::SpvValueResult { result_type, .. } => {
+                                Some(ids.globals[&Global::Type(result_type)])
                             }
+                            MiscOutput::SpvLabelResult { .. } => None,
                         }),
                     result_id,
                     operands: extra_first_operand

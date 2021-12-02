@@ -301,14 +301,11 @@ impl InnerVisit for Misc {
 impl InnerVisit for MiscOutput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
-            Self::SpvResult {
+            Self::SpvValueResult {
                 result_type,
                 result_id: _,
-            } => {
-                if let Some(ty) = result_type {
-                    visitor.visit_type_use(ty);
-                }
-            }
+            } => visitor.visit_type_use(result_type),
+            Self::SpvLabelResult { result_id: _ } => {}
         }
     }
 }

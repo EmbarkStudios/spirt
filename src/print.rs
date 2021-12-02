@@ -34,6 +34,10 @@ pub struct Plan<'a> {
 
     nodes: Vec<Node<'a>>,
     use_counts: IndexMap<Use, usize>,
+
+    // HACK(eddyb) scope `MiscOutput` names per-function.
+    current_func: Option<Func>,
+    misc_output_by_spv_result_id: IndexMap<spv::Id, (Option<Func>, MiscOutput)>,
 }
 
 /// Printing `Plan` entry, an effective reification of SPIR-T's implicit DAG.
@@ -93,7 +97,7 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            Self::MiscOutput { .. } => "misc",
+            Self::MiscOutput { .. } => unreachable!(),
         }
     }
 }
@@ -107,6 +111,8 @@ impl<'a> Plan<'a> {
             func_decl_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
+            current_func: None,
+            misc_output_by_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -119,6 +125,8 @@ impl<'a> Plan<'a> {
             func_decl_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
+            current_func: None,
+            misc_output_by_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -188,7 +196,11 @@ impl<'a> Plan<'a> {
             },
 
             Node::Func(func) => match self.func_decl_cache.get(&func).copied() {
-                Some(func_decl) => self.visit_func_decl(func_decl),
+                Some(func_decl) => {
+                    let old_func = self.current_func.replace(func);
+                    self.visit_func_decl(func_decl);
+                    self.current_func = old_func;
+                }
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
@@ -265,6 +277,17 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Dyn(debug_info));
     }
 
+    fn visit_misc_output(&mut self, output: &'a MiscOutput) {
+        match *output {
+            MiscOutput::SpvValueResult { result_id, .. }
+            | MiscOutput::SpvLabelResult { result_id } => {
+                self.misc_output_by_spv_result_id
+                    .insert(result_id, (self.current_func, *output));
+            }
+        }
+        output.inner_visit_with(self);
+    }
+
     fn visit_misc_input(&mut self, input: &'a MiscInput) {
         match *input {
             MiscInput::Type(_) | MiscInput::Const(_) => {}
@@ -319,6 +342,8 @@ pub struct Printer<'a, 'b> {
 
     global_var_decl_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDecl>,
     func_decl_cache: &'b FxHashMap<Func, &'a FuncDecl>,
+
+    misc_output_by_spv_result_id: &'b IndexMap<spv::Id, (Option<Func>, MiscOutput)>,
 }
 
 /// How an use of a node should be printed.
@@ -343,15 +368,18 @@ impl<'a, 'b> Printer<'a, 'b> {
 
             global_vars: usize,
             funcs: usize,
-
-            misc_outputs: usize,
         }
         let mut anon_counters = AnonCounters::default();
 
-        let use_styles = plan
+        let mut use_styles: IndexMap<_, _> = plan
             .use_counts
             .iter()
             .map(|(&use_kind, &use_count)| {
+                // HACK(eddyb) these are assigned later.
+                if let Use::MiscOutput { .. } = use_kind {
+                    return (use_kind, UseStyle::Inline);
+                }
+
                 let inline = match use_kind {
                     Use::Interned(node) => {
                         use_count == 1
@@ -385,7 +413,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::MiscOutput { .. } => &mut ac.misc_outputs,
+                        Use::MiscOutput { .. } => unreachable!(),
                     };
                     let idx = *counter;
                     *counter += 1;
@@ -395,11 +423,30 @@ impl<'a, 'b> Printer<'a, 'b> {
             })
             .collect();
 
+        #[derive(Default)]
+        struct PerFuncAnonCounters {
+            misc_spv_value_outputs: usize,
+            misc_spv_label_outputs: usize,
+        }
+        let mut per_func_anon_counters = FxHashMap::<Option<Func>, PerFuncAnonCounters>::default();
+
+        for (&result_id, &(maybe_func, misc_output)) in &plan.misc_output_by_spv_result_id {
+            let ac = per_func_anon_counters.entry(maybe_func).or_default();
+            let counter = match misc_output {
+                MiscOutput::SpvValueResult { .. } => &mut ac.misc_spv_value_outputs,
+                MiscOutput::SpvLabelResult { .. } => &mut ac.misc_spv_label_outputs,
+            };
+            let idx = *counter;
+            *counter += 1;
+            use_styles.insert(Use::MiscOutput { result_id }, UseStyle::Anon { idx });
+        }
+
         Self {
             cx,
             use_styles,
             global_var_decl_cache: &plan.global_var_decl_cache,
             func_decl_cache: &plan.func_decl_cache,
+            misc_output_by_spv_result_id: &plan.misc_output_by_spv_result_id,
         }
     }
 
@@ -475,7 +522,16 @@ impl Print for Use {
                     Self::Interned(InternedNode::AttrSet(_)) => "#",
                     _ => "",
                 };
-                format!("{}{}{}", prefix, self.category(), idx)
+                let category = match self {
+                    Self::MiscOutput { result_id } => {
+                        match printer.misc_output_by_spv_result_id[result_id].1 {
+                            MiscOutput::SpvValueResult { .. } => "v",
+                            MiscOutput::SpvLabelResult { .. } => "block",
+                        }
+                    }
+                    _ => self.category(),
+                };
+                format!("{}{}{}", prefix, category, idx)
             }
             UseStyle::Inline => match *self {
                 Self::Interned(node) => {
@@ -498,7 +554,7 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::MiscOutput { result_id } => format!("/* unused %{} */_", result_id),
+                Self::MiscOutput { .. } => "_".to_string(),
             },
         };
 
@@ -657,6 +713,8 @@ impl Print for ModuleDialect {
                     write!(f, "  capabilities: ")?;
                     f.debug_set()
                         .entries(capabilities.iter().map(|&cap| {
+                            // FIXME(eddyb) this prints as `Display(...)`, as if
+                            // the `fmt::Debug` impl was `#[derive]`'d on it.
                             lazy_format!(move |f| {
                                 write!(f, "{}", spv::print::imm(wk.Capability, cap))
                             })
@@ -1031,8 +1089,31 @@ impl Print for FuncDecl {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
             DeclDef::Present(FuncDefBody { insts }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
+                let mut in_block = false;
                 for misc in insts {
-                    writeln!(f, "  {}", misc.print(printer).replace("\n", "\n  "))?;
+                    // HACK(eddyb) special-case `OpLabel` to be like explicit blocks.
+                    if let Some(MiscOutput::SpvLabelResult { result_id }) = misc.output {
+                        assert!(misc.kind == MiscKind::SpvInst(wk.OpLabel));
+                        assert!(misc.inputs.is_empty());
+
+                        if in_block {
+                            writeln!(f, "  }}")?;
+                        }
+
+                        writeln!(f, "  {} {{", Use::MiscOutput { result_id }.print(printer))?;
+                        in_block = true;
+                        continue;
+                    }
+
+                    let inst = misc.print(printer);
+                    if in_block {
+                        writeln!(f, "    {}", inst.replace("\n", "\n    "))?;
+                    } else {
+                        writeln!(f, "  {}", inst.replace("\n", "\n  "))?;
+                    }
+                }
+                if in_block {
+                    writeln!(f, "  }}")?;
                 }
                 write!(f, "}}")
             })
@@ -1062,18 +1143,19 @@ impl Print for Misc {
         // but this should be replaced by a proper non-ID def-use graph.
         let spv_id_to_string = |id| Use::MiscOutput { result_id: id }.print(printer);
 
-        let lhs = output.map(|output| match output {
-            MiscOutput::SpvResult {
+        let (lhs, result_type) = match *output {
+            Some(MiscOutput::SpvValueResult {
                 result_type,
                 result_id,
-            } => {
-                let result = spv_id_to_string(result_id);
-                match result_type {
-                    Some(ty) => format!("{}: {}", result, ty.print(printer)),
-                    None => result,
-                }
+            }) => (
+                Some(spv_id_to_string(result_id)),
+                Some(format!(": {}", result_type.print(printer))),
+            ),
+            Some(MiscOutput::SpvLabelResult { result_id }) => {
+                (Some(spv_id_to_string(result_id)), None)
             }
-        });
+            None => (None, None),
+        };
 
         let rhs = printer.pretty_join_space(
             &match kind {
@@ -1092,7 +1174,8 @@ impl Print for Misc {
                     "(OpExtInstImport {:?})",
                     &printer.cx[name]
                 )),
-            })),
+            }))
+            .chain(result_type),
         );
 
         let def = match lhs {

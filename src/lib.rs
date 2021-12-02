@@ -268,6 +268,7 @@ pub struct Misc {
     pub inputs: SmallVec<[MiscInput; 2]>,
 }
 
+#[derive(PartialEq, Eq)]
 pub enum MiscKind {
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
@@ -278,8 +279,11 @@ pub enum MiscKind {
 
 #[derive(Copy, Clone)]
 pub enum MiscOutput {
-    SpvResult {
-        result_type: Option<Type>,
+    SpvValueResult {
+        result_type: Type,
+        result_id: spv::Id,
+    },
+    SpvLabelResult {
         result_id: spv::Id,
     },
 }
