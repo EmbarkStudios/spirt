@@ -23,6 +23,7 @@ pub trait Visitor<'a>: Sized {
     fn visit_spv_dialect(&mut self, _dialect: &spv::Dialect) {}
     fn visit_spv_module_debug_info(&mut self, _debug_info: &spv::ModuleDebugInfo) {}
     fn visit_attr(&mut self, _attr: &Attr) {}
+    fn visit_import(&mut self, _import: &Import) {}
 
     // Non-leaves (defaulting to calling `.inner_visit_with(self)`).
     fn visit_module(&mut self, module: &'a Module) {
@@ -213,9 +214,7 @@ impl InnerVisit for ConstDef {
 impl<D: InnerVisit> InnerVisit for DeclDef<D> {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match self {
-            Self::Imported(import) => match import {
-                Import::LinkName(_) => {}
-            },
+            Self::Imported(import) => visitor.visit_import(import),
             Self::Present(def) => def.inner_visit_with(visitor),
         }
     }

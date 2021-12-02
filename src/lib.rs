@@ -3,10 +3,18 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
+// FIXME(eddyb) maybe use type aliases? rust-analyzer doesn't offer to import
+// any of these and it might be because they're reexports of macro-generated defs.
 pub use context::{AttrSet, Const, Context, Func, GlobalVar, InternedStr, Type};
 
 pub mod print;
+pub mod transform;
 pub mod visit;
+pub mod passes {
+    // NOTE(eddyb) inline `mod` to avoid adding APIs here, it's just namespacing.
+
+    pub mod link;
+}
 
 pub mod spv;
 
@@ -70,7 +78,7 @@ pub enum ModuleDebugInfo {
 }
 
 /// An unique identifier (e.g. a link name, or "symbol") for a module export.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum ExportKey {
     LinkName(InternedStr),
 
@@ -101,7 +109,7 @@ pub struct AttrSetDef {
 }
 
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
     SpvAnnotation {
         // FIXME(eddyb) determine this based on the annotation.
@@ -154,7 +162,7 @@ pub struct TypeDef {
     pub ctor_args: SmallVec<[TypeCtorArg; 2]>,
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TypeCtor {
     SpvInst(spv::spec::Opcode),
 }
@@ -187,7 +195,7 @@ pub struct ConstDef {
     pub ctor_args: SmallVec<[ConstCtorArg; 2]>,
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum ConstCtor {
     PtrToGlobalVar(GlobalVar),
 
