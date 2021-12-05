@@ -283,6 +283,7 @@ pub enum MiscKind {
     FuncCall(Func),
 
     SpvInst(spv::spec::Opcode),
+    SpvExtInst { ext_set: InternedStr, inst: u32 },
 }
 
 #[derive(Copy, Clone)]
@@ -298,7 +299,6 @@ pub enum MiscOutput {
 
 #[derive(Copy, Clone)]
 pub enum MiscInput {
-    Type(Type),
     Const(Const),
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
@@ -308,6 +308,4 @@ pub enum MiscInput {
 
     // FIXME(eddyb) get rid of this by tracking all entities SPIR-V uses ID for.
     SpvUntrackedId(spv::Id),
-
-    SpvExtInstImport(InternedStr),
 }

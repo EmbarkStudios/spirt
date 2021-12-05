@@ -290,9 +290,9 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_misc_input(&mut self, input: &'a MiscInput) {
         match *input {
-            MiscInput::Type(_) | MiscInput::Const(_) => {}
+            MiscInput::Const(_) => {}
 
-            MiscInput::SpvImm(_) | MiscInput::SpvExtInstImport(_) => {}
+            MiscInput::SpvImm(_) => {}
 
             // HACK(eddyb) assume that this ID matches `MiscOutput` of a `Misc`,
             // but this should be replaced by a proper non-ID def-use graph.
@@ -1158,22 +1158,24 @@ impl Print for Misc {
         };
 
         let rhs = printer.pretty_join_space(
-            &match kind {
+            &match *kind {
                 MiscKind::FuncCall(func) => format!("call {}", func.print(printer)),
                 MiscKind::SpvInst(opcode) => opcode.name().to_string(),
+                MiscKind::SpvExtInst { ext_set, inst } => {
+                    // FIXME(eddyb) should this be rendered more compactly?
+                    format!(
+                        "OpExtInst (OpExtInstImport {:?}) {}",
+                        &printer.cx[ext_set], inst
+                    )
+                }
             },
             spv::print::operands(inputs.iter().map(|input| match *input {
-                MiscInput::Type(ty) => spv::print::PrintOperand::IdLike(ty.print(printer)),
                 MiscInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
 
                 MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
                 MiscInput::SpvUntrackedId(id) => {
                     spv::print::PrintOperand::IdLike(spv_id_to_string(id))
                 }
-                MiscInput::SpvExtInstImport(name) => spv::print::PrintOperand::IdLike(format!(
-                    "(OpExtInstImport {:?})",
-                    &printer.cx[name]
-                )),
             }))
             .chain(result_type),
         );

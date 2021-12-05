@@ -888,6 +888,34 @@ impl Module {
                             // up in Rust-GPU output (likely a zombie?).
                             None => MiscKind::SpvInst(opcode),
                         }
+                    } else if opcode == wk.OpExtInst {
+                        let ext_set_id = operands.remove(0);
+                        let inst = operands.remove(0);
+                        let (ext_set_id, inst) = match [ext_set_id, inst] {
+                            [
+                                spv::Operand::Id(es_kind, ext_set_id),
+                                spv::Operand::Imm(spv::Imm::Short(i_kind, inst)),
+                            ] => {
+                                assert!(es_kind == wk.IdRef && i_kind == wk.LiteralExtInstInteger);
+                                (ext_set_id, inst)
+                            }
+                            _ => unreachable!(),
+                        };
+
+                        let ext_set = match id_defs.get(&ext_set_id) {
+                            Some(&IdDef::SpvExtInstImport(name)) => Ok(name),
+                            Some(id_def) => Err(id_def.descr(&cx)),
+                            None => Err(format!("unknown ID %{}", ext_set_id)),
+                        }
+                        .map_err(|descr| {
+                            invalid(&format!(
+                                "unsupported use of {} as the `OpExtInst` \
+                                 extended instruction set ID",
+                                descr
+                            ))
+                        })?;
+
+                        MiscKind::SpvExtInst { ext_set, inst }
                     } else {
                         MiscKind::SpvInst(opcode)
                     };
@@ -916,32 +944,33 @@ impl Module {
                             .transpose()?,
                         inputs: operands
                             .iter()
-                            .map(|operand| {
-                                Ok(match *operand {
-                                    spv::Operand::Imm(imm) => MiscInput::SpvImm(imm),
-                                    spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                        Some(&IdDef::Type(ty)) => MiscInput::Type(ty),
-                                        Some(&IdDef::Const(ct)) => MiscInput::Const(ct),
-                                        Some(&IdDef::SpvExtInstImport(name)) => {
-                                            MiscInput::SpvExtInstImport(name)
-                                        }
-                                        Some(id_def @ IdDef::Func(_)) => {
-                                            return Err(invalid(&format!(
-                                                "unsupported use of {} \
-                                                 outside `OpFunctionCall`",
-                                                id_def.descr(&cx),
-                                            )));
-                                        }
-                                        Some(id_def @ IdDef::SpvDebugString(_)) => {
-                                            return Err(invalid(&format!(
-                                                "unsupported use of {} \
-                                                 outside `OpSource` or `OpLine`",
-                                                id_def.descr(&cx),
-                                            )));
-                                        }
-                                        None => MiscInput::SpvUntrackedId(id),
-                                    },
-                                })
+                            .map(|operand| match *operand {
+                                spv::Operand::Imm(imm) => Ok(MiscInput::SpvImm(imm)),
+                                spv::Operand::Id(_, id) => match id_defs.get(&id) {
+                                    Some(&IdDef::Const(ct)) => Ok(MiscInput::Const(ct)),
+                                    Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
+                                        "unsupported use of {} as an operand for \
+                                         an instruction in a function",
+                                        id_def.descr(&cx),
+                                    ))),
+                                    Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
+                                        "unsupported use of {} outside `OpFunctionCall`",
+                                        id_def.descr(&cx),
+                                    ))),
+                                    Some(id_def @ IdDef::SpvDebugString(_)) => {
+                                        Err(invalid(&format!(
+                                            "unsupported use of {} outside `OpSource` or `OpLine`",
+                                            id_def.descr(&cx),
+                                        )))
+                                    }
+                                    Some(id_def @ IdDef::SpvExtInstImport(_)) => {
+                                        Err(invalid(&format!(
+                                            "unsupported use of {} outside `OpExtInst`",
+                                            id_def.descr(&cx),
+                                        )))
+                                    }
+                                    None => Ok(MiscInput::SpvUntrackedId(id)),
+                                },
                             })
                             .collect::<Result<_, _>>()?,
                     })

@@ -463,7 +463,7 @@ impl InnerInPlaceTransform for Misc {
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
             MiscKind::FuncCall(func) => transformer.transform_func_use(*func).apply_to(func),
-            MiscKind::SpvInst(_) => {}
+            MiscKind::SpvInst(_) | MiscKind::SpvExtInst { .. } => {}
         }
         if let Some(output) = output {
             transformer.transform_misc_output(output).apply_to(output);
@@ -495,17 +495,11 @@ impl InnerTransform for MiscOutput {
 impl InnerTransform for MiscInput {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         match self {
-            Self::Type(ty) => transform!({
-                ty -> transformer.transform_type_use(*ty),
-            } => Self::Type(ty)),
-
             Self::Const(ct) => transform!({
                 ct -> transformer.transform_const_use(*ct),
             } => Self::Const(ct)),
 
-            Self::SpvImm(_) | Self::SpvUntrackedId(_) | Self::SpvExtInstImport(_) => {
-                Transformed::Unchanged
-            }
+            Self::SpvImm(_) | Self::SpvUntrackedId(_) => Transformed::Unchanged,
         }
     }
 }

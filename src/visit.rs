@@ -286,7 +286,7 @@ impl InnerVisit for Misc {
         visitor.visit_attr_set_use(*attrs);
         match *kind {
             MiscKind::FuncCall(func) => visitor.visit_func_use(func),
-            MiscKind::SpvInst(_) => {}
+            MiscKind::SpvInst(_) | MiscKind::SpvExtInst { .. } => {}
         }
         if let Some(output) = output {
             visitor.visit_misc_output(output);
@@ -312,10 +312,9 @@ impl InnerVisit for MiscOutput {
 impl InnerVisit for MiscInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
-            Self::Type(ty) => visitor.visit_type_use(ty),
             Self::Const(ct) => visitor.visit_const_use(ct),
 
-            Self::SpvImm(_) | Self::SpvUntrackedId(_) | Self::SpvExtInstImport(_) => {}
+            Self::SpvImm(_) | Self::SpvUntrackedId(_) => {}
         }
     }
 }

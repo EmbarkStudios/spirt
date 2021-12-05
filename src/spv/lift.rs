@@ -9,6 +9,7 @@ use crate::{
     TypeCtorArg,
 };
 use indexmap::{IndexMap, IndexSet};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -131,6 +132,17 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
     }
 
+    fn visit_misc(&mut self, misc: &Misc) {
+        match misc.kind {
+            MiscKind::FuncCall(_) => {}
+
+            MiscKind::SpvInst(_) => {}
+            MiscKind::SpvExtInst { ext_set, .. } => {
+                self.ext_inst_imports.insert(&self.cx[ext_set]);
+            }
+        }
+        misc.inner_visit_with(self);
+    }
     fn visit_misc_output(&mut self, output: &MiscOutput) {
         match *output {
             MiscOutput::SpvValueResult { result_id, .. }
@@ -139,18 +151,6 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             }
         }
         output.inner_visit_with(self);
-    }
-    fn visit_misc_input(&mut self, input: &MiscInput) {
-        match *input {
-            MiscInput::Type(_)
-            | MiscInput::Const(_)
-            | MiscInput::SpvImm(_)
-            | MiscInput::SpvUntrackedId(_) => {}
-            MiscInput::SpvExtInstImport(name) => {
-                self.ext_inst_imports.insert(&self.cx[name]);
-            }
-        }
-        input.inner_visit_with(self);
     }
 }
 
@@ -378,12 +378,23 @@ impl LazyInst<'_> {
                 }
             }
             Self::Misc(misc) => {
-                let (opcode, extra_first_operand) = match misc.kind {
+                let (opcode, extra_initial_operands): (_, SmallVec<[_; 2]>) = match misc.kind {
                     MiscKind::FuncCall(callee) => (
                         wk.OpFunctionCall,
-                        Some(spv::Operand::Id(wk.IdRef, ids.funcs[&callee])),
+                        [spv::Operand::Id(wk.IdRef, ids.funcs[&callee])]
+                            .into_iter()
+                            .collect(),
                     ),
-                    MiscKind::SpvInst(opcode) => (opcode, None),
+                    MiscKind::SpvInst(opcode) => (opcode, [].into_iter().collect()),
+                    MiscKind::SpvExtInst { ext_set, inst } => (
+                        wk.OpExtInst,
+                        [
+                            spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[ext_set]]),
+                            spv::Operand::Imm(spv::Imm::Short(wk.LiteralExtInstInteger, inst)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
                 };
                 spv::Inst {
                     opcode,
@@ -397,21 +408,15 @@ impl LazyInst<'_> {
                             MiscOutput::SpvLabelResult { .. } => None,
                         }),
                     result_id,
-                    operands: extra_first_operand
+                    operands: extra_initial_operands
                         .into_iter()
                         .chain(misc.inputs.iter().map(|input| match *input {
-                            MiscInput::Type(ty) => {
-                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(ty)])
-                            }
                             MiscInput::Const(ct) => {
                                 spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
                             }
                             MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
                             MiscInput::SpvUntrackedId(old_id) => {
                                 spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
-                            }
-                            MiscInput::SpvExtInstImport(name) => {
-                                spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[name]])
                             }
                         }))
                         .collect(),

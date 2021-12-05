@@ -47,6 +47,7 @@ def_well_known! {
         OpCapability,
         OpExtension,
         OpExtInstImport,
+        OpExtInst,
 
         OpMemoryModel,
 
@@ -97,6 +98,7 @@ def_well_known! {
         LinkageType,
 
         LiteralInteger,
+        LiteralExtInstInteger,
         LiteralString,
 
         IdRef,
