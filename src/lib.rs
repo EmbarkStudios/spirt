@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 mod context;
 // FIXME(eddyb) maybe use type aliases? rust-analyzer doesn't offer to import
 // any of these and it might be because they're reexports of macro-generated defs.
-pub use context::{AttrSet, Const, Context, Func, GlobalVar, InternedStr, Type};
+pub use context::{AttrSet, Const, Context, DataInst, Func, GlobalVar, InternedStr, Type};
 
 pub mod print;
 pub mod transform;
@@ -265,6 +265,10 @@ pub struct FuncParam {
 }
 
 pub struct FuncDefBody {
+    // FIXME(eddyb) this might not be the most efficient storage,
+    // but it prevents misuse.
+    pub data_insts: context::UniqIdxMap<DataInst, DataInstDef>,
+
     pub blocks: Vec<Block>,
 }
 
@@ -273,7 +277,7 @@ pub struct Block {
 }
 
 // FIXME(eddyb) make this name not a lie by splitting out control-flow insts.
-pub struct DataInst {
+pub struct DataInstDef {
     pub attrs: AttrSet,
 
     pub kind: DataInstKind,

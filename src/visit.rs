@@ -1,6 +1,6 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
     FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
     ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
@@ -50,8 +50,8 @@ pub trait Visitor<'a>: Sized {
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         func_decl.inner_visit_with(self);
     }
-    fn visit_data_inst(&mut self, data_inst: &'a DataInst) {
-        data_inst.inner_visit_with(self);
+    fn visit_data_inst_def(&mut self, data_inst_def: &'a DataInstDef) {
+        data_inst_def.inner_visit_with(self);
     }
     fn visit_data_inst_output(&mut self, output: &'a DataInstOutput) {
         output.inner_visit_with(self);
@@ -277,18 +277,18 @@ impl InnerVisit for FuncParam {
 
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { blocks } = self;
+        let Self { data_insts, blocks } = self;
 
         for block in blocks {
             let Block { insts } = block;
-            for inst in insts {
-                visitor.visit_data_inst(inst);
+            for &inst in insts {
+                visitor.visit_data_inst_def(&data_insts[inst]);
             }
         }
     }
 }
 
-impl InnerVisit for DataInst {
+impl InnerVisit for DataInstDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             attrs,

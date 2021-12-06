@@ -1,6 +1,6 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
     FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
     ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
@@ -189,8 +189,8 @@ pub trait Transformer: Sized {
     fn in_place_transform_func_decl(&mut self, func_decl: &mut FuncDecl) {
         func_decl.inner_in_place_transform_with(self);
     }
-    fn in_place_transform_data_inst(&mut self, data_inst: &mut DataInst) {
-        data_inst.inner_in_place_transform_with(self);
+    fn in_place_transform_data_inst_def(&mut self, data_inst_def: &mut DataInstDef) {
+        data_inst_def.inner_in_place_transform_with(self);
     }
 }
 
@@ -462,18 +462,18 @@ impl InnerTransform for FuncParam {
 
 impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self { blocks } = self;
+        let Self { data_insts, blocks } = self;
 
-        for block in blocks {
+        for block in &blocks[..] {
             let Block { insts } = block;
-            for inst in insts {
-                transformer.in_place_transform_data_inst(inst);
+            for &inst in insts {
+                transformer.in_place_transform_data_inst_def(&mut data_insts[inst]);
             }
         }
     }
 }
 
-impl InnerInPlaceTransform for DataInst {
+impl InnerInPlaceTransform for DataInstDef {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         let Self {
             attrs,

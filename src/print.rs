@@ -1,9 +1,9 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    Context, DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee,
-    Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import,
-    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    Context, DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -1096,14 +1096,18 @@ impl Print for FuncDecl {
 
         let def = match def {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
-            DeclDef::Present(FuncDefBody { blocks }) => lazy_format!(|f| {
+            DeclDef::Present(FuncDefBody { data_insts, blocks }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
                 for (i, block) in blocks.iter().enumerate() {
                     let Block { insts } = block;
 
                     writeln!(f, "  block{} {{", i)?;
-                    for inst in insts {
-                        writeln!(f, "    {}", inst.print(printer).replace("\n", "\n    "))?;
+                    for &inst in insts {
+                        writeln!(
+                            f,
+                            "    {}",
+                            data_insts[inst].print(printer).replace("\n", "\n    ")
+                        )?;
                     }
                     writeln!(f, "  }}")?;
                 }
@@ -1131,7 +1135,7 @@ impl Print for FuncParam {
     }
 }
 
-impl Print for DataInst {
+impl Print for DataInstDef {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         let Self {

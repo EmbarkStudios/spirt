@@ -4,7 +4,7 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     print, AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
     FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module,
     Type, TypeCtor, TypeCtorArg, TypeDef,
 };
@@ -790,7 +790,10 @@ impl Module {
 
                 let def = match pending_imports.remove(&func_id) {
                     Some(import) => DeclDef::Imported(import),
-                    None => DeclDef::Present(FuncDefBody { blocks: vec![] }),
+                    None => DeclDef::Present(FuncDefBody {
+                        data_insts: Default::default(),
+                        blocks: vec![],
+                    }),
                 };
 
                 let func = module.funcs.insert(
@@ -878,8 +881,11 @@ impl Module {
                 insts: raw_insts,
             } = func_body;
 
+            let func_decl = &mut module.funcs[func];
+
             // Index IDs declared within the function, first.
             let mut local_id_defs = IndexMap::new();
+            let mut has_blocks = false;
             {
                 let mut next_param_idx = 0u32;
                 let mut next_block_idx = 0u32;
@@ -894,10 +900,14 @@ impl Module {
                             next_param_idx = idx.checked_add(1).unwrap();
                             DataInstInput::FuncParam { idx }
                         } else if opcode == wk.OpLabel {
+                            has_blocks = true;
+
                             let idx = next_block_idx;
                             next_block_idx = idx.checked_add(1).unwrap();
                             DataInstInput::Block { idx }
                         } else {
+                            has_blocks = true;
+
                             DataInstInput::SpvUntrackedId(id)
                         };
                         local_id_defs.insert(id, local_id_def);
@@ -906,7 +916,23 @@ impl Module {
             }
 
             let mut params = vec![];
-            let mut blocks = vec![];
+
+            let mut func_def_body = if has_blocks {
+                match &mut func_decl.def {
+                    DeclDef::Imported(Import::LinkName(name)) => {
+                        return Err(invalid(&format!(
+                            "non-empty function %{} decorated as `Import` of {:?}",
+                            func_id, &cx[*name]
+                        )));
+                    }
+                    DeclDef::Present(def) => {
+                        assert!(def.blocks.is_empty());
+                        Some(def)
+                    }
+                }
+            } else {
+                None
+            };
 
             for raw_inst in raw_insts {
                 let IntraFuncInst {
@@ -920,11 +946,13 @@ impl Module {
                 let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
 
                 if opcode == wk.OpFunctionParameter {
-                    if !blocks.is_empty() {
-                        return Err(invalid(
-                            "out of order: `OpFunctionParameter`s should come \
-                             before the function's blocks",
-                        ));
+                    if let Some(func_def_body) = &func_def_body {
+                        if !func_def_body.blocks.is_empty() {
+                            return Err(invalid(
+                                "out of order: `OpFunctionParameter`s should come \
+                                 before the function's blocks",
+                            ));
+                        }
                     }
 
                     assert!(operands.is_empty());
@@ -933,9 +961,14 @@ impl Module {
                         ty: result_type.unwrap(),
                     });
                 } else if opcode == wk.OpLabel {
-                    blocks.push(Block { insts: vec![] });
+                    func_def_body
+                        .as_mut()
+                        .unwrap()
+                        .blocks
+                        .push(Block { insts: vec![] });
                 } else {
-                    let current_block = blocks.last_mut().ok_or_else(|| {
+                    let func_def_body = func_def_body.as_mut().unwrap();
+                    let current_block = func_def_body.blocks.last_mut().ok_or_else(|| {
                         invalid("out of order: not expected before the function's blocks")
                     })?;
 
@@ -1003,7 +1036,7 @@ impl Module {
                         DataInstKind::SpvInst(opcode)
                     };
 
-                    current_block.insts.push(DataInst {
+                    let inst = func_def_body.data_insts.insert(&cx, DataInstDef {
                         attrs,
                         kind,
                         output: result_id
@@ -1052,10 +1085,9 @@ impl Module {
                             })
                             .collect::<Result<_, _>>()?,
                     });
+                    current_block.insts.push(inst);
                 }
             }
-
-            let func_decl = &mut module.funcs[func];
 
             // FIXME(eddyb) all functions should have the appropriate number of
             // `OpFunctionParameter`, even imports.
@@ -1094,20 +1126,6 @@ impl Module {
                         )));
                     }
                 }
-            }
-
-            if !blocks.is_empty() {
-                let func_def_body = match &mut func_decl.def {
-                    DeclDef::Imported(Import::LinkName(name)) => {
-                        return Err(invalid(&format!(
-                            "non-empty function %{} decorated as `Import` of {:?}",
-                            func_id, &cx[*name]
-                        )));
-                    }
-                    DeclDef::Present(def) => def,
-                };
-                assert!(func_def_body.blocks.is_empty());
-                func_def_body.blocks = blocks;
             }
         }
 
