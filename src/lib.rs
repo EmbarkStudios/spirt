@@ -265,6 +265,10 @@ pub struct FuncParam {
 }
 
 pub struct FuncDefBody {
+    pub blocks: Vec<Block>,
+}
+
+pub struct Block {
     pub insts: Vec<DataInst>,
 }
 
@@ -298,15 +302,15 @@ pub enum DataInstOutput {
         result_type: Type,
         result_id: spv::Id,
     },
-    SpvLabelResult {
-        result_id: spv::Id,
-    },
 }
 
 #[derive(Copy, Clone)]
 pub enum DataInstInput {
     Const(Const),
     FuncParam { idx: u32 },
+
+    // FIXME(eddyb) remove this by moving it to controlflow-only instructions.
+    Block { idx: u32 },
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investingating the performance implications

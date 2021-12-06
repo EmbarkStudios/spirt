@@ -1,7 +1,7 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DataInst,
-    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
+    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
     ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 
@@ -277,10 +277,13 @@ impl InnerVisit for FuncParam {
 
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { insts } = self;
+        let Self { blocks } = self;
 
-        for inst in insts {
-            visitor.visit_data_inst(inst);
+        for block in blocks {
+            let Block { insts } = block;
+            for inst in insts {
+                visitor.visit_data_inst(inst);
+            }
         }
     }
 }
@@ -315,7 +318,6 @@ impl InnerVisit for DataInstOutput {
                 result_type,
                 result_id: _,
             } => visitor.visit_type_use(result_type),
-            Self::SpvLabelResult { result_id: _ } => {}
         }
     }
 }
@@ -325,6 +327,8 @@ impl InnerVisit for DataInstInput {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
             Self::FuncParam { idx: _ } => {}
+
+            Self::Block { idx: _ } => {}
 
             Self::SpvImm(_) | Self::SpvUntrackedId(_) => {}
         }

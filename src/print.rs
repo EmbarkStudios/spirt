@@ -1,9 +1,9 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
-    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
+    Context, DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee,
+    Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import,
+    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -37,7 +37,7 @@ pub struct Plan<'a> {
 
     // HACK(eddyb) scope `DataInstOutput` names per-function.
     current_func: Option<Func>,
-    data_inst_output_by_spv_result_id: IndexMap<spv::Id, (Option<Func>, DataInstOutput)>,
+    current_func_for_data_inst_output_spv_result_id: IndexMap<spv::Id, Option<Func>>,
 }
 
 /// Helper for printing a mismatch error between two nodes (e.g. types), while
@@ -104,7 +104,7 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            Self::DataInstOutput { .. } => unreachable!(),
+            Self::DataInstOutput { .. } => "v",
         }
     }
 }
@@ -119,7 +119,7 @@ impl<'a> Plan<'a> {
             nodes: vec![],
             use_counts: IndexMap::new(),
             current_func: None,
-            data_inst_output_by_spv_result_id: IndexMap::default(),
+            current_func_for_data_inst_output_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -133,7 +133,7 @@ impl<'a> Plan<'a> {
             nodes: vec![],
             use_counts: IndexMap::new(),
             current_func: None,
-            data_inst_output_by_spv_result_id: IndexMap::default(),
+            current_func_for_data_inst_output_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -286,10 +286,9 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_data_inst_output(&mut self, output: &'a DataInstOutput) {
         match *output {
-            DataInstOutput::SpvValueResult { result_id, .. }
-            | DataInstOutput::SpvLabelResult { result_id } => {
-                self.data_inst_output_by_spv_result_id
-                    .insert(result_id, (self.current_func, *output));
+            DataInstOutput::SpvValueResult { result_id, .. } => {
+                self.current_func_for_data_inst_output_spv_result_id
+                    .insert(result_id, self.current_func);
             }
         }
         output.inner_visit_with(self);
@@ -298,6 +297,8 @@ impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
         match *input {
             DataInstInput::Const(_) | DataInstInput::FuncParam { .. } => {}
+
+            DataInstInput::Block { .. } => {}
 
             DataInstInput::SpvImm(_) => {}
 
@@ -360,8 +361,6 @@ pub struct Printer<'a, 'b> {
 
     global_var_decl_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDecl>,
     func_decl_cache: &'b FxHashMap<Func, &'a FuncDecl>,
-
-    data_inst_output_by_spv_result_id: &'b IndexMap<spv::Id, (Option<Func>, DataInstOutput)>,
 }
 
 /// How an use of a node should be printed.
@@ -444,17 +443,12 @@ impl<'a, 'b> Printer<'a, 'b> {
         #[derive(Default)]
         struct PerFuncAnonCounters {
             data_inst_spv_value_outputs: usize,
-            data_inst_spv_label_outputs: usize,
         }
         let mut per_func_anon_counters = FxHashMap::<Option<Func>, PerFuncAnonCounters>::default();
 
-        for (&result_id, &(maybe_func, data_inst_output)) in &plan.data_inst_output_by_spv_result_id
-        {
+        for (&result_id, &maybe_func) in &plan.current_func_for_data_inst_output_spv_result_id {
             let ac = per_func_anon_counters.entry(maybe_func).or_default();
-            let counter = match data_inst_output {
-                DataInstOutput::SpvValueResult { .. } => &mut ac.data_inst_spv_value_outputs,
-                DataInstOutput::SpvLabelResult { .. } => &mut ac.data_inst_spv_label_outputs,
-            };
+            let counter = &mut ac.data_inst_spv_value_outputs;
             let idx = *counter;
             *counter += 1;
             use_styles.insert(Use::DataInstOutput { result_id }, UseStyle::Anon { idx });
@@ -465,7 +459,6 @@ impl<'a, 'b> Printer<'a, 'b> {
             use_styles,
             global_var_decl_cache: &plan.global_var_decl_cache,
             func_decl_cache: &plan.func_decl_cache,
-            data_inst_output_by_spv_result_id: &plan.data_inst_output_by_spv_result_id,
         }
     }
 
@@ -554,16 +547,7 @@ impl Print for Use {
                     Self::Interned(InternedNode::AttrSet(_)) => "#",
                     _ => "",
                 };
-                let category = match self {
-                    Self::DataInstOutput { result_id } => {
-                        match printer.data_inst_output_by_spv_result_id[result_id].1 {
-                            DataInstOutput::SpvValueResult { .. } => "v",
-                            DataInstOutput::SpvLabelResult { .. } => "block",
-                        }
-                    }
-                    _ => self.category(),
-                };
-                format!("{}{}{}", prefix, category, idx)
+                format!("{}{}{}", prefix, self.category(), idx)
             }
             UseStyle::Inline => match *self {
                 Self::Interned(node) => {
@@ -1086,8 +1070,6 @@ impl Print for FuncDecl {
             def,
         } = self;
 
-        let wk = &spv::spec::Spec::get().well_known;
-
         let sig = {
             let ret_type = ret_type.print(printer);
             let params: SmallVec<[_; 16]> = params
@@ -1114,36 +1096,15 @@ impl Print for FuncDecl {
 
         let def = match def {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
-            DeclDef::Present(FuncDefBody { insts }) => lazy_format!(|f| {
+            DeclDef::Present(FuncDefBody { blocks }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                let mut in_block = false;
-                for data_inst in insts {
-                    // HACK(eddyb) special-case `OpLabel` to be like explicit blocks.
-                    if let Some(DataInstOutput::SpvLabelResult { result_id }) = data_inst.output {
-                        assert!(data_inst.kind == DataInstKind::SpvInst(wk.OpLabel));
-                        assert!(data_inst.inputs.is_empty());
+                for (i, block) in blocks.iter().enumerate() {
+                    let Block { insts } = block;
 
-                        if in_block {
-                            writeln!(f, "  }}")?;
-                        }
-
-                        writeln!(
-                            f,
-                            "  {} {{",
-                            Use::DataInstOutput { result_id }.print(printer)
-                        )?;
-                        in_block = true;
-                        continue;
+                    writeln!(f, "  block{} {{", i)?;
+                    for inst in insts {
+                        writeln!(f, "    {}", inst.print(printer).replace("\n", "\n    "))?;
                     }
-
-                    let inst = data_inst.print(printer);
-                    if in_block {
-                        writeln!(f, "    {}", inst.replace("\n", "\n    "))?;
-                    } else {
-                        writeln!(f, "  {}", inst.replace("\n", "\n  "))?;
-                    }
-                }
-                if in_block {
                     writeln!(f, "  }}")?;
                 }
                 write!(f, "}}")
@@ -1194,9 +1155,6 @@ impl Print for DataInst {
                 Some(spv_id_to_string(result_id)),
                 Some(format!(": {}", result_type.print(printer))),
             ),
-            Some(DataInstOutput::SpvLabelResult { result_id }) => {
-                (Some(spv_id_to_string(result_id)), None)
-            }
             None => (None, None),
         };
 
@@ -1216,6 +1174,10 @@ impl Print for DataInst {
                 DataInstInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
                 DataInstInput::FuncParam { idx } => {
                     spv::print::PrintOperand::IdLike(format!("param{}", idx))
+                }
+
+                DataInstInput::Block { idx } => {
+                    spv::print::PrintOperand::IdLike(format!("block{}", idx))
                 }
 
                 DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),

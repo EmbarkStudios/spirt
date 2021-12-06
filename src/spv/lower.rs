@@ -3,10 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DataInst,
-    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type,
-    TypeCtor, TypeCtorArg, TypeDef,
+    print, AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
+    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module,
+    Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -790,7 +790,7 @@ impl Module {
 
                 let def = match pending_imports.remove(&func_id) {
                     Some(import) => DeclDef::Imported(import),
-                    None => DeclDef::Present(FuncDefBody { insts: vec![] }),
+                    None => DeclDef::Present(FuncDefBody { blocks: vec![] }),
                 };
 
                 let func = module.funcs.insert(
@@ -878,8 +878,35 @@ impl Module {
                 insts: raw_insts,
             } = func_body;
 
-            let mut params = IndexMap::new();
-            let mut insts = vec![];
+            // Index IDs declared within the function, first.
+            let mut local_id_defs = IndexMap::new();
+            {
+                let mut next_param_idx = 0u32;
+                let mut next_block_idx = 0u32;
+                for raw_inst in &raw_insts {
+                    let IntraFuncInst {
+                        opcode, result_id, ..
+                    } = *raw_inst;
+
+                    if let Some(id) = result_id {
+                        let local_id_def = if opcode == wk.OpFunctionParameter {
+                            let idx = next_param_idx;
+                            next_param_idx = idx.checked_add(1).unwrap();
+                            DataInstInput::FuncParam { idx }
+                        } else if opcode == wk.OpLabel {
+                            let idx = next_block_idx;
+                            next_block_idx = idx.checked_add(1).unwrap();
+                            DataInstInput::Block { idx }
+                        } else {
+                            DataInstInput::SpvUntrackedId(id)
+                        };
+                        local_id_defs.insert(id, local_id_def);
+                    }
+                }
+            }
+
+            let mut params = vec![];
+            let mut blocks = vec![];
 
             for raw_inst in raw_insts {
                 let IntraFuncInst {
@@ -893,7 +920,7 @@ impl Module {
                 let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
 
                 if opcode == wk.OpFunctionParameter {
-                    if !insts.is_empty() {
+                    if !blocks.is_empty() {
                         return Err(invalid(
                             "out of order: `OpFunctionParameter`s should come \
                              before the function's blocks",
@@ -901,14 +928,17 @@ impl Module {
                     }
 
                     assert!(operands.is_empty());
-                    params.insert(
-                        result_id.unwrap(),
-                        FuncParam {
-                            attrs,
-                            ty: result_type.unwrap(),
-                        },
-                    );
+                    params.push(FuncParam {
+                        attrs,
+                        ty: result_type.unwrap(),
+                    });
+                } else if opcode == wk.OpLabel {
+                    blocks.push(Block { insts: vec![] });
                 } else {
+                    let current_block = blocks.last_mut().ok_or_else(|| {
+                        invalid("out of order: not expected before the function's blocks")
+                    })?;
+
                     let kind = if opcode == wk.OpFunctionCall {
                         let callee_id = match operands[0] {
                             spv::Operand::Id(kind, id) => {
@@ -973,26 +1003,18 @@ impl Module {
                         DataInstKind::SpvInst(opcode)
                     };
 
-                    insts.push(DataInst {
+                    current_block.insts.push(DataInst {
                         attrs,
                         kind,
                         output: result_id
-                            .map(|result_id| {
-                                if opcode == wk.OpLabel {
-                                    assert!(result_type.is_none());
-                                    Ok(DataInstOutput::SpvLabelResult { result_id })
-                                } else {
-                                    match result_type {
-                                        Some(result_type) => Ok(DataInstOutput::SpvValueResult {
-                                            result_type,
-                                            result_id,
-                                        }),
-                                        None => Err(invalid(
-                                            "expected value-producing instruction, \
-                                             with a result type",
-                                        )),
-                                    }
-                                }
+                            .map(|result_id| match result_type {
+                                Some(result_type) => Ok(DataInstOutput::SpvValueResult {
+                                    result_type,
+                                    result_id,
+                                }),
+                                None => Err(invalid(
+                                    "expected value-producing instruction, with a result type",
+                                )),
                             })
                             .transpose()?,
                         inputs: operands
@@ -1022,15 +1044,10 @@ impl Module {
                                             id_def.descr(&cx),
                                         )))
                                     }
-                                    None => {
-                                        if let Some(idx) = params.get_index_of(&id) {
-                                            Ok(DataInstInput::FuncParam {
-                                                idx: idx.try_into().unwrap(),
-                                            })
-                                        } else {
-                                            Ok(DataInstInput::SpvUntrackedId(id))
-                                        }
-                                    }
+                                    None => local_id_defs
+                                        .get(&id)
+                                        .copied()
+                                        .ok_or_else(|| invalid(&format!("undefined ID %{}", id,))),
                                 },
                             })
                             .collect::<Result<_, _>>()?,
@@ -1056,7 +1073,7 @@ impl Module {
                 }
 
                 for (i, (func_type_param, param)) in
-                    func_decl.params.iter_mut().zip(params.values()).enumerate()
+                    func_decl.params.iter_mut().zip(params).enumerate()
                 {
                     if func_type_param.ty != param.ty {
                         // FIXME(remove) embed IDs in errors by moving them to the
@@ -1079,7 +1096,7 @@ impl Module {
                 }
             }
 
-            if !insts.is_empty() {
+            if !blocks.is_empty() {
                 let func_def_body = match &mut func_decl.def {
                     DeclDef::Imported(Import::LinkName(name)) => {
                         return Err(invalid(&format!(
@@ -1089,8 +1106,8 @@ impl Module {
                     }
                     DeclDef::Present(def) => def,
                 };
-                assert!(func_def_body.insts.is_empty());
-                func_def_body.insts = insts;
+                assert!(func_def_body.blocks.is_empty());
+                func_def_body.blocks = blocks;
             }
         }
 

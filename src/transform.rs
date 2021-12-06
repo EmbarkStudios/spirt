@@ -1,7 +1,7 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DataInst,
-    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
+    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
     ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use std::cmp::Ordering;
@@ -462,10 +462,13 @@ impl InnerTransform for FuncParam {
 
 impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self { insts } = self;
+        let Self { blocks } = self;
 
-        for inst in insts {
-            transformer.in_place_transform_data_inst(inst);
+        for block in blocks {
+            let Block { insts } = block;
+            for inst in insts {
+                transformer.in_place_transform_data_inst(inst);
+            }
         }
     }
 }
@@ -507,8 +510,6 @@ impl InnerTransform for DataInstOutput {
                 result_type,
                 result_id,
             }),
-
-            Self::SpvLabelResult { result_id: _ } => Transformed::Unchanged,
         }
     }
 }
@@ -521,6 +522,8 @@ impl InnerTransform for DataInstInput {
             } => Self::Const(ct)),
 
             Self::FuncParam { idx: _ } => Transformed::Unchanged,
+
+            Self::Block { idx: _ } => Transformed::Unchanged,
 
             Self::SpvImm(_) | Self::SpvUntrackedId(_) => Transformed::Unchanged,
         }
