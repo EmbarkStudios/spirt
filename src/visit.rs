@@ -1,8 +1,8 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg, TypeDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -253,14 +253,25 @@ impl InnerVisit for FuncDecl {
         let Self {
             attrs,
             ret_type,
-            ty,
+            params,
             def,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ret_type);
-        visitor.visit_type_use(*ty);
+        for param in params {
+            param.inner_visit_with(visitor);
+        }
         def.inner_visit_with(visitor);
+    }
+}
+
+impl InnerVisit for FuncParam {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { attrs, ty } = *self;
+
+        visitor.visit_attr_set_use(attrs);
+        visitor.visit_type_use(ty);
     }
 }
 
@@ -313,6 +324,7 @@ impl InnerVisit for MiscInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
+            Self::FuncParam { idx: _ } => {}
 
             Self::SpvImm(_) | Self::SpvUntrackedId(_) => {}
         }

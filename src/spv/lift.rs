@@ -4,9 +4,9 @@ use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
     AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDefBody, Import, Misc,
-    MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor,
-    TypeCtorArg,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody,
+    Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg, TypeDef,
 };
 use indexmap::{IndexMap, IndexSet};
 use smallvec::SmallVec;
@@ -16,7 +16,7 @@ use std::path::Path;
 use std::{io, iter};
 
 impl spv::Dialect {
-    pub fn capability_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    fn capability_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
         let wk = &spec::Spec::get().well_known;
         self.capabilities.iter().map(move |&cap| spv::Inst {
             opcode: wk.OpCapability,
@@ -38,7 +38,7 @@ impl spv::Dialect {
 }
 
 impl spv::ModuleDebugInfo {
-    pub fn source_extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    fn source_extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
         let wk = &spec::Spec::get().well_known;
         self.source_extensions.iter().map(move |ext| spv::Inst {
             opcode: wk.OpSourceExtension,
@@ -48,13 +48,28 @@ impl spv::ModuleDebugInfo {
         })
     }
 
-    pub fn module_processed_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    fn module_processed_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
         let wk = &spec::Spec::get().well_known;
         self.module_processes.iter().map(move |proc| spv::Inst {
             opcode: wk.OpModuleProcessed,
             result_type_id: None,
             result_id: None,
             operands: spv::encode_literal_string(proc).collect(),
+        })
+    }
+}
+
+impl FuncDecl {
+    fn spv_func_type(&self, cx: &Context) -> Type {
+        let wk = &spec::Spec::get().well_known;
+
+        cx.intern(TypeDef {
+            attrs: AttrSet::default(),
+            ctor: TypeCtor::SpvInst(wk.OpTypeFunction),
+            ctor_args: iter::once(self.ret_type)
+                .chain(self.params.iter().map(|param| param.ty))
+                .map(TypeCtorArg::Type)
+                .collect(),
         })
     }
 }
@@ -113,7 +128,11 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         // in the resulting module, but the order doesn't matter, and we need
         // to avoid infinite recursion for recursive functions.
         self.funcs.insert(func);
-        self.visit_func_decl(&self.module.funcs[func]);
+
+        let func_decl = &self.module.funcs[func];
+        // FIXME(eddyb) should this be cached in `self.funcs`?
+        self.visit_type_use(func_decl.spv_func_type(self.cx));
+        self.visit_func_decl(func_decl);
     }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
@@ -159,9 +178,15 @@ struct AllocatedIds<'a> {
     debug_strings: BTreeMap<&'a str, spv::Id>,
 
     globals: IndexMap<Global, spv::Id>,
-    funcs: IndexMap<Func, spv::Id>,
+    funcs: IndexMap<Func, FuncIds>,
 
     old_outputs: IndexMap<spv::Id, spv::Id>,
+}
+
+struct FuncIds {
+    func_id: spv::Id,
+    // FIXME(eddyb) should this just be a range?
+    param_ids: SmallVec<[spv::Id; 4]>,
 }
 
 impl<'a> NeedsIdsCollector<'a> {
@@ -171,7 +196,7 @@ impl<'a> NeedsIdsCollector<'a> {
     ) -> Result<AllocatedIds<'a>, E> {
         let Self {
             cx: _,
-            module: _,
+            module,
             ext_inst_imports,
             debug_strings,
             globals,
@@ -195,7 +220,18 @@ impl<'a> NeedsIdsCollector<'a> {
                 .collect::<Result<_, _>>()?,
             funcs: funcs
                 .into_iter()
-                .map(|func| Ok((func, alloc_id()?)))
+                .map(|func| {
+                    let func_decl = &module.funcs[func];
+                    let func_ids = FuncIds {
+                        func_id: alloc_id()?,
+                        param_ids: func_decl
+                            .params
+                            .iter()
+                            .map(|_| alloc_id())
+                            .collect::<Result<_, _>>()?,
+                    };
+                    Ok((func, func_ids))
+                })
                 .collect::<Result<_, _>>()?,
             old_outputs: old_outputs
                 .into_iter()
@@ -211,8 +247,18 @@ impl<'a> NeedsIdsCollector<'a> {
 #[derive(Copy, Clone)]
 enum LazyInst<'a> {
     Global(Global),
-    OpFunction { func: Func, func_decl: &'a FuncDecl },
-    Misc(&'a Misc),
+    OpFunction {
+        func_id: spv::Id,
+        func_decl: &'a FuncDecl,
+    },
+    OpFunctionParameter {
+        param_id: spv::Id,
+        param: &'a FuncParam,
+    },
+    Misc {
+        parent_func: Func,
+        misc: &'a Misc,
+    },
     OpFunctionEnd,
 }
 
@@ -245,14 +291,18 @@ impl LazyInst<'_> {
                 };
                 (Some(ids.globals[&global]), attrs, import)
             }
-            Self::OpFunction { func, func_decl } => {
+            Self::OpFunction { func_id, func_decl } => {
                 let import = match func_decl.def {
                     DeclDef::Imported(import) => Some(import),
                     DeclDef::Present(_) => None,
                 };
-                (Some(ids.funcs[&func]), func_decl.attrs, import)
+                (Some(func_id), func_decl.attrs, import)
             }
-            Self::Misc(misc) => {
+            Self::OpFunctionParameter { param_id, param } => (Some(param_id), param.attrs, None),
+            Self::Misc {
+                parent_func: _,
+                misc,
+            } => {
                 let result_id = misc.output.as_ref().map(|old_output| match *old_output {
                     MiscOutput::SpvValueResult {
                         result_id: old_result_id,
@@ -350,7 +400,10 @@ impl LazyInst<'_> {
                     }
                 }
             },
-            Self::OpFunction { func: _, func_decl } => {
+            Self::OpFunction {
+                func_id: _,
+                func_decl,
+            } => {
                 // FIXME(eddyb) make this less of a search and more of a
                 // lookup by splitting attrs into key and value parts.
                 let func_ctrl = cx[attrs]
@@ -365,23 +418,33 @@ impl LazyInst<'_> {
                         _ => None,
                     })
                     .unwrap_or(0);
+
                 spv::Inst {
                     opcode: wk.OpFunction,
                     result_type_id: Some(ids.globals[&Global::Type(func_decl.ret_type)]),
                     result_id,
                     operands: [
                         spv::Operand::Imm(spv::Imm::Short(wk.FunctionControl, func_ctrl)),
-                        spv::Operand::Id(wk.IdRef, ids.globals[&Global::Type(func_decl.ty)]),
+                        spv::Operand::Id(
+                            wk.IdRef,
+                            ids.globals[&Global::Type(func_decl.spv_func_type(cx))],
+                        ),
                     ]
                     .into_iter()
                     .collect(),
                 }
             }
-            Self::Misc(misc) => {
+            Self::OpFunctionParameter { param_id: _, param } => spv::Inst {
+                opcode: wk.OpFunctionParameter,
+                result_type_id: Some(ids.globals[&Global::Type(param.ty)]),
+                result_id,
+                operands: [].into_iter().collect(),
+            },
+            Self::Misc { parent_func, misc } => {
                 let (opcode, extra_initial_operands): (_, SmallVec<[_; 2]>) = match misc.kind {
                     MiscKind::FuncCall(callee) => (
                         wk.OpFunctionCall,
-                        [spv::Operand::Id(wk.IdRef, ids.funcs[&callee])]
+                        [spv::Operand::Id(wk.IdRef, ids.funcs[&callee].func_id)]
                             .into_iter()
                             .collect(),
                     ),
@@ -414,6 +477,11 @@ impl LazyInst<'_> {
                             MiscInput::Const(ct) => {
                                 spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
                             }
+                            MiscInput::FuncParam { idx } => spv::Operand::Id(
+                                wk.IdRef,
+                                ids.funcs[&parent_func].param_ids[usize::try_from(idx).unwrap()],
+                            ),
+
                             MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
                             MiscInput::SpvUntrackedId(old_id) => {
                                 spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
@@ -519,15 +587,24 @@ impl Module {
                 .keys()
                 .copied()
                 .map(LazyInst::Global)
-                .chain(ids.funcs.keys().flat_map(|&func| {
+                .chain(ids.funcs.iter().flat_map(|(&func, func_ids)| {
                     let func_decl = &self.funcs[func];
                     let insts = match &func_decl.def {
                         DeclDef::Imported(_) => &[][..],
                         DeclDef::Present(FuncDefBody { insts }) => insts,
                     };
-                    iter::once(LazyInst::OpFunction { func, func_decl })
-                        .chain(insts.iter().map(|misc| LazyInst::Misc(misc)))
-                        .chain([LazyInst::OpFunctionEnd])
+                    iter::once(LazyInst::OpFunction {
+                        func_id: func_ids.func_id,
+                        func_decl,
+                    })
+                    .chain(func_ids.param_ids.iter().zip(&func_decl.params).map(
+                        |(&param_id, param)| LazyInst::OpFunctionParameter { param_id, param },
+                    ))
+                    .chain(insts.iter().map(move |misc| LazyInst::Misc {
+                        parent_func: func,
+                        misc,
+                    }))
+                    .chain([LazyInst::OpFunctionEnd])
                 }));
 
         let reserved_inst_schema = 0;
@@ -639,7 +716,7 @@ impl Module {
         for (export_key, &exportee) in &self.exports {
             let target_id = match exportee {
                 Exportee::GlobalVar(gv) => ids.globals[&global_var_to_id_giving_global(gv)],
-                Exportee::Func(func) => ids.funcs[&func],
+                Exportee::Func(func) => ids.funcs[&func].func_id,
             };
             match export_key {
                 &ExportKey::LinkName(name) => {

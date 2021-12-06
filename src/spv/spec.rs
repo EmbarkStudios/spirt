@@ -83,6 +83,7 @@ def_well_known! {
         OpVariable,
 
         OpFunction,
+        OpFunctionParameter,
         OpFunctionEnd,
         OpLabel,
         OpFunctionCall,

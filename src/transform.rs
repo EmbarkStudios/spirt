@@ -1,8 +1,8 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg, TypeDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use std::cmp::Ordering;
 
@@ -430,14 +430,30 @@ impl InnerInPlaceTransform for FuncDecl {
         let Self {
             attrs,
             ret_type,
-            ty,
+            params,
             def,
         } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         transformer.transform_type_use(*ret_type).apply_to(ret_type);
-        transformer.transform_type_use(*ty).apply_to(ty);
+        for param in params {
+            param.inner_transform_with(transformer).apply_to(param);
+        }
         def.inner_in_place_transform_with(transformer);
+    }
+}
+
+impl InnerTransform for FuncParam {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        let Self { attrs, ty } = self;
+
+        transform!({
+            attrs -> transformer.transform_attr_set_use(*attrs),
+            ty -> transformer.transform_type_use(*ty),
+        } => Self {
+            attrs,
+            ty,
+        })
     }
 }
 
@@ -498,6 +514,8 @@ impl InnerTransform for MiscInput {
             Self::Const(ct) => transform!({
                 ct -> transformer.transform_const_use(*ct),
             } => Self::Const(ct)),
+
+            Self::FuncParam { idx: _ } => Transformed::Unchanged,
 
             Self::SpvImm(_) | Self::SpvUntrackedId(_) => Transformed::Unchanged,
         }

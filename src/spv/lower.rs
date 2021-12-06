@@ -3,11 +3,12 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVarDecl, GlobalVarDefBody, Import,
-    InternedStr, Misc, MiscInput, MiscKind, MiscOutput, Module, Type, TypeCtor, TypeCtorArg,
-    TypeDef,
+    print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody,
+    Import, InternedStr, Misc, MiscInput, MiscKind, MiscOutput, Module, Type, TypeCtor,
+    TypeCtorArg, TypeDef,
 };
+use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,6 +61,7 @@ enum Export {
 
 /// Deferred `FuncDefBody`, needed because some IDs are initially forward refs.
 struct FuncBody {
+    func_id: spv::Id,
     func: Func,
     insts: Vec<IntraFuncInst>,
 }
@@ -746,23 +748,45 @@ impl Module {
                     _ => unreachable!(),
                 };
 
-                // FIXME(eddyb) move this kind of lookup into methods on some sort
-                // of "lowering context" type.
-                let func_type = match id_defs.get(&func_type_id) {
-                    Some(&IdDef::Type(ty)) => ty,
-                    Some(_) => {
-                        return Err(invalid(&format!(
-                            "function type %{} not an OpType*",
-                            func_type_id
-                        )));
+                let (func_type_ret_type, func_type_param_types) =
+                    match id_defs.get(&func_type_id) {
+                        Some(&IdDef::Type(ty)) => {
+                            let ty_def = &cx[ty];
+                            if ty_def.ctor == TypeCtor::SpvInst(wk.OpTypeFunction) {
+                                let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
+                                    TypeCtorArg::Type(ty) => ty,
+                                    _ => unreachable!(),
+                                });
+                                Some((types.next().unwrap(), types))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
                     }
-                    None => {
-                        return Err(invalid(&format!(
-                            "function type %{} not defined",
+                    .ok_or_else(|| {
+                        invalid(&format!(
+                            "function type %{} not an `OpTypeFunction`",
                             func_type_id
-                        )));
-                    }
-                };
+                        ))
+                    })?;
+
+                if func_ret_type != func_type_ret_type {
+                    // FIXME(remove) embed IDs in errors by moving them to the
+                    // `let invalid = |...| ...;` closure that wraps insts.
+                    return Err(invalid(&format!(
+                        "in %{}, return type differs between `OpFunction` (expected) \
+                         and `OpTypeFunction` (found):\n\n{}",
+                        func_id,
+                        print::Plan::for_root_outside_module(
+                            &cx,
+                            &print::ExpectedVsFound {
+                                expected: func_ret_type,
+                                found: func_type_ret_type,
+                            }
+                        )
+                    )));
+                }
 
                 let def = match pending_imports.remove(&func_id) {
                     Some(import) => DeclDef::Imported(import),
@@ -774,13 +798,19 @@ impl Module {
                     FuncDecl {
                         attrs: mem::take(&mut attrs),
                         ret_type: func_ret_type,
-                        ty: func_type,
+                        params: func_type_param_types
+                            .map(|ty| FuncParam {
+                                attrs: AttrSet::default(),
+                                ty,
+                            })
+                            .collect(),
                         def,
                     },
                 );
                 id_defs.insert(func_id, IdDef::Func(func));
 
                 current_func_body = Some(FuncBody {
+                    func_id,
                     func,
                     insts: vec![],
                 });
@@ -842,20 +872,43 @@ impl Module {
 
         // Process function bodies, having seen the whole module.
         for func_body in pending_func_bodies {
-            let FuncBody { func, insts } = func_body;
-            let insts: Vec<_> = insts
-                .into_iter()
-                .map(|inst| -> io::Result<_> {
-                    let IntraFuncInst {
-                        attrs,
-                        result_type,
-                        opcode,
-                        result_id,
-                        mut operands,
-                    } = inst;
+            let FuncBody {
+                func_id,
+                func,
+                insts: raw_insts,
+            } = func_body;
 
-                    let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+            let mut params = IndexMap::new();
+            let mut insts = vec![];
 
+            for raw_inst in raw_insts {
+                let IntraFuncInst {
+                    attrs,
+                    result_type,
+                    opcode,
+                    result_id,
+                    mut operands,
+                } = raw_inst;
+
+                let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+
+                if opcode == wk.OpFunctionParameter {
+                    if !insts.is_empty() {
+                        return Err(invalid(
+                            "out of order: `OpFunctionParameter`s should come \
+                             before the function's blocks",
+                        ));
+                    }
+
+                    assert!(operands.is_empty());
+                    params.insert(
+                        result_id.unwrap(),
+                        FuncParam {
+                            attrs,
+                            ty: result_type.unwrap(),
+                        },
+                    );
+                } else {
                     let kind = if opcode == wk.OpFunctionCall {
                         let callee_id = match operands[0] {
                             spv::Operand::Id(kind, id) => {
@@ -920,7 +973,7 @@ impl Module {
                         MiscKind::SpvInst(opcode)
                     };
 
-                    Ok(Misc {
+                    insts.push(Misc {
                         attrs,
                         kind,
                         output: result_id
@@ -969,20 +1022,69 @@ impl Module {
                                             id_def.descr(&cx),
                                         )))
                                     }
-                                    None => Ok(MiscInput::SpvUntrackedId(id)),
+                                    None => {
+                                        if let Some(idx) = params.get_index_of(&id) {
+                                            Ok(MiscInput::FuncParam {
+                                                idx: idx.try_into().unwrap(),
+                                            })
+                                        } else {
+                                            Ok(MiscInput::SpvUntrackedId(id))
+                                        }
+                                    }
                                 },
                             })
                             .collect::<Result<_, _>>()?,
-                    })
-                })
-                .collect::<Result<_, _>>()?;
+                    });
+                }
+            }
+
+            let func_decl = &mut module.funcs[func];
+
+            // FIXME(eddyb) all functions should have the appropriate number of
+            // `OpFunctionParameter`, even imports.
+            if !params.is_empty() {
+                if func_decl.params.len() != params.len() {
+                    // FIXME(remove) embed IDs in errors by moving them to the
+                    // `let invalid = |...| ...;` closure that wraps insts.
+                    return Err(invalid(&format!(
+                        "in %{}, param count differs between `OpTypeFunction` ({}) \
+                         and `OpFunctionParameter`s ({})",
+                        func_id,
+                        func_decl.params.len(),
+                        params.len(),
+                    )));
+                }
+
+                for (i, (func_type_param, param)) in
+                    func_decl.params.iter_mut().zip(params.values()).enumerate()
+                {
+                    if func_type_param.ty != param.ty {
+                        // FIXME(remove) embed IDs in errors by moving them to the
+                        // `let invalid = |...| ...;` closure that wraps insts.
+                        return Err(invalid(&format!(
+                            "in %{}, param {}'s type differs between \
+                             `OpTypeFunction` (expected) and \
+                             `OpFunctionParameter` (found):\n\n{}",
+                            func_id,
+                            i,
+                            print::Plan::for_root_outside_module(
+                                &cx,
+                                &print::ExpectedVsFound {
+                                    expected: func_type_param.ty,
+                                    found: param.ty,
+                                }
+                            )
+                        )));
+                    }
+                }
+            }
 
             if !insts.is_empty() {
-                let func_def_body = match &mut module.funcs[func].def {
+                let func_def_body = match &mut func_decl.def {
                     DeclDef::Imported(Import::LinkName(name)) => {
                         return Err(invalid(&format!(
-                            "non-empty function decorated as `Import` of {:?}",
-                            &cx[*name]
+                            "non-empty function %{} decorated as `Import` of {:?}",
+                            func_id, &cx[*name]
                         )));
                     }
                     DeclDef::Present(def) => def,

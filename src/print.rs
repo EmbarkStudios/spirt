@@ -1,7 +1,7 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, GlobalVar, GlobalVarDecl,
+    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
     GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
     ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
@@ -38,6 +38,13 @@ pub struct Plan<'a> {
     // HACK(eddyb) scope `MiscOutput` names per-function.
     current_func: Option<Func>,
     misc_output_by_spv_result_id: IndexMap<spv::Id, (Option<Func>, MiscOutput)>,
+}
+
+/// Helper for printing a mismatch error between two nodes (e.g. types), while
+/// taking advantage of the print infrastructure that will print all dependencies.
+pub struct ExpectedVsFound<E, F> {
+    pub expected: E,
+    pub found: F,
 }
 
 /// Printing `Plan` entry, an effective reification of SPIR-T's implicit DAG.
@@ -290,7 +297,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_misc_input(&mut self, input: &'a MiscInput) {
         match *input {
-            MiscInput::Const(_) => {}
+            MiscInput::Const(_) | MiscInput::FuncParam { .. } => {}
 
             MiscInput::SpvImm(_) => {}
 
@@ -304,6 +311,17 @@ impl<'a> Visitor<'a> for Plan<'a> {
             }
         }
         input.inner_visit_with(self);
+    }
+}
+
+// FIXME(eddyb) this should be more general but we lack a `Visit` trait, and
+// `Type` doesn't implement `InnerVisit` (which would be the wrong trait anyway).
+impl InnerVisit for ExpectedVsFound<Type, Type> {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { expected, found } = *self;
+
+        visitor.visit_type_use(expected);
+        visitor.visit_type_use(found);
     }
 }
 
@@ -498,6 +516,19 @@ impl<'a, 'b> Printer<'a, 'b> {
 pub trait Print {
     type Output;
     fn print(&self, printer: &Printer<'_, '_>) -> Self::Output;
+}
+
+impl<E: Print<Output = String>, F: Print<Output = String>> Print for ExpectedVsFound<E, F> {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        let Self { expected, found } = self;
+
+        format!(
+            "expected: {}\nfound: {}",
+            expected.print(printer),
+            found.print(printer)
+        )
+    }
 }
 
 /// A `Print` `Output` type that splits the attributes from the main body of the
@@ -1049,40 +1080,35 @@ impl Print for FuncDecl {
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
-            ret_type: _,
-            ty,
+            ret_type,
+            params,
             def,
         } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
         let sig = {
-            // HACK(eddyb) get the signature from SPIR-V `OpTypeFunction`, but
-            // ideally the `FuncDecl` would hold all of the types itself.
-            let func_ty_def = &printer.cx[*ty];
+            let ret_type = ret_type.print(printer);
+            let params: SmallVec<[_; 16]> = params
+                .iter()
+                .enumerate()
+                .map(|(i, param)| {
+                    let AttrsAndDef { attrs, def } = param.print(printer);
+                    attrs + &format!("param{}", i) + &def
+                })
+                .collect();
 
-            if func_ty_def.ctor == TypeCtor::SpvInst(wk.OpTypeFunction) {
-                let mut types = func_ty_def.ctor_args.iter().map(|&arg| match arg {
-                    TypeCtorArg::Type(ty) => ty.print(printer),
-                    _ => unreachable!(),
-                });
-                let ret_type = types.next().unwrap();
-                let param_types: SmallVec<[_; 16]> = types.collect();
+            // FIXME(eddyb) enforce a max line width - sadly, this cannot
+            // just use `pretty_join_space`, because that doesn't do commas.
+            let fits_on_single_line = params.iter().all(|ty| !ty.contains("\n"));
 
-                // FIXME(eddyb) enforce a max line width - sadly, this cannot
-                // just use `pretty_join_space`, because that doesn't do commas.
-                let fits_on_single_line = param_types.iter().all(|ty| !ty.contains("\n"));
-
-                let params = if fits_on_single_line {
-                    format!("({})", param_types.join(", "))
-                } else {
-                    // FIXME(eddyb) automate reindenting (and make it configurable).
-                    format!("(\n  {},\n)", param_types.join(",\n").replace("\n", "\n  "))
-                };
-                params + " -> " + &ret_type
+            let params = if fits_on_single_line {
+                format!("({})", params.join(", "))
             } else {
-                format!("(...): {}", ty.print(printer))
-            }
+                // FIXME(eddyb) automate reindenting (and make it configurable).
+                format!("(\n  {},\n)", params.join(",\n").replace("\n", "\n  "))
+            };
+            params + " -> " + &ret_type
         };
 
         let def = match def {
@@ -1123,6 +1149,18 @@ impl Print for FuncDecl {
         AttrsAndDef {
             attrs: attrs.print(printer),
             def,
+        }
+    }
+}
+
+impl Print for FuncParam {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+        let Self { attrs, ty } = self;
+
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def: format!(": {}", ty.print(printer)),
         }
     }
 }
@@ -1171,6 +1209,9 @@ impl Print for Misc {
             },
             spv::print::operands(inputs.iter().map(|input| match *input {
                 MiscInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
+                MiscInput::FuncParam { idx } => {
+                    spv::print::PrintOperand::IdLike(format!("param{}", idx))
+                }
 
                 MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
                 MiscInput::SpvUntrackedId(id) => {

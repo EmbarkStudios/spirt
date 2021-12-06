@@ -253,10 +253,15 @@ pub struct FuncDecl {
 
     pub ret_type: Type,
 
-    // FIXME(eddyb) replace with the list of typed parameters.
-    pub ty: Type,
+    pub params: SmallVec<[FuncParam; 2]>,
 
     pub def: DeclDef<FuncDefBody>,
+}
+
+pub struct FuncParam {
+    pub attrs: AttrSet,
+
+    pub ty: Type,
 }
 
 pub struct FuncDefBody {
@@ -300,6 +305,7 @@ pub enum MiscOutput {
 #[derive(Copy, Clone)]
 pub enum MiscInput {
     Const(Const),
+    FuncParam { idx: u32 },
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investingating the performance implications
