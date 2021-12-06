@@ -1,9 +1,9 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    Context, DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    Context, DataInst, DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee,
+    Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import,
+    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -34,10 +34,6 @@ pub struct Plan<'a> {
 
     nodes: Vec<Node<'a>>,
     use_counts: IndexMap<Use, usize>,
-
-    // HACK(eddyb) scope `DataInstOutput` names per-function.
-    current_func: Option<Func>,
-    current_func_for_data_inst_output_spv_result_id: IndexMap<spv::Id, Option<Func>>,
 }
 
 /// Helper for printing a mismatch error between two nodes (e.g. types), while
@@ -94,8 +90,7 @@ enum Use {
     GlobalVar(GlobalVar),
     Func(Func),
 
-    // HACK(eddyb) this should be replaced by a proper non-ID def-use graph.
-    DataInstOutput { result_id: spv::Id },
+    DataInstOutput(DataInst),
 }
 
 impl Use {
@@ -104,7 +99,7 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            Self::DataInstOutput { .. } => "v",
+            Self::DataInstOutput(_) => "v",
         }
     }
 }
@@ -118,8 +113,6 @@ impl<'a> Plan<'a> {
             func_decl_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
-            current_func: None,
-            current_func_for_data_inst_output_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -132,8 +125,6 @@ impl<'a> Plan<'a> {
             func_decl_cache: FxHashMap::default(),
             nodes: vec![],
             use_counts: IndexMap::new(),
-            current_func: None,
-            current_func_for_data_inst_output_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -203,11 +194,7 @@ impl<'a> Plan<'a> {
             },
 
             Node::Func(func) => match self.func_decl_cache.get(&func).copied() {
-                Some(func_decl) => {
-                    let old_func = self.current_func.replace(func);
-                    self.visit_func_decl(func_decl);
-                    self.current_func = old_func;
-                }
+                Some(func_decl) => self.visit_func_decl(func_decl),
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
@@ -284,32 +271,20 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Dyn(debug_info));
     }
 
-    fn visit_data_inst_output(&mut self, output: &'a DataInstOutput) {
-        match *output {
-            DataInstOutput::SpvValueResult { result_id, .. } => {
-                self.current_func_for_data_inst_output_spv_result_id
-                    .insert(result_id, self.current_func);
-            }
-        }
-        output.inner_visit_with(self);
-    }
-
     fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
         match *input {
             DataInstInput::Const(_) | DataInstInput::FuncParam { .. } => {}
 
+            DataInstInput::DataInstOutput(inst) => {
+                *self
+                    .use_counts
+                    .entry(Use::DataInstOutput(inst))
+                    .or_default() += 1;
+            }
+
             DataInstInput::Block { .. } => {}
 
             DataInstInput::SpvImm(_) => {}
-
-            // HACK(eddyb) assume that this ID matches `DataInstOutput` of a `DataInst`,
-            // but this should be replaced by a proper non-ID def-use graph.
-            DataInstInput::SpvUntrackedId(id) => {
-                *self
-                    .use_counts
-                    .entry(Use::DataInstOutput { result_id: id })
-                    .or_default() += 1;
-            }
         }
         input.inner_visit_with(self);
     }
@@ -357,7 +332,7 @@ impl fmt::Display for Plan<'_> {
 
 pub struct Printer<'a, 'b> {
     cx: &'a Context,
-    use_styles: IndexMap<Use, UseStyle>,
+    use_styles: FxHashMap<Use, UseStyle>,
 
     global_var_decl_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDecl>,
     func_decl_cache: &'b FxHashMap<Func, &'a FuncDecl>,
@@ -388,12 +363,12 @@ impl<'a, 'b> Printer<'a, 'b> {
         }
         let mut anon_counters = AnonCounters::default();
 
-        let mut use_styles: IndexMap<_, _> = plan
+        let mut use_styles: FxHashMap<_, _> = plan
             .use_counts
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::DataInstOutput { .. } = use_kind {
+                if let Use::DataInstOutput(_) = use_kind {
                     return (use_kind, UseStyle::Inline);
                 }
 
@@ -418,7 +393,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                 }
                             }
                     }
-                    Use::GlobalVar(_) | Use::Func(_) | Use::DataInstOutput { .. } => false,
+                    Use::GlobalVar(_) | Use::Func(_) | Use::DataInstOutput(_) => false,
                 };
                 let style = if inline {
                     UseStyle::Inline
@@ -430,7 +405,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::DataInstOutput { .. } => unreachable!(),
+                        Use::DataInstOutput(_) => unreachable!(),
                     };
                     let idx = *counter;
                     *counter += 1;
@@ -442,16 +417,26 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         #[derive(Default)]
         struct PerFuncAnonCounters {
-            data_inst_spv_value_outputs: usize,
+            data_inst_outputs: usize,
         }
-        let mut per_func_anon_counters = FxHashMap::<Option<Func>, PerFuncAnonCounters>::default();
+        let mut per_func_anon_counters = FxHashMap::<Func, PerFuncAnonCounters>::default();
 
-        for (&result_id, &maybe_func) in &plan.current_func_for_data_inst_output_spv_result_id {
-            let ac = per_func_anon_counters.entry(maybe_func).or_default();
-            let counter = &mut ac.data_inst_spv_value_outputs;
-            let idx = *counter;
-            *counter += 1;
-            use_styles.insert(Use::DataInstOutput { result_id }, UseStyle::Anon { idx });
+        for (&func, &func_decl) in &plan.func_decl_cache {
+            if let DeclDef::Present(func_def_body) = &func_decl.def {
+                let ac = per_func_anon_counters.entry(func).or_default();
+                let counter = &mut ac.data_inst_outputs;
+
+                let all_insts_with_output = func_def_body
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.insts.iter().copied())
+                    .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some());
+                for inst in all_insts_with_output {
+                    let idx = *counter;
+                    *counter += 1;
+                    use_styles.insert(Use::DataInstOutput(inst), UseStyle::Anon { idx });
+                }
+            }
         }
 
         Self {
@@ -1103,11 +1088,16 @@ impl Print for FuncDecl {
 
                     writeln!(f, "  block{} {{", i)?;
                     for &inst in insts {
-                        writeln!(
-                            f,
-                            "    {}",
-                            data_insts[inst].print(printer).replace("\n", "\n    ")
-                        )?;
+                        let data_inst_def = &data_insts[inst];
+                        let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
+
+                        if data_inst_def.output_type.is_some() {
+                            def = printer.pretty_join_space(
+                                &format!("{} =", Use::DataInstOutput(inst).print(printer)),
+                                [def],
+                            );
+                        }
+                        writeln!(f, "    {}", (attrs + &def).replace("\n", "\n    "))?;
                     }
                     writeln!(f, "  }}")?;
                 }
@@ -1136,33 +1126,18 @@ impl Print for FuncParam {
 }
 
 impl Print for DataInstDef {
-    type Output = String;
-    fn print(&self, printer: &Printer<'_, '_>) -> String {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self {
             attrs,
             kind,
-            output,
+            output_type,
             inputs,
         } = self;
 
         let attrs = attrs.print(printer);
 
-        // HACK(eddyb) assume that these IDs match `DataInstOutput` of `DataInst`s,
-        // but this should be replaced by a proper non-ID def-use graph.
-        let spv_id_to_string = |id| Use::DataInstOutput { result_id: id }.print(printer);
-
-        let (lhs, result_type) = match *output {
-            Some(DataInstOutput::SpvValueResult {
-                result_type,
-                result_id,
-            }) => (
-                Some(spv_id_to_string(result_id)),
-                Some(format!(": {}", result_type.print(printer))),
-            ),
-            None => (None, None),
-        };
-
-        let rhs = printer.pretty_join_space(
+        let def = printer.pretty_join_space(
             &match *kind {
                 DataInstKind::FuncCall(func) => format!("call {}", func.print(printer)),
                 DataInstKind::SpvInst(opcode) => opcode.name().to_string(),
@@ -1179,24 +1154,19 @@ impl Print for DataInstDef {
                 DataInstInput::FuncParam { idx } => {
                     spv::print::PrintOperand::IdLike(format!("param{}", idx))
                 }
+                DataInstInput::DataInstOutput(inst) => {
+                    spv::print::PrintOperand::IdLike(Use::DataInstOutput(inst).print(printer))
+                }
 
                 DataInstInput::Block { idx } => {
                     spv::print::PrintOperand::IdLike(format!("block{}", idx))
                 }
 
                 DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                DataInstInput::SpvUntrackedId(id) => {
-                    spv::print::PrintOperand::IdLike(spv_id_to_string(id))
-                }
             }))
-            .chain(result_type),
+            .chain(output_type.map(|ty| format!(": {}", ty.print(printer)))),
         );
 
-        let def = match lhs {
-            Some(lhs) => printer.pretty_join_space(&format!("{} =", lhs), [rhs]),
-            None => rhs,
-        };
-
-        attrs + &def
+        AttrsAndDef { attrs, def }
     }
 }

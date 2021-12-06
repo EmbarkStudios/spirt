@@ -282,8 +282,7 @@ pub struct DataInstDef {
 
     pub kind: DataInstKind,
 
-    // FIXME(eddyb) track this entirely as a def-use graph.
-    pub output: Option<DataInstOutput>,
+    pub output_type: Option<Type>,
 
     // FIXME(eddyb) maybe split inputs into "params" and "value inputs"?
     // (would "params" only contain immediates, or also e.g. types?)
@@ -301,17 +300,10 @@ pub enum DataInstKind {
 }
 
 #[derive(Copy, Clone)]
-pub enum DataInstOutput {
-    SpvValueResult {
-        result_type: Type,
-        result_id: spv::Id,
-    },
-}
-
-#[derive(Copy, Clone)]
 pub enum DataInstInput {
     Const(Const),
     FuncParam { idx: u32 },
+    DataInstOutput(DataInst),
 
     // FIXME(eddyb) remove this by moving it to controlflow-only instructions.
     Block { idx: u32 },
@@ -320,7 +312,4 @@ pub enum DataInstInput {
     // FIXME(eddyb) it might be worth investingating the performance implications
     // of interning "long immediates", compared to the flattened representation.
     SpvImm(spv::Imm),
-
-    // FIXME(eddyb) get rid of this by tracking all entities SPIR-V uses ID for.
-    SpvUntrackedId(spv::Id),
 }

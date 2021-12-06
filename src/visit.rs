@@ -1,7 +1,7 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
-    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
     ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 
@@ -52,9 +52,6 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_data_inst_def(&mut self, data_inst_def: &'a DataInstDef) {
         data_inst_def.inner_visit_with(self);
-    }
-    fn visit_data_inst_output(&mut self, output: &'a DataInstOutput) {
-        output.inner_visit_with(self);
     }
     fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
         input.inner_visit_with(self);
@@ -293,7 +290,7 @@ impl InnerVisit for DataInstDef {
         let Self {
             attrs,
             kind,
-            output,
+            output_type,
             inputs,
         } = self;
 
@@ -302,22 +299,11 @@ impl InnerVisit for DataInstDef {
             DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
             DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
-        if let Some(output) = output {
-            visitor.visit_data_inst_output(output);
+        if let Some(ty) = *output_type {
+            visitor.visit_type_use(ty);
         }
         for input in inputs {
             visitor.visit_data_inst_input(input);
-        }
-    }
-}
-
-impl InnerVisit for DataInstOutput {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        match *self {
-            Self::SpvValueResult {
-                result_type,
-                result_id: _,
-            } => visitor.visit_type_use(result_type),
         }
     }
 }
@@ -326,11 +312,11 @@ impl InnerVisit for DataInstInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
-            Self::FuncParam { idx: _ } => {}
+            Self::FuncParam { idx: _ } | Self::DataInstOutput(_) => {}
 
             Self::Block { idx: _ } => {}
 
-            Self::SpvImm(_) | Self::SpvUntrackedId(_) => {}
+            Self::SpvImm(_) => {}
         }
     }
 }

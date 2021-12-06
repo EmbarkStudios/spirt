@@ -4,9 +4,9 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     print, AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    DataInstDef, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
-    FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module,
-    Type, TypeCtor, TypeCtorArg, TypeDef,
+    DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type,
+    TypeCtor, TypeCtorArg, TypeDef,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -908,7 +908,23 @@ impl Module {
                         } else {
                             has_blocks = true;
 
-                            DataInstInput::SpvUntrackedId(id)
+                            // HACK(eddyb) can't generate the `DataInst` unique
+                            // index without inserting (a dummy) first.
+                            let func_def_body = match &mut func_decl.def {
+                                // Error will be emitted later, below.
+                                DeclDef::Imported(_) => continue,
+                                DeclDef::Present(def) => def,
+                            };
+                            let inst = func_def_body.data_insts.insert(
+                                &cx,
+                                DataInstDef {
+                                    attrs: AttrSet::default(),
+                                    kind: DataInstKind::SpvInst(wk.OpNop),
+                                    output_type: None,
+                                    inputs: [].into_iter().collect(),
+                                },
+                            );
+                            DataInstInput::DataInstOutput(inst)
                         };
                         local_id_defs.insert(id, local_id_def);
                     }
@@ -1036,18 +1052,16 @@ impl Module {
                         DataInstKind::SpvInst(opcode)
                     };
 
-                    let inst = func_def_body.data_insts.insert(&cx, DataInstDef {
+                    let data_inst_def = DataInstDef {
                         attrs,
                         kind,
-                        output: result_id
-                            .map(|result_id| match result_type {
-                                Some(result_type) => Ok(DataInstOutput::SpvValueResult {
-                                    result_type,
-                                    result_id,
-                                }),
-                                None => Err(invalid(
-                                    "expected value-producing instruction, with a result type",
-                                )),
+                        output_type: result_id
+                            .map(|_| {
+                                result_type.ok_or_else(|| {
+                                    invalid(
+                                        "expected value-producing instruction, with a result type",
+                                    )
+                                })
                             })
                             .transpose()?,
                         inputs: operands
@@ -1084,7 +1098,20 @@ impl Module {
                                 },
                             })
                             .collect::<Result<_, _>>()?,
-                    });
+                    };
+                    let inst = match result_id {
+                        Some(id) => match local_id_defs[&id] {
+                            DataInstInput::DataInstOutput(inst) => {
+                                // A dummy was inserted earlier, to be able to
+                                // have an entry in `local_id_defs`.
+                                func_def_body.data_insts[inst] = data_inst_def;
+
+                                inst
+                            }
+                            _ => unreachable!(),
+                        },
+                        None => func_def_body.data_insts.insert(&cx, data_inst_def),
+                    };
                     current_block.insts.push(inst);
                 }
             }

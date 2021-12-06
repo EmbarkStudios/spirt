@@ -44,6 +44,8 @@ macro_rules! def_well_known {
 // FIXME(eddyb) maybe sort some of these groups alphabetically.
 def_well_known! {
     opcode: Opcode = [
+        OpNop,
+
         OpCapability,
         OpExtension,
         OpExtInstImport,
