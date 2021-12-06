@@ -6,7 +6,7 @@ use crate::{
     AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DataInst,
     DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
@@ -482,14 +482,14 @@ impl LazyInst<'_> {
                     operands: extra_initial_operands
                         .into_iter()
                         .chain(data_inst_def.inputs.iter().map(|&input| match input {
-                            DataInstInput::Const(ct) => {
+                            DataInstInput::Value(Value::Const(ct)) => {
                                 spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
                             }
-                            DataInstInput::FuncParam { idx } => spv::Operand::Id(
+                            DataInstInput::Value(Value::FuncParam { idx }) => spv::Operand::Id(
                                 wk.IdRef,
                                 parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
                             ),
-                            DataInstInput::DataInstOutput(inst) => spv::Operand::Id(
+                            DataInstInput::Value(Value::DataInstOutput(inst)) => spv::Operand::Id(
                                 wk.IdRef,
                                 parent_func_ids.data_inst_output_ids[&inst],
                             ),

@@ -6,7 +6,7 @@ use crate::{
     print, AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
     DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type,
-    TypeCtor, TypeCtorArg, TypeDef,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -898,7 +898,7 @@ impl Module {
                         let local_id_def = if opcode == wk.OpFunctionParameter {
                             let idx = next_param_idx;
                             next_param_idx = idx.checked_add(1).unwrap();
-                            DataInstInput::FuncParam { idx }
+                            DataInstInput::Value(Value::FuncParam { idx })
                         } else if opcode == wk.OpLabel {
                             has_blocks = true;
 
@@ -924,7 +924,7 @@ impl Module {
                                     inputs: [].into_iter().collect(),
                                 },
                             );
-                            DataInstInput::DataInstOutput(inst)
+                            DataInstInput::Value(Value::DataInstOutput(inst))
                         };
                         local_id_defs.insert(id, local_id_def);
                     }
@@ -1069,7 +1069,9 @@ impl Module {
                             .map(|operand| match *operand {
                                 spv::Operand::Imm(imm) => Ok(DataInstInput::SpvImm(imm)),
                                 spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                    Some(&IdDef::Const(ct)) => Ok(DataInstInput::Const(ct)),
+                                    Some(&IdDef::Const(ct)) => {
+                                        Ok(DataInstInput::Value(Value::Const(ct)))
+                                    }
                                     Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
                                         "unsupported use of {} as an operand for \
                                          an instruction in a function",
@@ -1101,7 +1103,7 @@ impl Module {
                     };
                     let inst = match result_id {
                         Some(id) => match local_id_defs[&id] {
-                            DataInstInput::DataInstOutput(inst) => {
+                            DataInstInput::Value(Value::DataInstOutput(inst)) => {
                                 // A dummy was inserted earlier, to be able to
                                 // have an entry in `local_id_defs`.
                                 func_def_body.data_insts[inst] = data_inst_def;

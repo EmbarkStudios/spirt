@@ -301,15 +301,21 @@ pub enum DataInstKind {
 
 #[derive(Copy, Clone)]
 pub enum DataInstInput {
-    Const(Const),
-    FuncParam { idx: u32 },
-    DataInstOutput(DataInst),
+    Value(Value),
 
     // FIXME(eddyb) remove this by moving it to controlflow-only instructions.
     Block { idx: u32 },
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investingating the performance implications
+    // FIXME(eddyb) it might be worth investigating the performance implications
     // of interning "long immediates", compared to the flattened representation.
+    // FIXME(eddyb) consider moving this to `Value`.
     SpvImm(spv::Imm),
+}
+
+#[derive(Copy, Clone)]
+pub enum Value {
+    Const(Const),
+    FuncParam { idx: u32 },
+    DataInstOutput(DataInst),
 }

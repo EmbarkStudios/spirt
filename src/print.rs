@@ -3,7 +3,7 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
     Context, DataInst, DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee,
     Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import,
-    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -273,9 +273,10 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
         match *input {
-            DataInstInput::Const(_) | DataInstInput::FuncParam { .. } => {}
+            DataInstInput::Value(Value::Const(_))
+            | DataInstInput::Value(Value::FuncParam { .. }) => {}
 
-            DataInstInput::DataInstOutput(inst) => {
+            DataInstInput::Value(Value::DataInstOutput(inst)) => {
                 *self
                     .use_counts
                     .entry(Use::DataInstOutput(inst))
@@ -1062,7 +1063,12 @@ impl Print for FuncDecl {
                 .enumerate()
                 .map(|(i, param)| {
                     let AttrsAndDef { attrs, def } = param.print(printer);
-                    attrs + &format!("param{}", i) + &def
+                    attrs
+                        + &Value::FuncParam {
+                            idx: i.try_into().unwrap(),
+                        }
+                        .print(printer)
+                        + &def
                 })
                 .collect();
 
@@ -1150,13 +1156,7 @@ impl Print for DataInstDef {
                 }
             },
             spv::print::operands(inputs.iter().map(|input| match *input {
-                DataInstInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
-                DataInstInput::FuncParam { idx } => {
-                    spv::print::PrintOperand::IdLike(format!("param{}", idx))
-                }
-                DataInstInput::DataInstOutput(inst) => {
-                    spv::print::PrintOperand::IdLike(Use::DataInstOutput(inst).print(printer))
-                }
+                DataInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
 
                 DataInstInput::Block { idx } => {
                     spv::print::PrintOperand::IdLike(format!("block{}", idx))
@@ -1168,5 +1168,16 @@ impl Print for DataInstDef {
         );
 
         AttrsAndDef { attrs, def }
+    }
+}
+
+impl Print for Value {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        match *self {
+            Self::Const(ct) => ct.print(printer),
+            Self::FuncParam { idx } => format!("param{}", idx),
+            Self::DataInstOutput(inst) => Use::DataInstOutput(inst).print(printer),
+        }
     }
 }

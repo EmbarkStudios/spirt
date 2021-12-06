@@ -2,7 +2,7 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
     DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -493,15 +493,25 @@ impl InnerInPlaceTransform for DataInstDef {
 impl InnerTransform for DataInstInput {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         match self {
+            Self::Value(v) => transform!({
+                v -> v.inner_transform_with(transformer),
+            } => Self::Value(v)),
+
+            Self::Block { idx: _ } => Transformed::Unchanged,
+
+            Self::SpvImm(_) => Transformed::Unchanged,
+        }
+    }
+}
+
+impl InnerTransform for Value {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        match self {
             Self::Const(ct) => transform!({
                 ct -> transformer.transform_const_use(*ct),
             } => Self::Const(ct)),
 
             Self::FuncParam { idx: _ } | Self::DataInstOutput(_) => Transformed::Unchanged,
-
-            Self::Block { idx: _ } => Transformed::Unchanged,
-
-            Self::SpvImm(_) => Transformed::Unchanged,
         }
     }
 }

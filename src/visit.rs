@@ -2,7 +2,7 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
     DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -310,13 +310,21 @@ impl InnerVisit for DataInstDef {
 
 impl InnerVisit for DataInstInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        match *self {
-            Self::Const(ct) => visitor.visit_const_use(ct),
-            Self::FuncParam { idx: _ } | Self::DataInstOutput(_) => {}
+        match self {
+            Self::Value(v) => v.inner_visit_with(visitor),
 
             Self::Block { idx: _ } => {}
 
             Self::SpvImm(_) => {}
+        }
+    }
+}
+
+impl InnerVisit for Value {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match *self {
+            Self::Const(ct) => visitor.visit_const_use(ct),
+            Self::FuncParam { idx: _ } | Self::DataInstOutput(_) => {}
         }
     }
 }
