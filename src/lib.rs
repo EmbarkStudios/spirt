@@ -274,6 +274,7 @@ pub struct FuncDefBody {
 
 pub struct Block {
     pub insts: Vec<DataInst>,
+    pub terminator: ControlInst,
 }
 
 // FIXME(eddyb) make this name not a lie by splitting out control-flow insts.
@@ -305,6 +306,33 @@ pub enum DataInstInput {
 
     // FIXME(eddyb) remove this by moving it to controlflow-only instructions.
     Block { idx: u32 },
+
+    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+    // FIXME(eddyb) it might be worth investigating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    // FIXME(eddyb) consider moving this to `Value`.
+    SpvImm(spv::Imm),
+}
+
+pub struct ControlInst {
+    pub attrs: AttrSet,
+
+    pub kind: ControlInstKind,
+
+    // FIXME(eddyb) find a better name, "input" doesn't work well for non-values.
+    pub inputs: SmallVec<[ControlInstInput; 2]>,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum ControlInstKind {
+    SpvInst(spv::spec::Opcode),
+}
+
+#[derive(Copy, Clone)]
+pub enum ControlInstInput {
+    Value(Value),
+
+    TargetBlock { idx: u32 },
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investigating the performance implications

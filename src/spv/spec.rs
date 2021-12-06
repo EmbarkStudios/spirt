@@ -181,6 +181,7 @@ pub struct InstructionDef {
 pub enum InstructionCategory {
     Type,
     Const,
+    ControlFlow,
     Other,
 }
 
@@ -550,6 +551,7 @@ impl Spec {
                     category: match inst.class {
                         "Type-Declaration" => InstructionCategory::Type,
                         "Constant-Creation" => InstructionCategory::Const,
+                        "Control-Flow" => InstructionCategory::ControlFlow,
                         _ => InstructionCategory::Other,
                     },
 

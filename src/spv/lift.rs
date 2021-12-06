@@ -3,10 +3,11 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DataInst,
-    DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
+    ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef, DataInstInput,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
@@ -271,6 +272,10 @@ enum LazyInst<'a> {
         result_id: Option<spv::Id>,
         data_inst_def: &'a DataInstDef,
     },
+    ControlInst {
+        parent_func_ids: &'a FuncIds,
+        control_inst: &'a ControlInst,
+    },
     OpFunctionEnd,
 }
 
@@ -317,6 +322,10 @@ impl LazyInst<'_> {
                 result_id,
                 data_inst_def,
             } => (result_id, data_inst_def.attrs, None),
+            Self::ControlInst {
+                parent_func_ids: _,
+                control_inst,
+            } => (None, control_inst.attrs, None),
             Self::OpFunctionEnd => (None, AttrSet::default(), None),
         }
     }
@@ -324,6 +333,17 @@ impl LazyInst<'_> {
     fn to_inst_and_attrs(self, module: &Module, ids: &AllocatedIds) -> (spv::Inst, AttrSet) {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
+
+        let value_to_operand = |parent_func_ids: &FuncIds, v| match v {
+            Value::Const(ct) => spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)]),
+            Value::FuncParam { idx } => spv::Operand::Id(
+                wk.IdRef,
+                parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
+            ),
+            Value::DataInstOutput(inst) => {
+                spv::Operand::Id(wk.IdRef, parent_func_ids.data_inst_output_ids[&inst])
+            }
+        };
 
         let (result_id, attrs, _) = self.result_id_attrs_and_import(module, ids);
         let inst = match self {
@@ -482,17 +502,7 @@ impl LazyInst<'_> {
                     operands: extra_initial_operands
                         .into_iter()
                         .chain(data_inst_def.inputs.iter().map(|&input| match input {
-                            DataInstInput::Value(Value::Const(ct)) => {
-                                spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
-                            }
-                            DataInstInput::Value(Value::FuncParam { idx }) => spv::Operand::Id(
-                                wk.IdRef,
-                                parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
-                            ),
-                            DataInstInput::Value(Value::DataInstOutput(inst)) => spv::Operand::Id(
-                                wk.IdRef,
-                                parent_func_ids.data_inst_output_ids[&inst],
-                            ),
+                            DataInstInput::Value(v) => value_to_operand(parent_func_ids, v),
 
                             DataInstInput::Block { idx } => spv::Operand::Id(
                                 wk.IdRef,
@@ -501,6 +511,33 @@ impl LazyInst<'_> {
 
                             DataInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
                         }))
+                        .collect(),
+                }
+            }
+            Self::ControlInst {
+                parent_func_ids,
+                control_inst,
+            } => {
+                let opcode = match control_inst.kind {
+                    ControlInstKind::SpvInst(opcode) => opcode,
+                };
+                spv::Inst {
+                    opcode,
+                    result_type_id: None,
+                    result_id: None,
+                    operands: control_inst
+                        .inputs
+                        .iter()
+                        .map(|&input| match input {
+                            ControlInstInput::Value(v) => value_to_operand(parent_func_ids, v),
+
+                            ControlInstInput::TargetBlock { idx } => spv::Operand::Id(
+                                wk.IdRef,
+                                parent_func_ids.label_ids[usize::try_from(idx).unwrap()],
+                            ),
+
+                            ControlInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                        })
                         .collect(),
                 }
             }
@@ -622,10 +659,10 @@ impl Module {
                             .iter()
                             .zip(blocks)
                             .flat_map(move |(&label_id, block)| {
-                                let Block { insts } = block;
+                                let Block { insts, terminator } = block;
 
-                                iter::once(LazyInst::OpLabel { label_id }).chain(insts.iter().map(
-                                    move |&inst| {
+                                iter::once(LazyInst::OpLabel { label_id })
+                                    .chain(insts.iter().map(move |&inst| {
                                         let data_inst_def = &data_insts[inst];
                                         LazyInst::DataInst {
                                             parent_func_ids: func_ids,
@@ -634,8 +671,11 @@ impl Module {
                                                 .map(|_| func_ids.data_inst_output_ids[&inst]),
                                             data_inst_def,
                                         }
-                                    },
-                                ))
+                                    }))
+                                    .chain([LazyInst::ControlInst {
+                                        parent_func_ids: func_ids,
+                                        control_inst: terminator,
+                                    }])
                             })
                     }))
                     .chain([LazyInst::OpFunctionEnd])

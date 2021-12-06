@@ -1,9 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    Context, DataInst, DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee,
-    Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import,
-    Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    Context, ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef, DataInstInput,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
+    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -1090,7 +1091,7 @@ impl Print for FuncDecl {
             DeclDef::Present(FuncDefBody { data_insts, blocks }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
                 for (i, block) in blocks.iter().enumerate() {
-                    let Block { insts } = block;
+                    let Block { insts, terminator } = block;
 
                     writeln!(f, "  block{} {{", i)?;
                     for &inst in insts {
@@ -1105,6 +1106,18 @@ impl Print for FuncDecl {
                         }
                         writeln!(f, "    {}", (attrs + &def).replace("\n", "\n    "))?;
                     }
+
+                    // Visually isolate the terminator
+                    if !insts.is_empty() {
+                        writeln!(f)?;
+                    }
+
+                    writeln!(
+                        f,
+                        "    {}",
+                        terminator.print(printer).replace("\n", "\n    ")
+                    )?;
+
                     writeln!(f, "  }}")?;
                 }
                 write!(f, "}}")
@@ -1168,6 +1181,36 @@ impl Print for DataInstDef {
         );
 
         AttrsAndDef { attrs, def }
+    }
+}
+
+impl Print for ControlInst {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        let Self {
+            attrs,
+            kind,
+            inputs,
+        } = self;
+
+        let attrs = attrs.print(printer);
+
+        let def = printer.pretty_join_space(
+            match kind {
+                ControlInstKind::SpvInst(opcode) => opcode.name(),
+            },
+            spv::print::operands(inputs.iter().map(|input| match *input {
+                ControlInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
+
+                ControlInstInput::TargetBlock { idx } => {
+                    spv::print::PrintOperand::IdLike(format!("block{}", idx))
+                }
+
+                ControlInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+            })),
+        );
+
+        attrs + &def
     }
 }
 

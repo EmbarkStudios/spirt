@@ -1,8 +1,9 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput, DataInstKind,
+    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -54,6 +55,12 @@ pub trait Visitor<'a>: Sized {
         data_inst_def.inner_visit_with(self);
     }
     fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
+        input.inner_visit_with(self);
+    }
+    fn visit_control_inst(&mut self, control_inst: &'a ControlInst) {
+        control_inst.inner_visit_with(self);
+    }
+    fn visit_control_inst_input(&mut self, input: &'a ControlInstInput) {
         input.inner_visit_with(self);
     }
 }
@@ -277,10 +284,12 @@ impl InnerVisit for FuncDefBody {
         let Self { data_insts, blocks } = self;
 
         for block in blocks {
-            let Block { insts } = block;
+            let Block { insts, terminator } = block;
+
             for &inst in insts {
                 visitor.visit_data_inst_def(&data_insts[inst]);
             }
+            visitor.visit_control_inst(terminator);
         }
     }
 }
@@ -314,6 +323,36 @@ impl InnerVisit for DataInstInput {
             Self::Value(v) => v.inner_visit_with(visitor),
 
             Self::Block { idx: _ } => {}
+
+            Self::SpvImm(_) => {}
+        }
+    }
+}
+
+impl InnerVisit for ControlInst {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self {
+            attrs,
+            kind,
+            inputs,
+        } = self;
+
+        visitor.visit_attr_set_use(*attrs);
+        match kind {
+            ControlInstKind::SpvInst(_) => {}
+        }
+        for input in inputs {
+            visitor.visit_control_inst_input(input);
+        }
+    }
+}
+
+impl InnerVisit for ControlInstInput {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            Self::Value(v) => v.inner_visit_with(visitor),
+
+            Self::TargetBlock { idx: _ } => {}
 
             Self::SpvImm(_) => {}
         }

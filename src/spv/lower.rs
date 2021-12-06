@@ -4,9 +4,9 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     print, AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput, DataInstKind,
+    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl,
+    GlobalVarDefBody, Import, InternedStr, Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -883,6 +883,12 @@ impl Module {
 
             let func_decl = &mut module.funcs[func];
 
+            #[derive(Copy, Clone)]
+            enum LocalIdDef {
+                Value(Value),
+                BlockLabel { idx: u32 },
+            }
+
             // Index IDs declared within the function, first.
             let mut local_id_defs = IndexMap::new();
             let mut has_blocks = false;
@@ -898,13 +904,13 @@ impl Module {
                         let local_id_def = if opcode == wk.OpFunctionParameter {
                             let idx = next_param_idx;
                             next_param_idx = idx.checked_add(1).unwrap();
-                            DataInstInput::Value(Value::FuncParam { idx })
+                            LocalIdDef::Value(Value::FuncParam { idx })
                         } else if opcode == wk.OpLabel {
                             has_blocks = true;
 
                             let idx = next_block_idx;
                             next_block_idx = idx.checked_add(1).unwrap();
-                            DataInstInput::Block { idx }
+                            LocalIdDef::BlockLabel { idx }
                         } else {
                             has_blocks = true;
 
@@ -924,7 +930,7 @@ impl Module {
                                     inputs: [].into_iter().collect(),
                                 },
                             );
-                            DataInstInput::Value(Value::DataInstOutput(inst))
+                            LocalIdDef::Value(Value::DataInstOutput(inst))
                         };
                         local_id_defs.insert(id, local_id_def);
                     }
@@ -950,16 +956,50 @@ impl Module {
                 None
             };
 
-            for raw_inst in raw_insts {
+            for (raw_inst_idx, raw_inst) in raw_insts.iter().enumerate() {
+                let lookahead_raw_inst = |dist| {
+                    raw_inst_idx
+                        .checked_add(dist)
+                        .and_then(|i| raw_insts.get(i))
+                };
+
                 let IntraFuncInst {
                     attrs,
                     result_type,
                     opcode,
                     result_id,
-                    mut operands,
-                } = raw_inst;
+                    ref operands,
+                } = *raw_inst;
 
                 let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+
+                // FIXME(eddyb) find a more compact name and/or make this a method.
+                // FIXME(eddyb) this returns `LocalIdDef` even for global values.
+                let lookup_global_or_local_id_for_data_or_control_inst_input =
+                    |id| match id_defs.get(&id) {
+                        Some(&IdDef::Const(ct)) => Ok(LocalIdDef::Value(Value::Const(ct))),
+                        Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
+                            "unsupported use of {} as an operand for \
+                             an instruction in a function",
+                            id_def.descr(&cx),
+                        ))),
+                        Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
+                            "unsupported use of {} outside `OpFunctionCall`",
+                            id_def.descr(&cx),
+                        ))),
+                        Some(id_def @ IdDef::SpvDebugString(_)) => Err(invalid(&format!(
+                            "unsupported use of {} outside `OpSource` or `OpLine`",
+                            id_def.descr(&cx),
+                        ))),
+                        Some(id_def @ IdDef::SpvExtInstImport(_)) => Err(invalid(&format!(
+                            "unsupported use of {} outside `OpExtInst`",
+                            id_def.descr(&cx),
+                        ))),
+                        None => local_id_defs
+                            .get(&id)
+                            .copied()
+                            .ok_or_else(|| invalid(&format!("undefined ID %{}", id,))),
+                    };
 
                 if opcode == wk.OpFunctionParameter {
                     if let Some(func_def_body) = &func_def_body {
@@ -976,18 +1016,63 @@ impl Module {
                         attrs,
                         ty: result_type.unwrap(),
                     });
-                } else if opcode == wk.OpLabel {
-                    func_def_body
-                        .as_mut()
-                        .unwrap()
-                        .blocks
-                        .push(Block { insts: vec![] });
-                } else {
-                    let func_def_body = func_def_body.as_mut().unwrap();
-                    let current_block = func_def_body.blocks.last_mut().ok_or_else(|| {
-                        invalid("out of order: not expected before the function's blocks")
-                    })?;
+                    continue;
+                }
+                let func_def_body = func_def_body.as_deref_mut().unwrap();
 
+                let is_last_in_block = lookahead_raw_inst(1)
+                    .map_or(true, |next_raw_inst| next_raw_inst.opcode == wk.OpLabel);
+
+                if opcode == wk.OpLabel {
+                    if is_last_in_block {
+                        return Err(invalid("block lacks terminator instruction"));
+                    }
+
+                    // HACK(eddyb) can't push the `Block` without a dummy terminator.
+                    func_def_body.blocks.push(Block {
+                        insts: vec![],
+                        terminator: ControlInst {
+                            attrs: AttrSet::default(),
+                            kind: ControlInstKind::SpvInst(wk.OpNop),
+                            inputs: [].into_iter().collect(),
+                        },
+                    });
+                    continue;
+                }
+                let current_block = func_def_body.blocks.last_mut().ok_or_else(|| {
+                    invalid("out of order: not expected before the function's blocks")
+                })?;
+
+                if is_last_in_block {
+                    if opcode.def().category != spec::InstructionCategory::ControlFlow {
+                        return Err(invalid(
+                            "non-control-flow instruction cannot be used \
+                             as the terminator instruction of a block",
+                        ));
+                    }
+
+                    current_block.terminator = ControlInst {
+                        attrs,
+                        kind: ControlInstKind::SpvInst(opcode),
+                        inputs: operands
+                            .iter()
+                            .map(|operand| match *operand {
+                                spv::Operand::Imm(imm) => Ok(ControlInstInput::SpvImm(imm)),
+                                spv::Operand::Id(_, id) => Ok(
+                                    match lookup_global_or_local_id_for_data_or_control_inst_input(
+                                        id,
+                                    )? {
+                                        LocalIdDef::Value(v) => ControlInstInput::Value(v),
+                                        LocalIdDef::BlockLabel { idx } => {
+                                            ControlInstInput::TargetBlock { idx }
+                                        }
+                                    },
+                                ),
+                            })
+                            .collect::<io::Result<_>>()?,
+                    };
+                } else {
+                    let mut operands = &operands[..];
                     let kind = if opcode == wk.OpFunctionCall {
                         let callee_id = match operands[0] {
                             spv::Operand::Id(kind, id) => {
@@ -1012,7 +1097,7 @@ impl Module {
 
                         match maybe_callee {
                             Some(callee) => {
-                                operands.remove(0);
+                                operands = &operands[1..];
                                 DataInstKind::FuncCall(callee)
                             }
 
@@ -1021,9 +1106,7 @@ impl Module {
                             None => DataInstKind::SpvInst(opcode),
                         }
                     } else if opcode == wk.OpExtInst {
-                        let ext_set_id = operands.remove(0);
-                        let inst = operands.remove(0);
-                        let (ext_set_id, inst) = match [ext_set_id, inst] {
+                        let (ext_set_id, inst) = match operands[..2] {
                             [
                                 spv::Operand::Id(es_kind, ext_set_id),
                                 spv::Operand::Imm(spv::Imm::Short(i_kind, inst)),
@@ -1033,6 +1116,7 @@ impl Module {
                             }
                             _ => unreachable!(),
                         };
+                        operands = &operands[2..];
 
                         let ext_set = match id_defs.get(&ext_set_id) {
                             Some(&IdDef::SpvExtInstImport(name)) => Ok(name),
@@ -1068,42 +1152,22 @@ impl Module {
                             .iter()
                             .map(|operand| match *operand {
                                 spv::Operand::Imm(imm) => Ok(DataInstInput::SpvImm(imm)),
-                                spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                    Some(&IdDef::Const(ct)) => {
-                                        Ok(DataInstInput::Value(Value::Const(ct)))
-                                    }
-                                    Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
-                                        "unsupported use of {} as an operand for \
-                                         an instruction in a function",
-                                        id_def.descr(&cx),
-                                    ))),
-                                    Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
-                                        "unsupported use of {} outside `OpFunctionCall`",
-                                        id_def.descr(&cx),
-                                    ))),
-                                    Some(id_def @ IdDef::SpvDebugString(_)) => {
-                                        Err(invalid(&format!(
-                                            "unsupported use of {} outside `OpSource` or `OpLine`",
-                                            id_def.descr(&cx),
-                                        )))
-                                    }
-                                    Some(id_def @ IdDef::SpvExtInstImport(_)) => {
-                                        Err(invalid(&format!(
-                                            "unsupported use of {} outside `OpExtInst`",
-                                            id_def.descr(&cx),
-                                        )))
-                                    }
-                                    None => local_id_defs
-                                        .get(&id)
-                                        .copied()
-                                        .ok_or_else(|| invalid(&format!("undefined ID %{}", id,))),
-                                },
+                                spv::Operand::Id(_, id) => Ok(
+                                    match lookup_global_or_local_id_for_data_or_control_inst_input(
+                                        id,
+                                    )? {
+                                        LocalIdDef::Value(v) => DataInstInput::Value(v),
+                                        LocalIdDef::BlockLabel { idx } => {
+                                            DataInstInput::Block { idx }
+                                        }
+                                    },
+                                ),
                             })
-                            .collect::<Result<_, _>>()?,
+                            .collect::<io::Result<_>>()?,
                     };
                     let inst = match result_id {
                         Some(id) => match local_id_defs[&id] {
-                            DataInstInput::Value(Value::DataInstOutput(inst)) => {
+                            LocalIdDef::Value(Value::DataInstOutput(inst)) => {
                                 // A dummy was inserted earlier, to be able to
                                 // have an entry in `local_id_defs`.
                                 func_def_body.data_insts[inst] = data_inst_def;
