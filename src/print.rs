@@ -1,9 +1,9 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    DataInst, DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -35,9 +35,9 @@ pub struct Plan<'a> {
     nodes: Vec<Node<'a>>,
     use_counts: IndexMap<Use, usize>,
 
-    // HACK(eddyb) scope `MiscOutput` names per-function.
+    // HACK(eddyb) scope `DataInstOutput` names per-function.
     current_func: Option<Func>,
-    misc_output_by_spv_result_id: IndexMap<spv::Id, (Option<Func>, MiscOutput)>,
+    data_inst_output_by_spv_result_id: IndexMap<spv::Id, (Option<Func>, DataInstOutput)>,
 }
 
 /// Helper for printing a mismatch error between two nodes (e.g. types), while
@@ -95,7 +95,7 @@ enum Use {
     Func(Func),
 
     // HACK(eddyb) this should be replaced by a proper non-ID def-use graph.
-    MiscOutput { result_id: spv::Id },
+    DataInstOutput { result_id: spv::Id },
 }
 
 impl Use {
@@ -104,7 +104,7 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            Self::MiscOutput { .. } => unreachable!(),
+            Self::DataInstOutput { .. } => unreachable!(),
         }
     }
 }
@@ -119,7 +119,7 @@ impl<'a> Plan<'a> {
             nodes: vec![],
             use_counts: IndexMap::new(),
             current_func: None,
-            misc_output_by_spv_result_id: IndexMap::default(),
+            data_inst_output_by_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -133,7 +133,7 @@ impl<'a> Plan<'a> {
             nodes: vec![],
             use_counts: IndexMap::new(),
             current_func: None,
-            misc_output_by_spv_result_id: IndexMap::default(),
+            data_inst_output_by_spv_result_id: IndexMap::default(),
         }
     }
 
@@ -284,29 +284,29 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Dyn(debug_info));
     }
 
-    fn visit_misc_output(&mut self, output: &'a MiscOutput) {
+    fn visit_data_inst_output(&mut self, output: &'a DataInstOutput) {
         match *output {
-            MiscOutput::SpvValueResult { result_id, .. }
-            | MiscOutput::SpvLabelResult { result_id } => {
-                self.misc_output_by_spv_result_id
+            DataInstOutput::SpvValueResult { result_id, .. }
+            | DataInstOutput::SpvLabelResult { result_id } => {
+                self.data_inst_output_by_spv_result_id
                     .insert(result_id, (self.current_func, *output));
             }
         }
         output.inner_visit_with(self);
     }
 
-    fn visit_misc_input(&mut self, input: &'a MiscInput) {
+    fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
         match *input {
-            MiscInput::Const(_) | MiscInput::FuncParam { .. } => {}
+            DataInstInput::Const(_) | DataInstInput::FuncParam { .. } => {}
 
-            MiscInput::SpvImm(_) => {}
+            DataInstInput::SpvImm(_) => {}
 
-            // HACK(eddyb) assume that this ID matches `MiscOutput` of a `Misc`,
+            // HACK(eddyb) assume that this ID matches `DataInstOutput` of a `DataInst`,
             // but this should be replaced by a proper non-ID def-use graph.
-            MiscInput::SpvUntrackedId(id) => {
+            DataInstInput::SpvUntrackedId(id) => {
                 *self
                     .use_counts
-                    .entry(Use::MiscOutput { result_id: id })
+                    .entry(Use::DataInstOutput { result_id: id })
                     .or_default() += 1;
             }
         }
@@ -361,7 +361,7 @@ pub struct Printer<'a, 'b> {
     global_var_decl_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDecl>,
     func_decl_cache: &'b FxHashMap<Func, &'a FuncDecl>,
 
-    misc_output_by_spv_result_id: &'b IndexMap<spv::Id, (Option<Func>, MiscOutput)>,
+    data_inst_output_by_spv_result_id: &'b IndexMap<spv::Id, (Option<Func>, DataInstOutput)>,
 }
 
 /// How an use of a node should be printed.
@@ -394,7 +394,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::MiscOutput { .. } = use_kind {
+                if let Use::DataInstOutput { .. } = use_kind {
                     return (use_kind, UseStyle::Inline);
                 }
 
@@ -419,7 +419,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                 }
                             }
                     }
-                    Use::GlobalVar(_) | Use::Func(_) | Use::MiscOutput { .. } => false,
+                    Use::GlobalVar(_) | Use::Func(_) | Use::DataInstOutput { .. } => false,
                 };
                 let style = if inline {
                     UseStyle::Inline
@@ -431,7 +431,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::MiscOutput { .. } => unreachable!(),
+                        Use::DataInstOutput { .. } => unreachable!(),
                     };
                     let idx = *counter;
                     *counter += 1;
@@ -443,20 +443,21 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         #[derive(Default)]
         struct PerFuncAnonCounters {
-            misc_spv_value_outputs: usize,
-            misc_spv_label_outputs: usize,
+            data_inst_spv_value_outputs: usize,
+            data_inst_spv_label_outputs: usize,
         }
         let mut per_func_anon_counters = FxHashMap::<Option<Func>, PerFuncAnonCounters>::default();
 
-        for (&result_id, &(maybe_func, misc_output)) in &plan.misc_output_by_spv_result_id {
+        for (&result_id, &(maybe_func, data_inst_output)) in &plan.data_inst_output_by_spv_result_id
+        {
             let ac = per_func_anon_counters.entry(maybe_func).or_default();
-            let counter = match misc_output {
-                MiscOutput::SpvValueResult { .. } => &mut ac.misc_spv_value_outputs,
-                MiscOutput::SpvLabelResult { .. } => &mut ac.misc_spv_label_outputs,
+            let counter = match data_inst_output {
+                DataInstOutput::SpvValueResult { .. } => &mut ac.data_inst_spv_value_outputs,
+                DataInstOutput::SpvLabelResult { .. } => &mut ac.data_inst_spv_label_outputs,
             };
             let idx = *counter;
             *counter += 1;
-            use_styles.insert(Use::MiscOutput { result_id }, UseStyle::Anon { idx });
+            use_styles.insert(Use::DataInstOutput { result_id }, UseStyle::Anon { idx });
         }
 
         Self {
@@ -464,7 +465,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             use_styles,
             global_var_decl_cache: &plan.global_var_decl_cache,
             func_decl_cache: &plan.func_decl_cache,
-            misc_output_by_spv_result_id: &plan.misc_output_by_spv_result_id,
+            data_inst_output_by_spv_result_id: &plan.data_inst_output_by_spv_result_id,
         }
     }
 
@@ -554,10 +555,10 @@ impl Print for Use {
                     _ => "",
                 };
                 let category = match self {
-                    Self::MiscOutput { result_id } => {
-                        match printer.misc_output_by_spv_result_id[result_id].1 {
-                            MiscOutput::SpvValueResult { .. } => "v",
-                            MiscOutput::SpvLabelResult { .. } => "block",
+                    Self::DataInstOutput { result_id } => {
+                        match printer.data_inst_output_by_spv_result_id[result_id].1 {
+                            DataInstOutput::SpvValueResult { .. } => "v",
+                            DataInstOutput::SpvLabelResult { .. } => "block",
                         }
                     }
                     _ => self.category(),
@@ -585,7 +586,7 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::MiscOutput { .. } => "_".to_string(),
+                Self::DataInstOutput { .. } => "_".to_string(),
             },
         };
 
@@ -1116,22 +1117,26 @@ impl Print for FuncDecl {
             DeclDef::Present(FuncDefBody { insts }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
                 let mut in_block = false;
-                for misc in insts {
+                for data_inst in insts {
                     // HACK(eddyb) special-case `OpLabel` to be like explicit blocks.
-                    if let Some(MiscOutput::SpvLabelResult { result_id }) = misc.output {
-                        assert!(misc.kind == MiscKind::SpvInst(wk.OpLabel));
-                        assert!(misc.inputs.is_empty());
+                    if let Some(DataInstOutput::SpvLabelResult { result_id }) = data_inst.output {
+                        assert!(data_inst.kind == DataInstKind::SpvInst(wk.OpLabel));
+                        assert!(data_inst.inputs.is_empty());
 
                         if in_block {
                             writeln!(f, "  }}")?;
                         }
 
-                        writeln!(f, "  {} {{", Use::MiscOutput { result_id }.print(printer))?;
+                        writeln!(
+                            f,
+                            "  {} {{",
+                            Use::DataInstOutput { result_id }.print(printer)
+                        )?;
                         in_block = true;
                         continue;
                     }
 
-                    let inst = misc.print(printer);
+                    let inst = data_inst.print(printer);
                     if in_block {
                         writeln!(f, "    {}", inst.replace("\n", "\n    "))?;
                     } else {
@@ -1165,7 +1170,7 @@ impl Print for FuncParam {
     }
 }
 
-impl Print for Misc {
+impl Print for DataInst {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         let Self {
@@ -1177,19 +1182,19 @@ impl Print for Misc {
 
         let attrs = attrs.print(printer);
 
-        // HACK(eddyb) assume that these IDs match `MiscOutput` of `Misc`s,
+        // HACK(eddyb) assume that these IDs match `DataInstOutput` of `DataInst`s,
         // but this should be replaced by a proper non-ID def-use graph.
-        let spv_id_to_string = |id| Use::MiscOutput { result_id: id }.print(printer);
+        let spv_id_to_string = |id| Use::DataInstOutput { result_id: id }.print(printer);
 
         let (lhs, result_type) = match *output {
-            Some(MiscOutput::SpvValueResult {
+            Some(DataInstOutput::SpvValueResult {
                 result_type,
                 result_id,
             }) => (
                 Some(spv_id_to_string(result_id)),
                 Some(format!(": {}", result_type.print(printer))),
             ),
-            Some(MiscOutput::SpvLabelResult { result_id }) => {
+            Some(DataInstOutput::SpvLabelResult { result_id }) => {
                 (Some(spv_id_to_string(result_id)), None)
             }
             None => (None, None),
@@ -1197,9 +1202,9 @@ impl Print for Misc {
 
         let rhs = printer.pretty_join_space(
             &match *kind {
-                MiscKind::FuncCall(func) => format!("call {}", func.print(printer)),
-                MiscKind::SpvInst(opcode) => opcode.name().to_string(),
-                MiscKind::SpvExtInst { ext_set, inst } => {
+                DataInstKind::FuncCall(func) => format!("call {}", func.print(printer)),
+                DataInstKind::SpvInst(opcode) => opcode.name().to_string(),
+                DataInstKind::SpvExtInst { ext_set, inst } => {
                     // FIXME(eddyb) should this be rendered more compactly?
                     format!(
                         "OpExtInst (OpExtInstImport {:?}) {}",
@@ -1208,13 +1213,13 @@ impl Print for Misc {
                 }
             },
             spv::print::operands(inputs.iter().map(|input| match *input {
-                MiscInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
-                MiscInput::FuncParam { idx } => {
+                DataInstInput::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
+                DataInstInput::FuncParam { idx } => {
                     spv::print::PrintOperand::IdLike(format!("param{}", idx))
                 }
 
-                MiscInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                MiscInput::SpvUntrackedId(id) => {
+                DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                DataInstInput::SpvUntrackedId(id) => {
                     spv::print::PrintOperand::IdLike(spv_id_to_string(id))
                 }
             }))

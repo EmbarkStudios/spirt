@@ -3,10 +3,10 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody,
-    Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg, TypeDef,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DataInst,
+    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use indexmap::{IndexMap, IndexSet};
 use smallvec::SmallVec;
@@ -151,21 +151,21 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
     }
 
-    fn visit_misc(&mut self, misc: &Misc) {
-        match misc.kind {
-            MiscKind::FuncCall(_) => {}
+    fn visit_data_inst(&mut self, data_inst: &DataInst) {
+        match data_inst.kind {
+            DataInstKind::FuncCall(_) => {}
 
-            MiscKind::SpvInst(_) => {}
-            MiscKind::SpvExtInst { ext_set, .. } => {
+            DataInstKind::SpvInst(_) => {}
+            DataInstKind::SpvExtInst { ext_set, .. } => {
                 self.ext_inst_imports.insert(&self.cx[ext_set]);
             }
         }
-        misc.inner_visit_with(self);
+        data_inst.inner_visit_with(self);
     }
-    fn visit_misc_output(&mut self, output: &MiscOutput) {
+    fn visit_data_inst_output(&mut self, output: &DataInstOutput) {
         match *output {
-            MiscOutput::SpvValueResult { result_id, .. }
-            | MiscOutput::SpvLabelResult { result_id } => {
+            DataInstOutput::SpvValueResult { result_id, .. }
+            | DataInstOutput::SpvLabelResult { result_id } => {
                 self.old_outputs.insert(result_id);
             }
         }
@@ -255,9 +255,9 @@ enum LazyInst<'a> {
         param_id: spv::Id,
         param: &'a FuncParam,
     },
-    Misc {
+    DataInst {
         parent_func: Func,
-        misc: &'a Misc,
+        data_inst: &'a DataInst,
     },
     OpFunctionEnd,
 }
@@ -299,20 +299,23 @@ impl LazyInst<'_> {
                 (Some(func_id), func_decl.attrs, import)
             }
             Self::OpFunctionParameter { param_id, param } => (Some(param_id), param.attrs, None),
-            Self::Misc {
+            Self::DataInst {
                 parent_func: _,
-                misc,
+                data_inst,
             } => {
-                let result_id = misc.output.as_ref().map(|old_output| match *old_output {
-                    MiscOutput::SpvValueResult {
-                        result_id: old_result_id,
-                        ..
-                    }
-                    | MiscOutput::SpvLabelResult {
-                        result_id: old_result_id,
-                    } => ids.old_outputs[&old_result_id],
-                });
-                (result_id, misc.attrs, None)
+                let result_id = data_inst
+                    .output
+                    .as_ref()
+                    .map(|old_output| match *old_output {
+                        DataInstOutput::SpvValueResult {
+                            result_id: old_result_id,
+                            ..
+                        }
+                        | DataInstOutput::SpvLabelResult {
+                            result_id: old_result_id,
+                        } => ids.old_outputs[&old_result_id],
+                    });
+                (result_id, data_inst.attrs, None)
             }
             Self::OpFunctionEnd => (None, AttrSet::default(), None),
         }
@@ -440,16 +443,19 @@ impl LazyInst<'_> {
                 result_id,
                 operands: [].into_iter().collect(),
             },
-            Self::Misc { parent_func, misc } => {
-                let (opcode, extra_initial_operands): (_, SmallVec<[_; 2]>) = match misc.kind {
-                    MiscKind::FuncCall(callee) => (
+            Self::DataInst {
+                parent_func,
+                data_inst,
+            } => {
+                let (opcode, extra_initial_operands): (_, SmallVec<[_; 2]>) = match data_inst.kind {
+                    DataInstKind::FuncCall(callee) => (
                         wk.OpFunctionCall,
                         [spv::Operand::Id(wk.IdRef, ids.funcs[&callee].func_id)]
                             .into_iter()
                             .collect(),
                     ),
-                    MiscKind::SpvInst(opcode) => (opcode, [].into_iter().collect()),
-                    MiscKind::SpvExtInst { ext_set, inst } => (
+                    DataInstKind::SpvInst(opcode) => (opcode, [].into_iter().collect()),
+                    DataInstKind::SpvExtInst { ext_set, inst } => (
                         wk.OpExtInst,
                         [
                             spv::Operand::Id(wk.IdRef, ids.ext_inst_imports[&cx[ext_set]]),
@@ -461,29 +467,28 @@ impl LazyInst<'_> {
                 };
                 spv::Inst {
                     opcode,
-                    result_type_id: misc
-                        .output
-                        .as_ref()
-                        .and_then(|old_output| match *old_output {
-                            MiscOutput::SpvValueResult { result_type, .. } => {
+                    result_type_id: data_inst.output.as_ref().and_then(|old_output| {
+                        match *old_output {
+                            DataInstOutput::SpvValueResult { result_type, .. } => {
                                 Some(ids.globals[&Global::Type(result_type)])
                             }
-                            MiscOutput::SpvLabelResult { .. } => None,
-                        }),
+                            DataInstOutput::SpvLabelResult { .. } => None,
+                        }
+                    }),
                     result_id,
                     operands: extra_initial_operands
                         .into_iter()
-                        .chain(misc.inputs.iter().map(|input| match *input {
-                            MiscInput::Const(ct) => {
+                        .chain(data_inst.inputs.iter().map(|input| match *input {
+                            DataInstInput::Const(ct) => {
                                 spv::Operand::Id(wk.IdRef, ids.globals[&Global::Const(ct)])
                             }
-                            MiscInput::FuncParam { idx } => spv::Operand::Id(
+                            DataInstInput::FuncParam { idx } => spv::Operand::Id(
                                 wk.IdRef,
                                 ids.funcs[&parent_func].param_ids[usize::try_from(idx).unwrap()],
                             ),
 
-                            MiscInput::SpvImm(imm) => spv::Operand::Imm(imm),
-                            MiscInput::SpvUntrackedId(old_id) => {
+                            DataInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
+                            DataInstInput::SpvUntrackedId(old_id) => {
                                 spv::Operand::Id(wk.IdRef, ids.old_outputs[&old_id])
                             }
                         }))
@@ -600,9 +605,9 @@ impl Module {
                     .chain(func_ids.param_ids.iter().zip(&func_decl.params).map(
                         |(&param_id, param)| LazyInst::OpFunctionParameter { param_id, param },
                     ))
-                    .chain(insts.iter().map(move |misc| LazyInst::Misc {
+                    .chain(insts.iter().map(move |data_inst| LazyInst::DataInst {
                         parent_func: func,
-                        misc,
+                        data_inst,
                     }))
                     .chain([LazyInst::OpFunctionEnd])
                 }));

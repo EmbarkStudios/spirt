@@ -3,10 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody,
-    Import, InternedStr, Misc, MiscInput, MiscKind, MiscOutput, Module, Type, TypeCtor,
-    TypeCtorArg, TypeDef,
+    print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstCtorArg, ConstDef, Context, DataInst,
+    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type,
+    TypeCtor, TypeCtorArg, TypeDef,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -934,12 +934,12 @@ impl Module {
                         match maybe_callee {
                             Some(callee) => {
                                 operands.remove(0);
-                                MiscKind::FuncCall(callee)
+                                DataInstKind::FuncCall(callee)
                             }
 
                             // HACK(eddyb) this should be an error, but it shows
                             // up in Rust-GPU output (likely a zombie?).
-                            None => MiscKind::SpvInst(opcode),
+                            None => DataInstKind::SpvInst(opcode),
                         }
                     } else if opcode == wk.OpExtInst {
                         let ext_set_id = operands.remove(0);
@@ -968,22 +968,22 @@ impl Module {
                             ))
                         })?;
 
-                        MiscKind::SpvExtInst { ext_set, inst }
+                        DataInstKind::SpvExtInst { ext_set, inst }
                     } else {
-                        MiscKind::SpvInst(opcode)
+                        DataInstKind::SpvInst(opcode)
                     };
 
-                    insts.push(Misc {
+                    insts.push(DataInst {
                         attrs,
                         kind,
                         output: result_id
                             .map(|result_id| {
                                 if opcode == wk.OpLabel {
                                     assert!(result_type.is_none());
-                                    Ok(MiscOutput::SpvLabelResult { result_id })
+                                    Ok(DataInstOutput::SpvLabelResult { result_id })
                                 } else {
                                     match result_type {
-                                        Some(result_type) => Ok(MiscOutput::SpvValueResult {
+                                        Some(result_type) => Ok(DataInstOutput::SpvValueResult {
                                             result_type,
                                             result_id,
                                         }),
@@ -998,9 +998,9 @@ impl Module {
                         inputs: operands
                             .iter()
                             .map(|operand| match *operand {
-                                spv::Operand::Imm(imm) => Ok(MiscInput::SpvImm(imm)),
+                                spv::Operand::Imm(imm) => Ok(DataInstInput::SpvImm(imm)),
                                 spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                                    Some(&IdDef::Const(ct)) => Ok(MiscInput::Const(ct)),
+                                    Some(&IdDef::Const(ct)) => Ok(DataInstInput::Const(ct)),
                                     Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
                                         "unsupported use of {} as an operand for \
                                          an instruction in a function",
@@ -1024,11 +1024,11 @@ impl Module {
                                     }
                                     None => {
                                         if let Some(idx) = params.get_index_of(&id) {
-                                            Ok(MiscInput::FuncParam {
+                                            Ok(DataInstInput::FuncParam {
                                                 idx: idx.try_into().unwrap(),
                                             })
                                         } else {
-                                            Ok(MiscInput::SpvUntrackedId(id))
+                                            Ok(DataInstInput::SpvUntrackedId(id))
                                         }
                                     }
                                 },

@@ -265,24 +265,25 @@ pub struct FuncParam {
 }
 
 pub struct FuncDefBody {
-    pub insts: Vec<Misc>,
+    pub insts: Vec<DataInst>,
 }
 
-pub struct Misc {
+// FIXME(eddyb) make this name not a lie by splitting out control-flow insts.
+pub struct DataInst {
     pub attrs: AttrSet,
 
-    pub kind: MiscKind,
+    pub kind: DataInstKind,
 
     // FIXME(eddyb) track this entirely as a def-use graph.
-    pub output: Option<MiscOutput>,
+    pub output: Option<DataInstOutput>,
 
     // FIXME(eddyb) maybe split inputs into "params" and "value inputs"?
     // (would "params" only contain immediates, or also e.g. types?)
-    pub inputs: SmallVec<[MiscInput; 2]>,
+    pub inputs: SmallVec<[DataInstInput; 2]>,
 }
 
 #[derive(PartialEq, Eq)]
-pub enum MiscKind {
+pub enum DataInstKind {
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
@@ -292,7 +293,7 @@ pub enum MiscKind {
 }
 
 #[derive(Copy, Clone)]
-pub enum MiscOutput {
+pub enum DataInstOutput {
     SpvValueResult {
         result_type: Type,
         result_id: spv::Id,
@@ -303,7 +304,7 @@ pub enum MiscOutput {
 }
 
 #[derive(Copy, Clone)]
-pub enum MiscInput {
+pub enum DataInstInput {
     Const(Const),
     FuncParam { idx: u32 },
 

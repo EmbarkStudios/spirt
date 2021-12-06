@@ -1,8 +1,8 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DataInst,
+    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -50,13 +50,13 @@ pub trait Visitor<'a>: Sized {
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         func_decl.inner_visit_with(self);
     }
-    fn visit_misc(&mut self, misc: &'a Misc) {
-        misc.inner_visit_with(self);
+    fn visit_data_inst(&mut self, data_inst: &'a DataInst) {
+        data_inst.inner_visit_with(self);
     }
-    fn visit_misc_output(&mut self, output: &'a MiscOutput) {
+    fn visit_data_inst_output(&mut self, output: &'a DataInstOutput) {
         output.inner_visit_with(self);
     }
-    fn visit_misc_input(&mut self, input: &'a MiscInput) {
+    fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
         input.inner_visit_with(self);
     }
 }
@@ -280,12 +280,12 @@ impl InnerVisit for FuncDefBody {
         let Self { insts } = self;
 
         for inst in insts {
-            visitor.visit_misc(inst);
+            visitor.visit_data_inst(inst);
         }
     }
 }
 
-impl InnerVisit for Misc {
+impl InnerVisit for DataInst {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             attrs,
@@ -296,19 +296,19 @@ impl InnerVisit for Misc {
 
         visitor.visit_attr_set_use(*attrs);
         match *kind {
-            MiscKind::FuncCall(func) => visitor.visit_func_use(func),
-            MiscKind::SpvInst(_) | MiscKind::SpvExtInst { .. } => {}
+            DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
+            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(output) = output {
-            visitor.visit_misc_output(output);
+            visitor.visit_data_inst_output(output);
         }
         for input in inputs {
-            visitor.visit_misc_input(input);
+            visitor.visit_data_inst_input(input);
         }
     }
 }
 
-impl InnerVisit for MiscOutput {
+impl InnerVisit for DataInstOutput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
             Self::SpvValueResult {
@@ -320,7 +320,7 @@ impl InnerVisit for MiscOutput {
     }
 }
 
-impl InnerVisit for MiscInput {
+impl InnerVisit for DataInstInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),

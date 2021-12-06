@@ -1,8 +1,8 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Misc, MiscInput, MiscKind, MiscOutput, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstCtorArg, ConstDef, DataInst,
+    DataInstInput, DataInstKind, DataInstOutput, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef,
 };
 use std::cmp::Ordering;
 
@@ -162,10 +162,13 @@ pub trait Transformer: Sized {
     fn transform_const_def(&mut self, ct_def: &ConstDef) -> Transformed<ConstDef> {
         ct_def.inner_transform_with(self)
     }
-    fn transform_misc_output(&mut self, output: &MiscOutput) -> Transformed<MiscOutput> {
+    fn transform_data_inst_output(
+        &mut self,
+        output: &DataInstOutput,
+    ) -> Transformed<DataInstOutput> {
         output.inner_transform_with(self)
     }
-    fn transform_misc_input(&mut self, input: &MiscInput) -> Transformed<MiscInput> {
+    fn transform_data_inst_input(&mut self, input: &DataInstInput) -> Transformed<DataInstInput> {
         input.inner_transform_with(self)
     }
 
@@ -186,8 +189,8 @@ pub trait Transformer: Sized {
     fn in_place_transform_func_decl(&mut self, func_decl: &mut FuncDecl) {
         func_decl.inner_in_place_transform_with(self);
     }
-    fn in_place_transform_misc(&mut self, misc: &mut Misc) {
-        misc.inner_in_place_transform_with(self);
+    fn in_place_transform_data_inst(&mut self, data_inst: &mut DataInst) {
+        data_inst.inner_in_place_transform_with(self);
     }
 }
 
@@ -462,12 +465,12 @@ impl InnerInPlaceTransform for FuncDefBody {
         let Self { insts } = self;
 
         for inst in insts {
-            transformer.in_place_transform_misc(inst);
+            transformer.in_place_transform_data_inst(inst);
         }
     }
 }
 
-impl InnerInPlaceTransform for Misc {
+impl InnerInPlaceTransform for DataInst {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         let Self {
             attrs,
@@ -478,19 +481,21 @@ impl InnerInPlaceTransform for Misc {
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
-            MiscKind::FuncCall(func) => transformer.transform_func_use(*func).apply_to(func),
-            MiscKind::SpvInst(_) | MiscKind::SpvExtInst { .. } => {}
+            DataInstKind::FuncCall(func) => transformer.transform_func_use(*func).apply_to(func),
+            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(output) = output {
-            transformer.transform_misc_output(output).apply_to(output);
+            transformer
+                .transform_data_inst_output(output)
+                .apply_to(output);
         }
         for input in inputs {
-            transformer.transform_misc_input(input).apply_to(input);
+            transformer.transform_data_inst_input(input).apply_to(input);
         }
     }
 }
 
-impl InnerTransform for MiscOutput {
+impl InnerTransform for DataInstOutput {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         match *self {
             Self::SpvValueResult {
@@ -508,7 +513,7 @@ impl InnerTransform for MiscOutput {
     }
 }
 
-impl InnerTransform for MiscInput {
+impl InnerTransform for DataInstInput {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         match self {
             Self::Const(ct) => transform!({
