@@ -453,6 +453,51 @@ impl<'a, 'b> Printer<'a, 'b> {
         self.cx
     }
 
+    /// Returns a concatenation of `pieces` using `.for_single_line()` if the
+    /// resulting string can fit on one line, or a multi-line indented version
+    /// otherwise (`.for_multi_line()` with reindented `Content` pieces).
+    fn pretty_concat_pieces<'c>(
+        &self,
+        pieces: impl IntoIterator<Item = PrettyPiece<'c>>,
+    ) -> String {
+        let mut pieces: SmallVec<[_; 16]> = pieces.into_iter().collect();
+
+        // FIXME(eddyb) make max line width configurable.
+        let max_line_len = 80;
+        let fits_on_single_line = pieces
+            .iter()
+            .map(|piece| piece.for_single_line())
+            .try_fold(0usize, |single_line_len, piece| {
+                if piece.contains("\n") {
+                    return None;
+                }
+                single_line_len
+                    .checked_add(piece.len())
+                    .filter(|&len| len <= max_line_len)
+            })
+            .is_some();
+
+        if !fits_on_single_line {
+            // FIXME(eddyb) automate reindenting (and make it configurable).
+            for piece in &mut pieces {
+                if let PrettyPiece::Content(content) = piece {
+                    *content = content.replace("\n", "\n  ");
+                }
+            }
+        }
+
+        let pieces = pieces.iter().map(|piece| {
+            if fits_on_single_line {
+                piece.for_single_line()
+            } else {
+                piece.for_multi_line()
+            }
+        });
+        let mut combined = String::with_capacity(pieces.clone().map(|s| s.len()).sum());
+        combined.extend(pieces);
+        combined
+    }
+
     /// Returns `header + " " + contents.join(" ")` if the resulting string can
     /// fit on one line, or a multi-line indented version otherwise.
     fn pretty_join_space(
@@ -460,37 +505,104 @@ impl<'a, 'b> Printer<'a, 'b> {
         header: &str,
         contents: impl IntoIterator<Item = String>,
     ) -> String {
-        let mut contents: SmallVec<[_; 16]> = contents.into_iter().collect();
-
-        // FIXME(eddyb) make max line width configurable.
-        let max_line_len = 80;
-        let fits_on_single_line = contents
-            .iter()
-            .try_fold(header.len(), |single_line_len, entry| {
-                if entry.contains("\n") {
-                    return None;
-                }
-                single_line_len
-                    .checked_add(1)?
-                    .checked_add(entry.len())
-                    .filter(|&len| len <= max_line_len)
+        self.pretty_concat_pieces(
+            iter::once(PrettyPiece::Joiner {
+                single_line: header,
+                multi_line: header,
             })
-            .is_some();
+            .chain(contents.into_iter().flat_map(|entry| {
+                [
+                    PrettyPiece::Joiner {
+                        single_line: " ",
+                        multi_line: "\n  ",
+                    },
+                    PrettyPiece::Content(entry),
+                ]
+            })),
+        )
+    }
 
-        let sep = if fits_on_single_line {
-            " "
-        } else {
-            // FIXME(eddyb) automate reindenting (and make it configurable).
-            for entry in &mut contents {
-                *entry = entry.replace("\n", "\n  ");
-            }
-            "\n  "
-        };
-        let pieces = iter::once(header).chain(contents.iter().flat_map(|entry| [sep, entry]));
+    /// Returns `prefix + contents.join(comma + " ") + suffix` if the resulting
+    /// string can fit on one line, or a multi-line indented version otherwise.
+    fn pretty_join_comma_sep(
+        &self,
+        prefix: &str,
+        contents: impl IntoIterator<Item = String>,
+        comma: &str,
+        suffix: &str,
+    ) -> String {
+        // FIXME(eddyb) this is probably more complicated than it needs to be.
+        self.pretty_concat_pieces(
+            [
+                PrettyPiece::Joiner {
+                    single_line: prefix,
+                    multi_line: prefix,
+                },
+                PrettyPiece::Joiner {
+                    single_line: "",
+                    multi_line: "\n  ",
+                },
+            ]
+            .into_iter()
+            .chain(contents.into_iter().enumerate().flat_map(|(i, entry)| {
+                // FIXME(eddyb) use `Iterator::intersperse` when that's stable.
+                let sep = if i == 0 {
+                    None
+                } else {
+                    Some([
+                        PrettyPiece::Joiner {
+                            single_line: comma,
+                            multi_line: comma,
+                        },
+                        PrettyPiece::Joiner {
+                            single_line: " ",
+                            multi_line: "\n  ",
+                        },
+                    ])
+                };
+                sep.into_iter()
+                    .flatten()
+                    .chain([PrettyPiece::Content(entry)])
+            }))
+            .chain([
+                PrettyPiece::Joiner {
+                    single_line: "",
+                    multi_line: comma,
+                },
+                PrettyPiece::Joiner {
+                    single_line: "",
+                    multi_line: "\n",
+                },
+                PrettyPiece::Joiner {
+                    single_line: suffix,
+                    multi_line: suffix,
+                },
+            ]),
+        )
+    }
+}
 
-        let mut combined = String::with_capacity(pieces.clone().map(|s| s.len()).sum());
-        combined.extend(pieces);
-        combined
+/// Helper type for for `pretty_concat_pieces`.
+enum PrettyPiece<'a> {
+    Content(String),
+    Joiner {
+        single_line: &'a str,
+        multi_line: &'a str,
+    },
+}
+
+impl PrettyPiece<'_> {
+    fn for_single_line(&self) -> &str {
+        match self {
+            Self::Content(s) => s,
+            Self::Joiner { single_line, .. } => single_line,
+        }
+    }
+    fn for_multi_line(&self) -> &str {
+        match self {
+            Self::Content(s) => s,
+            Self::Joiner { multi_line, .. } => multi_line,
+        }
     }
 }
 
@@ -545,13 +657,7 @@ impl Print for Use {
                     match node {
                         InternedNode::AttrSet(_) => def,
                         InternedNode::Type(_) | InternedNode::Const(_) => {
-                            let def = attrs_of_def + &def;
-                            // FIXME(eddyb) automate reindenting (and make it configurable).
-                            if def.contains("\n") {
-                                format!("(\n  {}\n)", def.replace("\n", "\n  "))
-                            } else {
-                                format!("({})", def)
-                            }
+                            printer.pretty_join_comma_sep("(", [attrs_of_def + &def], "", ")")
                         }
                     }
                 }
@@ -617,20 +723,14 @@ impl Print for Node<'_> {
                         def,
                     } = node.print(printer);
 
-                    // FIXME(eddyb) automate reindenting (and make it configurable).
-                    let reindent_def = match node {
-                        InternedNode::AttrSet(_) => false,
-                        InternedNode::Type(_) | InternedNode::Const(_) => def.contains("\n"),
-                    };
-                    let def = if reindent_def {
-                        format!(
-                            "{}{} =\n  {}",
-                            node.category(),
-                            idx,
-                            def.replace("\n", "\n  ")
-                        )
-                    } else {
-                        format!("{}{} = {}", node.category(), idx, def)
+                    let def = {
+                        let header = format!("{}{} =", node.category(), idx);
+                        match node {
+                            InternedNode::AttrSet(_) => header + " " + &def,
+                            InternedNode::Type(_) | InternedNode::Const(_) => {
+                                printer.pretty_join_space(&header, [def])
+                            }
+                        }
                     };
 
                     AttrsAndDef {
@@ -811,8 +911,9 @@ impl Print for ExportKey {
                 params,
                 interface_global_vars,
             } => {
-                let key =
-                    printer.pretty_join_space(
+                printer.pretty_join_comma_sep(
+                    "(",
+                    [printer.pretty_join_space(
                         "OpEntryPoint",
                         spv::print::operands(
                             params
@@ -822,14 +923,10 @@ impl Print for ExportKey {
                                     spv::print::PrintOperand::IdLike(gv.print(printer))
                                 })),
                         ),
-                    );
-
-                // FIXME(eddyb) automate reindenting (and make it configurable).
-                if key.contains("\n") {
-                    format!("(\n  {}\n)", key.replace("\n", "\n  "))
-                } else {
-                    format!("({})", key)
-                }
+                    )],
+                    "",
+                    ")",
+                )
             }
         }
     }
@@ -877,6 +974,8 @@ impl Print for AttrSetDef {
 
         let non_comment_attrs = match &non_comment_attrs[..] {
             [] => String::new(),
+            // FIXME(eddyb) this could use `pretty_join_comma_sep`, except that
+            // will gladly put multiple attributes on the same line.
             [attr] if !attr.contains("\n") => format!("#{{{}}}", attr),
             _ => lazy_format!(|f| {
                 writeln!(f, "#{{")?;
@@ -1066,34 +1165,20 @@ impl Print for FuncDecl {
             def,
         } = self;
 
-        let sig = {
-            let ret_type = ret_type.print(printer);
-            let params: SmallVec<[_; 16]> = params
-                .iter()
-                .enumerate()
-                .map(|(i, param)| {
-                    let AttrsAndDef { attrs, def } = param.print(printer);
-                    attrs
-                        + &Value::FuncParam {
-                            idx: i.try_into().unwrap(),
-                        }
-                        .print(printer)
-                        + &def
-                })
-                .collect();
-
-            // FIXME(eddyb) enforce a max line width - sadly, this cannot
-            // just use `pretty_join_space`, because that doesn't do commas.
-            let fits_on_single_line = params.iter().all(|ty| !ty.contains("\n"));
-
-            let params = if fits_on_single_line {
-                format!("({})", params.join(", "))
-            } else {
-                // FIXME(eddyb) automate reindenting (and make it configurable).
-                format!("(\n  {},\n)", params.join(",\n").replace("\n", "\n  "))
-            };
-            params + " -> " + &ret_type
-        };
+        let sig = printer.pretty_join_comma_sep(
+            "(",
+            params.iter().enumerate().map(|(i, param)| {
+                let AttrsAndDef { attrs, def } = param.print(printer);
+                attrs
+                    + &Value::FuncParam {
+                        idx: i.try_into().unwrap(),
+                    }
+                    .print(printer)
+                    + &def
+            }),
+            ",",
+            &format!(") -> {}", ret_type.print(printer)),
+        );
 
         let def = match def {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
@@ -1108,10 +1193,14 @@ impl Print for FuncDecl {
                         let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
 
                         if data_inst_def.output_type.is_some() {
-                            def = printer.pretty_join_space(
-                                &format!("{} =", Use::DataInstOutput(inst).print(printer)),
-                                [def],
-                            );
+                            let header = format!("{} =", Use::DataInstOutput(inst).print(printer));
+                            // FIXME(eddyb) the reindenting here hurts more than
+                            // it helps, maybe it eneds a heuristics?
+                            def = if false {
+                                printer.pretty_join_space(&header, [def])
+                            } else {
+                                header + " " + &def
+                            };
                         }
                         writeln!(f, "    {}", (attrs + &def).replace("\n", "\n    "))?;
                     }
@@ -1165,29 +1254,39 @@ impl Print for DataInstDef {
 
         let attrs = attrs.print(printer);
 
-        let def = printer.pretty_join_space(
-            &match *kind {
-                DataInstKind::FuncCall(func) => format!("call {}", func.print(printer)),
-                DataInstKind::SpvInst(opcode) => opcode.name().to_string(),
-                DataInstKind::SpvExtInst { ext_set, inst } => {
-                    // FIXME(eddyb) should this be rendered more compactly?
-                    format!(
+        let inputs = spv::print::operands(inputs.iter().map(|input| match *input {
+            DataInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
+
+            DataInstInput::Block { idx } => {
+                spv::print::PrintOperand::IdLike(format!("block{}", idx))
+            }
+
+            DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+        }));
+        let output_type = output_type.map(|ty| ty.print(printer));
+
+        let def = match *kind {
+            DataInstKind::FuncCall(func) => printer.pretty_join_comma_sep(
+                &format!("call {}(", func.print(printer)),
+                inputs,
+                ",",
+                &output_type.map_or(")".to_string(), |ty| format!(") : {}", ty)),
+            ),
+            DataInstKind::SpvInst(opcode) => printer.pretty_join_space(
+                opcode.name(),
+                inputs.chain(output_type.map(|ty| format!(": {}", ty))),
+            ),
+            DataInstKind::SpvExtInst { ext_set, inst } => {
+                // FIXME(eddyb) should this be rendered more compactly?
+                printer.pretty_join_space(
+                    &format!(
                         "OpExtInst (OpExtInstImport {:?}) {}",
                         &printer.cx[ext_set], inst
-                    )
-                }
-            },
-            spv::print::operands(inputs.iter().map(|input| match *input {
-                DataInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
-
-                DataInstInput::Block { idx } => {
-                    spv::print::PrintOperand::IdLike(format!("block{}", idx))
-                }
-
-                DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-            }))
-            .chain(output_type.map(|ty| format!(": {}", ty.print(printer)))),
-        );
+                    ),
+                    inputs.chain(output_type.map(|ty| format!(": {}", ty))),
+                )
+            }
+        };
 
         AttrsAndDef { attrs, def }
     }
