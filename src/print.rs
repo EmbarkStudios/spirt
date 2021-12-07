@@ -272,23 +272,18 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Dyn(debug_info));
     }
 
-    fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
-        match *input {
-            DataInstInput::Value(Value::Const(_))
-            | DataInstInput::Value(Value::FuncParam { .. }) => {}
+    fn visit_value_use(&mut self, v: &'a Value) {
+        match *v {
+            Value::Const(_) | Value::FuncParam { .. } => {}
 
-            DataInstInput::Value(Value::DataInstOutput(inst)) => {
+            Value::DataInstOutput(inst) => {
                 *self
                     .use_counts
                     .entry(Use::DataInstOutput(inst))
                     .or_default() += 1;
             }
-
-            DataInstInput::Block { .. } => {}
-
-            DataInstInput::SpvImm(_) => {}
         }
-        input.inner_visit_with(self);
+        v.inner_visit_with(self);
     }
 }
 
@@ -417,16 +412,9 @@ impl<'a, 'b> Printer<'a, 'b> {
             })
             .collect();
 
-        #[derive(Default)]
-        struct PerFuncAnonCounters {
-            data_inst_outputs: usize,
-        }
-        let mut per_func_anon_counters = FxHashMap::<Func, PerFuncAnonCounters>::default();
-
-        for (&func, &func_decl) in &plan.func_decl_cache {
+        for (&_func, &func_decl) in &plan.func_decl_cache {
             if let DeclDef::Present(func_def_body) = &func_decl.def {
-                let ac = per_func_anon_counters.entry(func).or_default();
-                let counter = &mut ac.data_inst_outputs;
+                let mut counter = 0;
 
                 let all_insts_with_output = func_def_body
                     .blocks
@@ -434,9 +422,11 @@ impl<'a, 'b> Printer<'a, 'b> {
                     .flat_map(|block| block.insts.iter().copied())
                     .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some());
                 for inst in all_insts_with_output {
-                    let idx = *counter;
-                    *counter += 1;
-                    use_styles.insert(Use::DataInstOutput(inst), UseStyle::Anon { idx });
+                    if let Some(use_style) = use_styles.get_mut(&Use::DataInstOutput(inst)) {
+                        let idx = counter;
+                        counter += 1;
+                        *use_style = UseStyle::Anon { idx };
+                    }
                 }
             }
         }

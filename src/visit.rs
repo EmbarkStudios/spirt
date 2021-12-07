@@ -63,6 +63,9 @@ pub trait Visitor<'a>: Sized {
     fn visit_control_inst_input(&mut self, input: &'a ControlInstInput) {
         input.inner_visit_with(self);
     }
+    fn visit_value_use(&mut self, v: &'a Value) {
+        v.inner_visit_with(self);
+    }
 }
 
 /// Trait implemented on "visitable" types, to further "explore" a type by
@@ -320,7 +323,7 @@ impl InnerVisit for DataInstDef {
 impl InnerVisit for DataInstInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match self {
-            Self::Value(v) => v.inner_visit_with(visitor),
+            Self::Value(v) => visitor.visit_value_use(v),
 
             Self::Block { idx: _ } => {}
 
@@ -350,7 +353,7 @@ impl InnerVisit for ControlInst {
 impl InnerVisit for ControlInstInput {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match self {
-            Self::Value(v) => v.inner_visit_with(visitor),
+            Self::Value(v) => visitor.visit_value_use(v),
 
             Self::TargetBlock { idx: _ } => {}
 
