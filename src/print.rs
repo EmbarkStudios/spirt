@@ -373,7 +373,17 @@ impl<'a, 'b> Printer<'a, 'b> {
                     Use::Interned(node) => {
                         use_count == 1
                             || match node {
-                                InternedNode::AttrSet(attrs) => cx[attrs].attrs.len() <= 1,
+                                InternedNode::AttrSet(attrs) => {
+                                    let AttrSetDef { attrs } = &cx[attrs];
+                                    attrs.len() <= 1
+                                        || attrs.iter().any(|attr| {
+                                            // HACK(eddyb) because of how these
+                                            // are printed as comments outside
+                                            // the `#{...}` syntax, they can't
+                                            // work unless they're printed inline.
+                                            matches!(attr, Attr::SpvDebugLine { .. })
+                                        })
+                                }
                                 InternedNode::Type(ty) => {
                                     let ty_def = &cx[ty];
                                     ty_def
@@ -852,66 +862,77 @@ impl Print for InternedNode {
 impl Print for AttrSetDef {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
-        lazy_format!(|f| {
-            let Self { attrs } = self;
+        let Self { attrs } = self;
 
-            // Avoid printing anything instead of `#{}`.
-            if attrs.is_empty() {
-                return Ok(());
+        let mut comments = SmallVec::<[_; 1]>::new();
+        let mut non_comment_attrs = SmallVec::<[_; 4]>::new();
+        for attr in attrs {
+            let attr = attr.print(printer);
+            if attr.starts_with("//") {
+                comments.push(attr);
+            } else {
+                non_comment_attrs.push(attr);
             }
+        }
 
-            let force_multiline = attrs.len() > 1;
-            write!(f, "#{{")?;
-            if force_multiline {
-                writeln!(f)?;
-            }
-            for attr in attrs {
-                let attr = match attr {
-                    Attr::SpvAnnotation { opcode, params } => printer.pretty_join_space(
-                        opcode.name(),
-                        spv::print::operands(
-                            params.iter().map(|&imm| spv::print::PrintOperand::Imm(imm)),
-                        ),
-                    ),
-                    &Attr::SpvDebugLine {
-                        file_path,
-                        line,
-                        col,
-                    } => {
-                        // HACK(eddyb) Rust-GPU's column numbers seem
-                        // off-by-one wrt what e.g. VSCode expects
-                        // for `:line:col` syntax, but it's hard to
-                        // tell from the spec and `glslang` doesn't
-                        // even emit column numbers at all!
-                        let col = col + 1;
-
-                        // HACK(eddyb) only use skip string quoting
-                        // and escaping for well-behaved file paths.
-                        let file_path = &printer.cx[file_path.0];
-                        if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
-                            format!("/* at {}:{}:{} */", file_path, line, col)
-                        } else {
-                            format!("/* at {:?}:{}:{} */", file_path, line, col)
-                        }
-                    }
-                    &Attr::SpvBitflagsOperand(imm) => spv::print::operands(
-                        [imm].iter().map(|&imm| spv::print::PrintOperand::Imm(imm)),
-                    )
-                    .collect::<SmallVec<[_; 1]>>()
-                    .join(" "),
-                };
-                if force_multiline || attr.contains("\n") {
-                    if !force_multiline {
-                        writeln!(f)?;
-                    }
+        let non_comment_attrs = match &non_comment_attrs[..] {
+            [] => String::new(),
+            [attr] if !attr.contains("\n") => format!("#{{{}}}", attr),
+            _ => lazy_format!(|f| {
+                writeln!(f, "#{{")?;
+                for attr in &non_comment_attrs {
                     writeln!(f, "  {},", attr.replace("\n", "\n  "))?;
+                }
+                write!(f, "}}")
+            })
+            .to_string(),
+        };
+
+        let comments = comments.join("\n");
+
+        if !non_comment_attrs.is_empty() && !comments.is_empty() {
+            [non_comment_attrs, comments].join("\n")
+        } else {
+            non_comment_attrs + &comments
+        }
+    }
+}
+
+impl Print for Attr {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        match self {
+            Attr::SpvAnnotation { opcode, params } => printer.pretty_join_space(
+                opcode.name(),
+                spv::print::operands(params.iter().map(|&imm| spv::print::PrintOperand::Imm(imm))),
+            ),
+            &Attr::SpvDebugLine {
+                file_path,
+                line,
+                col,
+            } => {
+                // HACK(eddyb) Rust-GPU's column numbers seem
+                // off-by-one wrt what e.g. VSCode expects
+                // for `:line:col` syntax, but it's hard to
+                // tell from the spec and `glslang` doesn't
+                // even emit column numbers at all!
+                let col = col + 1;
+
+                // HACK(eddyb) only use skip string quoting
+                // and escaping for well-behaved file paths.
+                let file_path = &printer.cx[file_path.0];
+                if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
+                    format!("// at {}:{}:{}", file_path, line, col)
                 } else {
-                    write!(f, "{}", attr)?;
+                    format!("// at {:?}:{}:{}", file_path, line, col)
                 }
             }
-            write!(f, "}}")
-        })
-        .to_string()
+            &Attr::SpvBitflagsOperand(imm) => {
+                spv::print::operands([imm].iter().map(|&imm| spv::print::PrintOperand::Imm(imm)))
+                    .collect::<SmallVec<[_; 1]>>()
+                    .join(" ")
+            }
+        }
     }
 }
 
