@@ -716,9 +716,7 @@ impl Print for ModuleDialect {
                     write!(f, "  capabilities: ")?;
                     f.debug_set()
                         .entries(capabilities.iter().map(|&cap| {
-                            // FIXME(eddyb) this prints as `Display(...)`, as if
-                            // the `fmt::Debug` impl was `#[derive]`'d on it.
-                            lazy_format!(move |f| {
+                            format::Debug(move |f| {
                                 write!(f, "{}", spv::print::imm(wk.Capability, cap))
                             })
                         }))
