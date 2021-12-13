@@ -87,7 +87,9 @@ def_well_known! {
         OpFunction,
         OpFunctionParameter,
         OpFunctionEnd,
+
         OpLabel,
+        OpPhi,
         OpFunctionCall,
     ],
     operand_kind: OperandKind = [

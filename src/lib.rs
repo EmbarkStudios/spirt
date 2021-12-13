@@ -273,8 +273,15 @@ pub struct FuncDefBody {
 }
 
 pub struct BlockDef {
+    pub inputs: SmallVec<[BlockInput; 2]>,
     pub insts: Vec<DataInst>,
     pub terminator: ControlInst,
+}
+
+pub struct BlockInput {
+    pub attrs: AttrSet,
+
+    pub ty: Type,
 }
 
 // FIXME(eddyb) make this name not a lie by splitting out control-flow insts.
@@ -321,6 +328,10 @@ pub struct ControlInst {
 
     // FIXME(eddyb) find a better name, "input" doesn't work well for non-values.
     pub inputs: SmallVec<[ControlInstInput; 2]>,
+
+    // FIXME(eddyb) this is clunky because it models φ nodes (`OpPhi` in SPIR-V),
+    // replace the CFG setup with stricter structural regions.
+    pub target_block_inputs: IndexMap<Block, SmallVec<[Value; 2]>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -344,6 +355,9 @@ pub enum ControlInstInput {
 #[derive(Copy, Clone)]
 pub enum Value {
     Const(Const),
+    // FIXME(eddyb) consider replacing this with inputs of the entry block.
     FuncParam { idx: u32 },
+    // FIXME(eddyb) this variant alone increases the size of the `enum`.
+    BlockInput { block: Block, input_idx: u32 },
     DataInstOutput(DataInst),
 }

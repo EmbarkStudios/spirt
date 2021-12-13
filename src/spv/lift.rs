@@ -3,11 +3,11 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Block, BlockDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef, DataInstInput,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    AddrSpace, Attr, AttrSet, Block, BlockDef, BlockInput, Const, ConstCtor, ConstCtorArg,
+    ConstDef, Context, ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef,
+    DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
+    FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
@@ -172,12 +172,22 @@ struct AllocatedIds<'a> {
     funcs: IndexMap<Func, FuncIds>,
 }
 
+// FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
 struct FuncIds {
     func_id: spv::Id,
-    // FIXME(eddyb) should this just be a range?
     param_ids: SmallVec<[spv::Id; 4]>,
-    label_ids: FxHashMap<Block, spv::Id>,
+    blocks: FxHashMap<Block, BlockIds>,
     data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
+}
+
+struct BlockIds {
+    label_id: spv::Id,
+    phis: SmallVec<[Phi; 2]>,
+}
+
+struct Phi {
+    result_id: spv::Id,
+    cases: SmallVec<[(Value, spv::Id); 2]>,
 }
 
 impl<'a> NeedsIdsCollector<'a> {
@@ -217,7 +227,7 @@ impl<'a> NeedsIdsCollector<'a> {
                         DeclDef::Present(def) => Some(def),
                     };
 
-                    let blocks = func_def_body
+                    let all_blocks = func_def_body
                         .into_iter()
                         .flat_map(|func_def_body| &func_def_body.all_blocks)
                         .copied();
@@ -233,6 +243,46 @@ impl<'a> NeedsIdsCollector<'a> {
                                     func_def_body.data_insts[inst].output_type.is_some()
                                 })
                         });
+
+                    let mut blocks: FxHashMap<_, _> = all_blocks
+                        .clone()
+                        .map(|block| {
+                            Ok((
+                                block,
+                                BlockIds {
+                                    label_id: alloc_id()?,
+                                    phis: func_def_body.unwrap().blocks[block]
+                                        .inputs
+                                        .iter()
+                                        .map(|_| {
+                                            Ok(Phi {
+                                                result_id: alloc_id()?,
+                                                cases: SmallVec::new(),
+                                            })
+                                        })
+                                        .collect::<Result<_, _>>()?,
+                                },
+                            ))
+                        })
+                        .collect::<Result<_, _>>()?;
+
+                    // Collect phis from other blocks' edges into each block.
+                    for source_block in all_blocks {
+                        let source_block_def = &func_def_body.unwrap().blocks[source_block];
+                        let source_label_id = blocks[&source_block].label_id;
+
+                        for (&target_block, block_inputs) in
+                            &source_block_def.terminator.target_block_inputs
+                        {
+                            let target_block_ids = blocks.get_mut(&target_block).unwrap();
+                            for (target_phi, &v) in
+                                target_block_ids.phis.iter_mut().zip(block_inputs)
+                            {
+                                target_phi.cases.push((v, source_label_id));
+                            }
+                        }
+                    }
+
                     let func_ids = FuncIds {
                         func_id: alloc_id()?,
                         param_ids: func_decl
@@ -240,9 +290,7 @@ impl<'a> NeedsIdsCollector<'a> {
                             .iter()
                             .map(|_| alloc_id())
                             .collect::<Result<_, _>>()?,
-                        label_ids: blocks
-                            .map(|block| Ok((block, alloc_id()?)))
-                            .collect::<Result<_, _>>()?,
+                        blocks,
                         data_inst_output_ids: all_insts_with_output
                             .map(|inst| Ok((inst, alloc_id()?)))
                             .collect::<Result<_, _>>()?,
@@ -270,6 +318,11 @@ enum LazyInst<'a> {
     },
     OpLabel {
         label_id: spv::Id,
+    },
+    OpPhi {
+        parent_func_ids: &'a FuncIds,
+        block_input: &'a BlockInput,
+        phi: &'a Phi,
     },
     DataInst {
         parent_func_ids: &'a FuncIds,
@@ -321,6 +374,11 @@ impl LazyInst<'_> {
             }
             Self::OpFunctionParameter { param_id, param } => (Some(param_id), param.attrs, None),
             Self::OpLabel { label_id } => (Some(label_id), AttrSet::default(), None),
+            Self::OpPhi {
+                parent_func_ids: _,
+                block_input,
+                phi,
+            } => (Some(phi.result_id), block_input.attrs, None),
             Self::DataInst {
                 parent_func_ids: _,
                 result_id,
@@ -343,6 +401,10 @@ impl LazyInst<'_> {
             Value::FuncParam { idx } => spv::Operand::Id(
                 wk.IdRef,
                 parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
+            ),
+            Value::BlockInput { block, input_idx } => spv::Operand::Id(
+                wk.IdRef,
+                parent_func_ids.blocks[&block].phis[usize::try_from(input_idx).unwrap()].result_id,
             ),
             Value::DataInstOutput(inst) => {
                 spv::Operand::Id(wk.IdRef, parent_func_ids.data_inst_output_ids[&inst])
@@ -473,6 +535,25 @@ impl LazyInst<'_> {
                 result_id,
                 operands: [].into_iter().collect(),
             },
+            Self::OpPhi {
+                parent_func_ids,
+                block_input,
+                phi,
+            } => spv::Inst {
+                opcode: wk.OpPhi,
+                result_type_id: Some(ids.globals[&Global::Type(block_input.ty)]),
+                result_id: Some(phi.result_id),
+                operands: phi
+                    .cases
+                    .iter()
+                    .flat_map(|&(v, source_block_id)| {
+                        [
+                            value_to_operand(parent_func_ids, v),
+                            spv::Operand::Id(wk.IdRef, source_block_id),
+                        ]
+                    })
+                    .collect(),
+            },
             Self::DataInst {
                 parent_func_ids,
                 result_id: _,
@@ -509,7 +590,7 @@ impl LazyInst<'_> {
                             DataInstInput::Value(v) => value_to_operand(parent_func_ids, v),
 
                             DataInstInput::Block(block) => {
-                                spv::Operand::Id(wk.IdRef, parent_func_ids.label_ids[&block])
+                                spv::Operand::Id(wk.IdRef, parent_func_ids.blocks[&block].label_id)
                             }
 
                             DataInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
@@ -535,7 +616,7 @@ impl LazyInst<'_> {
                             ControlInstInput::Value(v) => value_to_operand(parent_func_ids, v),
 
                             ControlInstInput::TargetBlock(block) => {
-                                spv::Operand::Id(wk.IdRef, parent_func_ids.label_ids[&block])
+                                spv::Operand::Id(wk.IdRef, parent_func_ids.blocks[&block].label_id)
                             }
 
                             ControlInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
@@ -661,10 +742,21 @@ impl Module {
                         } = func_def_body;
 
                         all_blocks.iter().flat_map(move |&block| {
-                            let label_id = func_ids.label_ids[&block];
-                            let BlockDef { insts, terminator } = &blocks[block];
+                            let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
+                            let BlockDef {
+                                inputs,
+                                insts,
+                                terminator,
+                            } = &blocks[block];
 
                             iter::once(LazyInst::OpLabel { label_id })
+                                .chain(inputs.iter().zip(phis).map(|(block_input, phi)| {
+                                    LazyInst::OpPhi {
+                                        parent_func_ids: func_ids,
+                                        block_input,
+                                        phi,
+                                    }
+                                }))
                                 .chain(insts.iter().map(move |&inst| {
                                     let data_inst_def = &data_insts[inst];
                                     LazyInst::DataInst {

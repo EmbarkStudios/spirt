@@ -1,9 +1,9 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, Const, ConstCtor, ConstCtorArg, ConstDef,
-    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput, DataInstKind,
-    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor,
+    ConstCtorArg, ConstDef, ControlInst, ControlInstInput, ControlInstKind, DataInstDef,
+    DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
+    FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -473,13 +473,34 @@ impl InnerInPlaceTransform for FuncDefBody {
         } = self;
 
         for &block in all_blocks.iter() {
-            let BlockDef { insts, terminator } = &mut blocks[block];
+            let BlockDef {
+                inputs,
+                insts,
+                terminator,
+            } = &mut blocks[block];
 
+            for input in inputs {
+                input.inner_transform_with(transformer).apply_to(input);
+            }
             for inst in insts {
                 transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
             }
             transformer.in_place_transform_control_inst(terminator);
         }
+    }
+}
+
+impl InnerTransform for BlockInput {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        let Self { attrs, ty } = self;
+
+        transform!({
+            attrs -> transformer.transform_attr_set_use(*attrs),
+            ty -> transformer.transform_type_use(*ty),
+        } => Self {
+            attrs,
+            ty,
+        })
     }
 }
 
@@ -526,6 +547,7 @@ impl InnerInPlaceTransform for ControlInst {
             attrs,
             kind,
             inputs,
+            target_block_inputs,
         } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
@@ -536,6 +558,11 @@ impl InnerInPlaceTransform for ControlInst {
             transformer
                 .transform_control_inst_input(input)
                 .apply_to(input);
+        }
+        for block_inputs in target_block_inputs.values_mut() {
+            for v in block_inputs {
+                v.inner_transform_with(transformer).apply_to(v);
+            }
         }
     }
 }
@@ -561,7 +588,12 @@ impl InnerTransform for Value {
                 ct -> transformer.transform_const_use(*ct),
             } => Self::Const(ct)),
 
-            Self::FuncParam { idx: _ } | Self::DataInstOutput(_) => Transformed::Unchanged,
+            Self::FuncParam { idx: _ }
+            | Self::BlockInput {
+                block: _,
+                input_idx: _,
+            }
+            | Self::DataInstOutput(_) => Transformed::Unchanged,
         }
     }
 }
