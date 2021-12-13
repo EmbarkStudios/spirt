@@ -589,10 +589,6 @@ impl LazyInst<'_> {
                         .chain(data_inst_def.inputs.iter().map(|&input| match input {
                             DataInstInput::Value(v) => value_to_operand(parent_func_ids, v),
 
-                            DataInstInput::Block(block) => {
-                                spv::Operand::Id(wk.IdRef, parent_func_ids.blocks[&block].label_id)
-                            }
-
                             DataInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
                         }))
                         .collect(),

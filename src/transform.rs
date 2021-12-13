@@ -534,8 +534,6 @@ impl InnerTransform for DataInstInput {
                 v -> v.inner_transform_with(transformer),
             } => Self::Value(v)),
 
-            Self::Block(_) => Transformed::Unchanged,
-
             Self::SpvImm(_) => Transformed::Unchanged,
         }
     }

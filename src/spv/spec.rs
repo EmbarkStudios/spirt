@@ -90,6 +90,9 @@ def_well_known! {
 
         OpLabel,
         OpPhi,
+        OpSelectionMerge,
+        OpLoopMerge,
+
         OpFunctionCall,
     ],
     operand_kind: OperandKind = [

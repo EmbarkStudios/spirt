@@ -345,8 +345,6 @@ impl InnerVisit for DataInstInput {
         match self {
             Self::Value(v) => visitor.visit_value_use(v),
 
-            Self::Block(_) => {}
-
             Self::SpvImm(_) => {}
         }
     }

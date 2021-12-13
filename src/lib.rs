@@ -284,7 +284,6 @@ pub struct BlockInput {
     pub ty: Type,
 }
 
-// FIXME(eddyb) make this name not a lie by splitting out control-flow insts.
 pub struct DataInstDef {
     pub attrs: AttrSet,
 
@@ -310,9 +309,6 @@ pub enum DataInstKind {
 #[derive(Copy, Clone)]
 pub enum DataInstInput {
     Value(Value),
-
-    // FIXME(eddyb) remove this by moving it to controlflow-only instructions.
-    Block(Block),
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investigating the performance implications

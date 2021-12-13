@@ -1119,7 +1119,7 @@ impl Module {
 
                 if is_last_in_block {
                     if opcode.def().category != spec::InstructionCategory::ControlFlow
-                        || opcode == wk.OpPhi
+                        || [wk.OpPhi, wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode)
                     {
                         return Err(invalid(
                             "non-control-flow instruction cannot be used \
@@ -1221,6 +1221,21 @@ impl Module {
                         attrs,
                         ty: result_type.unwrap(),
                     });
+                } else if [wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode) {
+                    let is_second_to_last_in_block = lookahead_raw_inst(2)
+                        .map_or(true, |next_raw_inst| next_raw_inst.opcode == wk.OpLabel);
+
+                    if !is_second_to_last_in_block {
+                        return Err(invalid(
+                            "out of order: a merge instruction should be the last \
+                             instruction before the block's terminator",
+                        ));
+                    }
+
+                    // HACK(eddyb) merges are ignored - this may be lossy,
+                    // especially wrt the `SelectionControl` and `LoopControl`
+                    // operands, but it's not obvious how they should map to
+                    // some "structured regions" replacement for the CFG.
                 } else {
                     let mut operands = &operands[..];
                     let kind = if opcode == wk.OpFunctionCall {
@@ -1307,8 +1322,11 @@ impl Module {
                                         id,
                                     )? {
                                         LocalIdDef::Value(v) => DataInstInput::Value(v),
-                                        LocalIdDef::BlockLabel(block) => {
-                                            DataInstInput::Block(block)
+                                        LocalIdDef::BlockLabel(_) => {
+                                            return Err(invalid(
+                                                "unsupported use of block label as a value, \
+                                                 in non-terminator instruction",
+                                            ));
                                         }
                                     },
                                 ),

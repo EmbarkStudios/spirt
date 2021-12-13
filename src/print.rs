@@ -1338,10 +1338,6 @@ impl Print for DataInstDef {
         let inputs = spv::print::operands(inputs.iter().map(|input| match *input {
             DataInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
 
-            DataInstInput::Block(block) => {
-                spv::print::PrintOperand::IdLike(Use::Block(block).print(printer))
-            }
-
             DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
         }));
         let output_type = output_type.map(|ty| ty.print(printer));
