@@ -3,10 +3,11 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    print, AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
-    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput, DataInstKind,
-    DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl,
-    GlobalVarDefBody, Import, InternedStr, Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    print, AddrSpace, Attr, AttrSet, Block, BlockDef, Const, ConstCtor, ConstCtorArg, ConstDef,
+    Context, ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
+    GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -792,7 +793,8 @@ impl Module {
                     Some(import) => DeclDef::Imported(import),
                     None => DeclDef::Present(FuncDefBody {
                         data_insts: Default::default(),
-                        blocks: vec![],
+                        blocks: Default::default(),
+                        all_blocks: vec![],
                     }),
                 };
 
@@ -886,7 +888,7 @@ impl Module {
             #[derive(Copy, Clone)]
             enum LocalIdDef {
                 Value(Value),
-                BlockLabel { idx: u32 },
+                BlockLabel(Block),
             }
 
             // Index IDs declared within the function, first.
@@ -894,7 +896,6 @@ impl Module {
             let mut has_blocks = false;
             {
                 let mut next_param_idx = 0u32;
-                let mut next_block_idx = 0u32;
                 for raw_inst in &raw_insts {
                     let IntraFuncInst {
                         opcode, result_id, ..
@@ -905,32 +906,45 @@ impl Module {
                             let idx = next_param_idx;
                             next_param_idx = idx.checked_add(1).unwrap();
                             LocalIdDef::Value(Value::FuncParam { idx })
-                        } else if opcode == wk.OpLabel {
-                            has_blocks = true;
-
-                            let idx = next_block_idx;
-                            next_block_idx = idx.checked_add(1).unwrap();
-                            LocalIdDef::BlockLabel { idx }
                         } else {
                             has_blocks = true;
 
-                            // HACK(eddyb) can't generate the `DataInst` unique
-                            // index without inserting (a dummy) first.
                             let func_def_body = match &mut func_decl.def {
                                 // Error will be emitted later, below.
                                 DeclDef::Imported(_) => continue,
                                 DeclDef::Present(def) => def,
                             };
-                            let inst = func_def_body.data_insts.insert(
-                                &cx,
-                                DataInstDef {
-                                    attrs: AttrSet::default(),
-                                    kind: DataInstKind::SpvInst(wk.OpNop),
-                                    output_type: None,
-                                    inputs: [].into_iter().collect(),
-                                },
-                            );
-                            LocalIdDef::Value(Value::DataInstOutput(inst))
+
+                            if opcode == wk.OpLabel {
+                                // HACK(eddyb) can't generate the `Block` unique
+                                // index without inserting the (empty) `BlockDef`
+                                // first (with a dummy terminator).
+                                let block = func_def_body.blocks.insert(
+                                    &cx,
+                                    BlockDef {
+                                        insts: vec![],
+                                        terminator: ControlInst {
+                                            attrs: AttrSet::default(),
+                                            kind: ControlInstKind::SpvInst(wk.OpNop),
+                                            inputs: [].into_iter().collect(),
+                                        },
+                                    },
+                                );
+                                LocalIdDef::BlockLabel(block)
+                            } else {
+                                // HACK(eddyb) can't generate the `DataInst` unique
+                                // index without inserting (a dummy) first.
+                                let inst = func_def_body.data_insts.insert(
+                                    &cx,
+                                    DataInstDef {
+                                        attrs: AttrSet::default(),
+                                        kind: DataInstKind::SpvInst(wk.OpNop),
+                                        output_type: None,
+                                        inputs: [].into_iter().collect(),
+                                    },
+                                );
+                                LocalIdDef::Value(Value::DataInstOutput(inst))
+                            }
                         };
                         local_id_defs.insert(id, local_id_def);
                     }
@@ -948,7 +962,7 @@ impl Module {
                         )));
                     }
                     DeclDef::Present(def) => {
-                        assert!(def.blocks.is_empty());
+                        assert!(def.all_blocks.is_empty());
                         Some(def)
                     }
                 }
@@ -1003,7 +1017,7 @@ impl Module {
 
                 if opcode == wk.OpFunctionParameter {
                     if let Some(func_def_body) = &func_def_body {
-                        if !func_def_body.blocks.is_empty() {
+                        if !func_def_body.all_blocks.is_empty() {
                             return Err(invalid(
                                 "out of order: `OpFunctionParameter`s should come \
                                  before the function's blocks",
@@ -1028,20 +1042,19 @@ impl Module {
                         return Err(invalid("block lacks terminator instruction"));
                     }
 
-                    // HACK(eddyb) can't push the `Block` without a dummy terminator.
-                    func_def_body.blocks.push(Block {
-                        insts: vec![],
-                        terminator: ControlInst {
-                            attrs: AttrSet::default(),
-                            kind: ControlInstKind::SpvInst(wk.OpNop),
-                            inputs: [].into_iter().collect(),
-                        },
-                    });
+                    // An empty block was inserted earlier, to be able to
+                    // have an entry in `local_id_defs`.
+                    let block = match local_id_defs[&result_id.unwrap()] {
+                        LocalIdDef::BlockLabel(block) => block,
+                        _ => unreachable!(),
+                    };
+                    func_def_body.all_blocks.push(block);
                     continue;
                 }
-                let current_block = func_def_body.blocks.last_mut().ok_or_else(|| {
+                let current_block = func_def_body.all_blocks.last().copied().ok_or_else(|| {
                     invalid("out of order: not expected before the function's blocks")
                 })?;
+                let current_block_def = &mut func_def_body.blocks[current_block];
 
                 if is_last_in_block {
                     if opcode.def().category != spec::InstructionCategory::ControlFlow {
@@ -1051,7 +1064,7 @@ impl Module {
                         ));
                     }
 
-                    current_block.terminator = ControlInst {
+                    current_block_def.terminator = ControlInst {
                         attrs,
                         kind: ControlInstKind::SpvInst(opcode),
                         inputs: operands
@@ -1063,8 +1076,8 @@ impl Module {
                                         id,
                                     )? {
                                         LocalIdDef::Value(v) => ControlInstInput::Value(v),
-                                        LocalIdDef::BlockLabel { idx } => {
-                                            ControlInstInput::TargetBlock { idx }
+                                        LocalIdDef::BlockLabel(block) => {
+                                            ControlInstInput::TargetBlock(block)
                                         }
                                     },
                                 ),
@@ -1157,8 +1170,8 @@ impl Module {
                                         id,
                                     )? {
                                         LocalIdDef::Value(v) => DataInstInput::Value(v),
-                                        LocalIdDef::BlockLabel { idx } => {
-                                            DataInstInput::Block { idx }
+                                        LocalIdDef::BlockLabel(block) => {
+                                            DataInstInput::Block(block)
                                         }
                                     },
                                 ),
@@ -1178,7 +1191,7 @@ impl Module {
                         },
                         None => func_def_body.data_insts.insert(&cx, data_inst_def),
                     };
-                    current_block.insts.push(inst);
+                    current_block_def.insts.push(inst);
                 }
             }
 

@@ -1,10 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
-    Context, ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef, DataInstInput,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, BlockDef, Const, ConstCtor, ConstCtorArg,
+    ConstDef, Context, ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef,
+    DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
+    FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -91,6 +91,7 @@ enum Use {
     GlobalVar(GlobalVar),
     Func(Func),
 
+    Block(Block),
     DataInstOutput(DataInst),
 }
 
@@ -100,6 +101,7 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
+            Self::Block(_) => "block",
             Self::DataInstOutput(_) => "v",
         }
     }
@@ -365,7 +367,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::DataInstOutput(_) = use_kind {
+                if let Use::Block(_) | Use::DataInstOutput(_) = use_kind {
                     return (use_kind, UseStyle::Inline);
                 }
 
@@ -400,7 +402,8 @@ impl<'a, 'b> Printer<'a, 'b> {
                                 }
                             }
                     }
-                    Use::GlobalVar(_) | Use::Func(_) | Use::DataInstOutput(_) => false,
+                    Use::GlobalVar(_) | Use::Func(_) => false,
+                    Use::Block(_) | Use::DataInstOutput(_) => unreachable!(),
                 };
                 let style = if inline {
                     UseStyle::Inline
@@ -412,7 +415,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::DataInstOutput(_) => unreachable!(),
+                        Use::Block(_) | Use::DataInstOutput(_) => unreachable!(),
                     };
                     let idx = *counter;
                     *counter += 1;
@@ -424,18 +427,32 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         for (&_func, &func_decl) in &plan.func_decl_cache {
             if let DeclDef::Present(func_def_body) = &func_decl.def {
-                let mut counter = 0;
+                let mut block_counter = 0;
+                let mut value_counter = 0;
 
-                let all_insts_with_output = func_def_body
-                    .blocks
-                    .iter()
-                    .flat_map(|block| block.insts.iter().copied())
-                    .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some());
-                for inst in all_insts_with_output {
-                    if let Some(use_style) = use_styles.get_mut(&Use::DataInstOutput(inst)) {
-                        let idx = counter;
-                        counter += 1;
-                        *use_style = UseStyle::Anon { idx };
+                for &block in &func_def_body.all_blocks {
+                    let BlockDef {
+                        insts,
+                        terminator: _,
+                    } = &func_def_body.blocks[block];
+
+                    // FIXME(eddyb) only insert here if the block is actually "used".
+                    {
+                        let idx = block_counter;
+                        block_counter += 1;
+                        use_styles.insert(Use::Block(block), UseStyle::Anon { idx });
+                    }
+
+                    let insts_with_output = insts
+                        .iter()
+                        .copied()
+                        .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some());
+                    for inst in insts_with_output {
+                        if let Some(use_style) = use_styles.get_mut(&Use::DataInstOutput(inst)) {
+                            let idx = value_counter;
+                            value_counter += 1;
+                            *use_style = UseStyle::Anon { idx };
+                        }
                     }
                 }
             }
@@ -663,7 +680,7 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::DataInstOutput { .. } => "_".to_string(),
+                Self::Block(_) | Self::DataInstOutput(_) => "_".to_string(),
             },
         };
 
@@ -1182,12 +1199,16 @@ impl Print for FuncDecl {
 
         let def = match def {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
-            DeclDef::Present(FuncDefBody { data_insts, blocks }) => lazy_format!(|f| {
+            DeclDef::Present(FuncDefBody {
+                data_insts,
+                blocks,
+                all_blocks,
+            }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for (i, block) in blocks.iter().enumerate() {
-                    let Block { insts, terminator } = block;
+                for &block in all_blocks {
+                    let BlockDef { insts, terminator } = &blocks[block];
 
-                    writeln!(f, "  block{} {{", i)?;
+                    writeln!(f, "  {} {{", Use::Block(block).print(printer))?;
                     for &inst in insts {
                         let data_inst_def = &data_insts[inst];
                         let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
@@ -1257,8 +1278,8 @@ impl Print for DataInstDef {
         let inputs = spv::print::operands(inputs.iter().map(|input| match *input {
             DataInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
 
-            DataInstInput::Block { idx } => {
-                spv::print::PrintOperand::IdLike(format!("block{}", idx))
+            DataInstInput::Block(block) => {
+                spv::print::PrintOperand::IdLike(Use::Block(block).print(printer))
             }
 
             DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
@@ -1310,8 +1331,8 @@ impl Print for ControlInst {
             spv::print::operands(inputs.iter().map(|input| match *input {
                 ControlInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
 
-                ControlInstInput::TargetBlock { idx } => {
-                    spv::print::PrintOperand::IdLike(format!("block{}", idx))
+                ControlInstInput::TargetBlock(block) => {
+                    spv::print::PrintOperand::IdLike(Use::Block(block).print(printer))
                 }
 
                 ControlInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),

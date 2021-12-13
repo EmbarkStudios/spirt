@@ -1,5 +1,5 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, Const, ConstCtor, ConstCtorArg, ConstDef,
     ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput, DataInstKind,
     DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
     GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
@@ -284,10 +284,14 @@ impl InnerVisit for FuncParam {
 
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { data_insts, blocks } = self;
+        let Self {
+            data_insts,
+            blocks,
+            all_blocks,
+        } = self;
 
-        for block in blocks {
-            let Block { insts, terminator } = block;
+        for &block in all_blocks {
+            let BlockDef { insts, terminator } = &blocks[block];
 
             for &inst in insts {
                 visitor.visit_data_inst_def(&data_insts[inst]);
@@ -325,7 +329,7 @@ impl InnerVisit for DataInstInput {
         match self {
             Self::Value(v) => visitor.visit_value_use(v),
 
-            Self::Block { idx: _ } => {}
+            Self::Block(_) => {}
 
             Self::SpvImm(_) => {}
         }
@@ -355,7 +359,7 @@ impl InnerVisit for ControlInstInput {
         match self {
             Self::Value(v) => visitor.visit_value_use(v),
 
-            Self::TargetBlock { idx: _ } => {}
+            Self::TargetBlock(_) => {}
 
             Self::SpvImm(_) => {}
         }

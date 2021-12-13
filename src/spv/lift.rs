@@ -3,7 +3,7 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Block, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
+    AddrSpace, Attr, AttrSet, Block, BlockDef, Const, ConstCtor, ConstCtorArg, ConstDef, Context,
     ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef, DataInstInput,
     DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
     GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
@@ -176,8 +176,7 @@ struct FuncIds {
     func_id: spv::Id,
     // FIXME(eddyb) should this just be a range?
     param_ids: SmallVec<[spv::Id; 4]>,
-    // FIXME(eddyb) should this just be a range?
-    label_ids: SmallVec<[spv::Id; 4]>,
+    label_ids: FxHashMap<Block, spv::Id>,
     data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
 }
 
@@ -220,13 +219,16 @@ impl<'a> NeedsIdsCollector<'a> {
 
                     let blocks = func_def_body
                         .into_iter()
-                        .flat_map(|func_def_body| &func_def_body.blocks);
+                        .flat_map(|func_def_body| &func_def_body.all_blocks)
+                        .copied();
                     let all_insts_with_output =
                         func_def_body.into_iter().flat_map(|func_def_body| {
                             func_def_body
-                                .blocks
+                                .all_blocks
                                 .iter()
-                                .flat_map(|block| block.insts.iter().copied())
+                                .flat_map(|&block| {
+                                    func_def_body.blocks[block].insts.iter().copied()
+                                })
                                 .filter(|&inst| {
                                     func_def_body.data_insts[inst].output_type.is_some()
                                 })
@@ -238,7 +240,9 @@ impl<'a> NeedsIdsCollector<'a> {
                             .iter()
                             .map(|_| alloc_id())
                             .collect::<Result<_, _>>()?,
-                        label_ids: blocks.map(|_| alloc_id()).collect::<Result<_, _>>()?,
+                        label_ids: blocks
+                            .map(|block| Ok((block, alloc_id()?)))
+                            .collect::<Result<_, _>>()?,
                         data_inst_output_ids: all_insts_with_output
                             .map(|inst| Ok((inst, alloc_id()?)))
                             .collect::<Result<_, _>>()?,
@@ -504,10 +508,9 @@ impl LazyInst<'_> {
                         .chain(data_inst_def.inputs.iter().map(|&input| match input {
                             DataInstInput::Value(v) => value_to_operand(parent_func_ids, v),
 
-                            DataInstInput::Block { idx } => spv::Operand::Id(
-                                wk.IdRef,
-                                parent_func_ids.label_ids[usize::try_from(idx).unwrap()],
-                            ),
+                            DataInstInput::Block(block) => {
+                                spv::Operand::Id(wk.IdRef, parent_func_ids.label_ids[&block])
+                            }
 
                             DataInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
                         }))
@@ -531,10 +534,9 @@ impl LazyInst<'_> {
                         .map(|&input| match input {
                             ControlInstInput::Value(v) => value_to_operand(parent_func_ids, v),
 
-                            ControlInstInput::TargetBlock { idx } => spv::Operand::Id(
-                                wk.IdRef,
-                                parent_func_ids.label_ids[usize::try_from(idx).unwrap()],
-                            ),
+                            ControlInstInput::TargetBlock(block) => {
+                                spv::Operand::Id(wk.IdRef, parent_func_ids.label_ids[&block])
+                            }
 
                             ControlInstInput::SpvImm(imm) => spv::Operand::Imm(imm),
                         })
@@ -652,31 +654,32 @@ impl Module {
                         |(&param_id, param)| LazyInst::OpFunctionParameter { param_id, param },
                     ))
                     .chain(func_def_body.into_iter().flat_map(move |func_def_body| {
-                        let FuncDefBody { data_insts, blocks } = func_def_body;
+                        let FuncDefBody {
+                            data_insts,
+                            blocks,
+                            all_blocks,
+                        } = func_def_body;
 
-                        func_ids
-                            .label_ids
-                            .iter()
-                            .zip(blocks)
-                            .flat_map(move |(&label_id, block)| {
-                                let Block { insts, terminator } = block;
+                        all_blocks.iter().flat_map(move |&block| {
+                            let label_id = func_ids.label_ids[&block];
+                            let BlockDef { insts, terminator } = &blocks[block];
 
-                                iter::once(LazyInst::OpLabel { label_id })
-                                    .chain(insts.iter().map(move |&inst| {
-                                        let data_inst_def = &data_insts[inst];
-                                        LazyInst::DataInst {
-                                            parent_func_ids: func_ids,
-                                            result_id: data_inst_def
-                                                .output_type
-                                                .map(|_| func_ids.data_inst_output_ids[&inst]),
-                                            data_inst_def,
-                                        }
-                                    }))
-                                    .chain([LazyInst::ControlInst {
+                            iter::once(LazyInst::OpLabel { label_id })
+                                .chain(insts.iter().map(move |&inst| {
+                                    let data_inst_def = &data_insts[inst];
+                                    LazyInst::DataInst {
                                         parent_func_ids: func_ids,
-                                        control_inst: terminator,
-                                    }])
-                            })
+                                        result_id: data_inst_def
+                                            .output_type
+                                            .map(|_| func_ids.data_inst_output_ids[&inst]),
+                                        data_inst_def,
+                                    }
+                                }))
+                                .chain([LazyInst::ControlInst {
+                                    parent_func_ids: func_ids,
+                                    control_inst: terminator,
+                                }])
+                        })
                     }))
                     .chain([LazyInst::OpFunctionEnd])
                 }));

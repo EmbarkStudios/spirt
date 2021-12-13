@@ -3,9 +3,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
-// FIXME(eddyb) maybe use type aliases? rust-analyzer doesn't offer to import
-// any of these and it might be because they're reexports of macro-generated defs.
-pub use context::{AttrSet, Const, Context, DataInst, Func, GlobalVar, InternedStr, Type};
+pub use context::{AttrSet, Block, Const, Context, DataInst, Func, GlobalVar, InternedStr, Type};
 
 pub mod print;
 pub mod transform;
@@ -268,11 +266,13 @@ pub struct FuncDefBody {
     // FIXME(eddyb) this might not be the most efficient storage,
     // but it prevents misuse.
     pub data_insts: context::UniqIdxMap<DataInst, DataInstDef>,
+    pub blocks: context::UniqIdxMap<Block, BlockDef>,
 
-    pub blocks: Vec<Block>,
+    // FIXME(eddyb) replace this with a hierarchical "region" system.
+    pub all_blocks: Vec<Block>,
 }
 
-pub struct Block {
+pub struct BlockDef {
     pub insts: Vec<DataInst>,
     pub terminator: ControlInst,
 }
@@ -305,7 +305,7 @@ pub enum DataInstInput {
     Value(Value),
 
     // FIXME(eddyb) remove this by moving it to controlflow-only instructions.
-    Block { idx: u32 },
+    Block(Block),
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investigating the performance implications
@@ -332,7 +332,7 @@ pub enum ControlInstKind {
 pub enum ControlInstInput {
     Value(Value),
 
-    TargetBlock { idx: u32 },
+    TargetBlock(Block),
 
     // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
     // FIXME(eddyb) it might be worth investigating the performance implications

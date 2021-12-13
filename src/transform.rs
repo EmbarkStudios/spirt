@@ -1,5 +1,5 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, Const, ConstCtor, ConstCtorArg, ConstDef,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, Const, ConstCtor, ConstCtorArg, ConstDef,
     ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput, DataInstKind,
     DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
     GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
@@ -466,10 +466,14 @@ impl InnerTransform for FuncParam {
 
 impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self { data_insts, blocks } = self;
+        let Self {
+            data_insts,
+            blocks,
+            all_blocks,
+        } = self;
 
-        for block in blocks {
-            let Block { insts, terminator } = block;
+        for &block in all_blocks.iter() {
+            let BlockDef { insts, terminator } = &mut blocks[block];
 
             for inst in insts {
                 transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
@@ -509,7 +513,7 @@ impl InnerTransform for DataInstInput {
                 v -> v.inner_transform_with(transformer),
             } => Self::Value(v)),
 
-            Self::Block { idx: _ } => Transformed::Unchanged,
+            Self::Block(_) => Transformed::Unchanged,
 
             Self::SpvImm(_) => Transformed::Unchanged,
         }
@@ -543,7 +547,7 @@ impl InnerTransform for ControlInstInput {
                 v -> v.inner_transform_with(transformer),
             } => Self::Value(v)),
 
-            Self::TargetBlock { idx: _ } => Transformed::Unchanged,
+            Self::TargetBlock(_) => Transformed::Unchanged,
 
             Self::SpvImm(_) => Transformed::Unchanged,
         }
