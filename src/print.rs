@@ -357,6 +357,7 @@ enum UseStyle {
 impl<'a, 'b> Printer<'a, 'b> {
     fn new(plan: &'b Plan<'a>) -> Self {
         let cx = plan.cx;
+        let wk = &spv::spec::Spec::get().well_known;
 
         #[derive(Default)]
         struct AnonCounters {
@@ -395,17 +396,43 @@ impl<'a, 'b> Printer<'a, 'b> {
                                 }
                                 InternedNode::Type(ty) => {
                                     let ty_def = &cx[ty];
-                                    ty_def
-                                        .ctor_args
-                                        .iter()
-                                        .all(|arg| matches!(arg, TypeCtorArg::SpvImm(_)))
+
+                                    // FIXME(eddyb) remove the duplication between
+                                    // here and `TypeDef`'s `Print` impl.
+                                    let has_compact_print = match ty_def.ctor {
+                                        TypeCtor::SpvInst(opcode) => [
+                                            wk.OpTypeBool,
+                                            wk.OpTypeInt,
+                                            wk.OpTypeFloat,
+                                            wk.OpTypeVector,
+                                        ]
+                                        .contains(&opcode),
+                                    };
+
+                                    has_compact_print
+                                        || ty_def
+                                            .ctor_args
+                                            .iter()
+                                            .all(|arg| matches!(arg, TypeCtorArg::SpvImm(_)))
                                 }
                                 InternedNode::Const(ct) => {
                                     let ct_def = &cx[ct];
-                                    ct_def
-                                        .ctor_args
-                                        .iter()
-                                        .all(|arg| matches!(arg, ConstCtorArg::SpvImm(_)))
+
+                                    // FIXME(eddyb) remove the duplication between
+                                    // here and `ConstDef`'s `Print` impl.
+                                    let has_compact_print = match ct_def.ctor {
+                                        ConstCtor::SpvInst(opcode) => {
+                                            [wk.OpConstantFalse, wk.OpConstantTrue, wk.OpConstant]
+                                                .contains(&opcode)
+                                        }
+                                        _ => false,
+                                    };
+
+                                    has_compact_print
+                                        || ct_def
+                                            .ctor_args
+                                            .iter()
+                                            .all(|arg| matches!(arg, ConstCtorArg::SpvImm(_)))
                                 }
                             }
                     }
@@ -698,7 +725,12 @@ impl Print for Use {
                     match node {
                         InternedNode::AttrSet(_) => def,
                         InternedNode::Type(_) | InternedNode::Const(_) => {
-                            printer.pretty_join_comma_sep("(", [attrs_of_def + &def], "", ")")
+                            let def = attrs_of_def + &def;
+                            if !def.chars().any(|c| c.is_whitespace()) {
+                                def
+                            } else {
+                                printer.pretty_join_comma_sep("(", [def], "", ")")
+                            }
                         }
                     }
                 }
@@ -1087,17 +1119,70 @@ impl Print for TypeDef {
             ctor_args,
         } = self;
 
+        let wk = &spv::spec::Spec::get().well_known;
+
+        // FIXME(eddyb) should this be done by lowering SPIR-V types to SPIR-T?
+        #[allow(irrefutable_let_patterns)]
+        let compact_def = if let &TypeCtor::SpvInst(opcode) = ctor {
+            if opcode == wk.OpTypeBool {
+                Some("bool".to_string())
+            } else if opcode == wk.OpTypeInt {
+                let (width, signed) = match ctor_args[..] {
+                    [
+                        TypeCtorArg::SpvImm(spv::Imm::Short(_, width)),
+                        TypeCtorArg::SpvImm(spv::Imm::Short(_, signedness)),
+                    ] => (width, signedness != 0),
+                    _ => unreachable!(),
+                };
+
+                Some(if signed {
+                    format!("s{}", width)
+                } else {
+                    format!("u{}", width)
+                })
+            } else if opcode == wk.OpTypeFloat {
+                let width = match ctor_args[..] {
+                    [TypeCtorArg::SpvImm(spv::Imm::Short(_, width))] => width,
+                    _ => unreachable!(),
+                };
+
+                Some(format!("f{}", width))
+            } else if opcode == wk.OpTypeVector {
+                let (elem_ty, elem_count) = match ctor_args[..] {
+                    [
+                        TypeCtorArg::Type(elem_ty),
+                        TypeCtorArg::SpvImm(spv::Imm::Short(_, elem_count)),
+                    ] => (elem_ty, elem_count),
+                    _ => unreachable!(),
+                };
+
+                Some(format!("{}x{}", elem_ty.print(printer), elem_count))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_join_space(
-                ctor.name(),
-                spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                    TypeCtorArg::Type(ty) => spv::print::PrintOperand::IdLike(ty.print(printer)),
-                    TypeCtorArg::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
+            def: if let Some(def) = compact_def {
+                def
+            } else {
+                printer.pretty_join_space(
+                    ctor.name(),
+                    spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                        TypeCtorArg::Type(ty) => {
+                            spv::print::PrintOperand::IdLike(ty.print(printer))
+                        }
+                        TypeCtorArg::Const(ct) => {
+                            spv::print::PrintOperand::IdLike(ct.print(printer))
+                        }
 
-                    TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                })),
-            ),
+                        TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                    })),
+                )
+            },
         }
     }
 }
@@ -1112,20 +1197,119 @@ impl Print for ConstDef {
             ctor_args,
         } = self;
 
+        let wk = &spv::spec::Spec::get().well_known;
+
+        let compact_def = if let &ConstCtor::SpvInst(opcode) = ctor {
+            if opcode == wk.OpConstantFalse {
+                Some("false".to_string())
+            } else if opcode == wk.OpConstantTrue {
+                Some("true".to_string())
+            } else if opcode == wk.OpConstant {
+                // HACK(eddyb) it's simpler to only handle a limited subset of
+                // integer/float bit-widths, for now.
+                let raw_bits = match ctor_args[..] {
+                    [ConstCtorArg::SpvImm(spv::Imm::Short(_, x))] => Some(u64::from(x)),
+                    [
+                        ConstCtorArg::SpvImm(spv::Imm::LongStart(_, lo)),
+                        ConstCtorArg::SpvImm(spv::Imm::LongCont(_, hi)),
+                    ] => Some(u64::from(lo) | (u64::from(hi) << 32)),
+                    _ => None,
+                };
+
+                let ty_def = &printer.cx[*ty];
+                if let (Some(raw_bits), &TypeCtor::SpvInst(ty_opcode)) = (raw_bits, &ty_def.ctor) {
+                    if ty_opcode == wk.OpTypeInt {
+                        let (width, signed) = match ty_def.ctor_args[..] {
+                            [
+                                TypeCtorArg::SpvImm(spv::Imm::Short(_, width)),
+                                TypeCtorArg::SpvImm(spv::Imm::Short(_, signedness)),
+                            ] => (width, signedness != 0),
+                            _ => unreachable!(),
+                        };
+
+                        if width <= 64 {
+                            Some(if signed {
+                                let sext_raw_bits =
+                                    (raw_bits as u128 as i128) << (128 - width) >> (128 - width);
+                                format!("{}s{}", sext_raw_bits, width)
+                            } else {
+                                format!("{}u{}", raw_bits, width)
+                            })
+                        } else {
+                            None
+                        }
+                    } else if ty_opcode == wk.OpTypeFloat {
+                        let width = match ty_def.ctor_args[..] {
+                            [TypeCtorArg::SpvImm(spv::Imm::Short(_, width))] => width,
+                            _ => unreachable!(),
+                        };
+
+                        /// Check that parsing the result of printing produces
+                        /// the original bits of the floating-point value, and
+                        /// only return `Some` if that is the case.
+                        fn bitwise_roundtrip_float_print<
+                            BITS: Copy + PartialEq,
+                            FLOAT: std::fmt::Debug + std::str::FromStr,
+                        >(
+                            bits: BITS,
+                            float_from_bits: impl FnOnce(BITS) -> FLOAT,
+                            float_to_bits: impl FnOnce(FLOAT) -> BITS,
+                        ) -> Option<String> {
+                            let float = float_from_bits(bits);
+                            Some(format!("{:?}", float)).filter(|s| {
+                                s.parse::<FLOAT>()
+                                    .map(float_to_bits)
+                                    .map_or(false, |roundtrip_bits| roundtrip_bits == bits)
+                            })
+                        }
+
+                        let printed_value = match width {
+                            32 => bitwise_roundtrip_float_print(
+                                raw_bits as u32,
+                                f32::from_bits,
+                                f32::to_bits,
+                            ),
+                            64 => bitwise_roundtrip_float_print(
+                                raw_bits,
+                                f64::from_bits,
+                                f64::to_bits,
+                            ),
+                            _ => None,
+                        };
+                        printed_value.map(|s| format!("{}f{}", s, width))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_join_space(
-                &match ctor {
-                    ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
-                    ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
-                },
-                spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                    ConstCtorArg::Const(ct) => spv::print::PrintOperand::IdLike(ct.print(printer)),
+            def: if let Some(def) = compact_def {
+                def
+            } else {
+                printer.pretty_join_space(
+                    &match ctor {
+                        ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
+                        ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
+                    },
+                    spv::print::operands(ctor_args.iter().map(|&arg| match arg {
+                        ConstCtorArg::Const(ct) => {
+                            spv::print::PrintOperand::IdLike(ct.print(printer))
+                        }
 
-                    ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                }))
-                .chain([format!(": {}", ty.print(printer))]),
-            ),
+                        ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
+                    }))
+                    .chain([format!(": {}", ty.print(printer))]),
+                )
+            },
         }
     }
 }

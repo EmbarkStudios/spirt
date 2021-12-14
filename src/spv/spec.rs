@@ -74,12 +74,17 @@ def_well_known! {
         OpLine,
         OpNoLine,
 
+        OpTypeBool,
         OpTypeInt,
         OpTypeFloat,
+        OpTypeVector,
         OpTypeForwardPointer,
         OpTypePointer,
         OpTypeFunction,
 
+        OpConstantFalse,
+        OpConstantTrue,
+        OpConstant,
         OpUndef,
 
         OpVariable,
