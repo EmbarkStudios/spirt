@@ -986,18 +986,19 @@ impl Print for ExportKey {
                 params,
                 interface_global_vars,
             } => {
+                let wk = &spv::spec::Spec::get().well_known;
+
                 printer.pretty_join_comma_sep(
                     "(",
                     [printer.pretty_join_space(
                         "OpEntryPoint",
-                        spv::print::operands(
-                            params
-                                .iter()
-                                .map(|&imm| spv::print::PrintOperand::Imm(imm))
-                                .chain(interface_global_vars.iter().map(|&gv| {
-                                    spv::print::PrintOperand::IdLike(gv.print(printer))
-                                })),
-                        ),
+                        spv::print::inst_operands(
+                            wk.OpEntryPoint,
+                            params.iter().copied(),
+                            iter::once(/* dummy target ID */ String::new())
+                                .chain(interface_global_vars.iter().map(|&gv| gv.print(printer))),
+                        )
+                        .skip(/* dummy target ID */ 1),
                     )],
                     "",
                     ")",
@@ -1078,7 +1079,12 @@ impl Print for Attr {
         match self {
             Attr::SpvAnnotation { opcode, params } => printer.pretty_join_space(
                 opcode.name(),
-                spv::print::operands(params.iter().map(|&imm| spv::print::PrintOperand::Imm(imm))),
+                spv::print::inst_operands(
+                    *opcode,
+                    params.iter().copied(),
+                    [/* dummy target ID */ String::new()],
+                )
+                .skip(/* dummy target ID */ 1),
             ),
             &Attr::SpvDebugLine {
                 file_path,
@@ -1101,11 +1107,7 @@ impl Print for Attr {
                     format!("// at {:?}:{}:{}", file_path, line, col)
                 }
             }
-            &Attr::SpvBitflagsOperand(imm) => {
-                spv::print::operands([imm].iter().map(|&imm| spv::print::PrintOperand::Imm(imm)))
-                    .collect::<SmallVec<[_; 1]>>()
-                    .join(" ")
-            }
+            &Attr::SpvBitflagsOperand(imm) => spv::print::operand_from_imms([imm]),
         }
     }
 }
@@ -1169,19 +1171,25 @@ impl Print for TypeDef {
             def: if let Some(def) = compact_def {
                 def
             } else {
-                printer.pretty_join_space(
-                    ctor.name(),
-                    spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                        TypeCtorArg::Type(ty) => {
-                            spv::print::PrintOperand::IdLike(ty.print(printer))
-                        }
-                        TypeCtorArg::Const(ct) => {
-                            spv::print::PrintOperand::IdLike(ct.print(printer))
-                        }
+                match *ctor {
+                    TypeCtor::SpvInst(opcode) => printer.pretty_join_space(
+                        opcode.name(),
+                        spv::print::inst_operands(
+                            opcode,
+                            ctor_args.iter().filter_map(|&arg| match arg {
+                                TypeCtorArg::Type(_) | TypeCtorArg::Const(_) => None,
 
-                        TypeCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                    })),
-                )
+                                TypeCtorArg::SpvImm(imm) => Some(imm),
+                            }),
+                            ctor_args.iter().filter_map(|&arg| match arg {
+                                TypeCtorArg::Type(ty) => Some(ty.print(printer)),
+                                TypeCtorArg::Const(ct) => Some(ct.print(printer)),
+
+                                TypeCtorArg::SpvImm(_) => None,
+                            }),
+                        ),
+                    ),
+                }
             },
         }
     }
@@ -1295,20 +1303,26 @@ impl Print for ConstDef {
             def: if let Some(def) = compact_def {
                 def
             } else {
-                printer.pretty_join_space(
-                    &match ctor {
-                        ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
-                        ConstCtor::SpvInst(opcode) => opcode.name().to_string(),
-                    },
-                    spv::print::operands(ctor_args.iter().map(|&arg| match arg {
-                        ConstCtorArg::Const(ct) => {
-                            spv::print::PrintOperand::IdLike(ct.print(printer))
-                        }
+                match *ctor {
+                    ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
+                    ConstCtor::SpvInst(opcode) => printer.pretty_join_space(
+                        opcode.name(),
+                        spv::print::inst_operands(
+                            opcode,
+                            ctor_args.iter().filter_map(|&arg| match arg {
+                                ConstCtorArg::Const(_) => None,
 
-                        ConstCtorArg::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-                    }))
-                    .chain([format!(": {}", ty.print(printer))]),
-                )
+                                ConstCtorArg::SpvImm(imm) => Some(imm),
+                            }),
+                            ctor_args.iter().filter_map(|&arg| match arg {
+                                ConstCtorArg::Const(ct) => Some(ct.print(printer)),
+
+                                ConstCtorArg::SpvImm(_) => None,
+                            }),
+                        )
+                        .chain([format!(": {}", ty.print(printer))]),
+                    ),
+                }
             },
         }
     }
@@ -1519,23 +1533,35 @@ impl Print for DataInstDef {
 
         let attrs = attrs.print(printer);
 
-        let inputs = spv::print::operands(inputs.iter().map(|input| match *input {
-            DataInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
-
-            DataInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-        }));
         let output_type = output_type.map(|ty| ty.print(printer));
 
         let def = match *kind {
             DataInstKind::FuncCall(func) => printer.pretty_join_comma_sep(
                 &format!("call {}(", func.print(printer)),
-                inputs,
+                inputs.iter().map(|input| match *input {
+                    DataInstInput::Value(v) => v.print(printer),
+
+                    DataInstInput::SpvImm(_) => unreachable!(),
+                }),
                 ",",
                 &output_type.map_or(")".to_string(), |ty| format!(") : {}", ty)),
             ),
             DataInstKind::SpvInst(opcode) => printer.pretty_join_space(
                 opcode.name(),
-                inputs.chain(output_type.map(|ty| format!(": {}", ty))),
+                spv::print::inst_operands(
+                    opcode,
+                    inputs.iter().filter_map(|input| match *input {
+                        DataInstInput::Value(_) => None,
+
+                        DataInstInput::SpvImm(imm) => Some(imm),
+                    }),
+                    inputs.iter().filter_map(|input| match *input {
+                        DataInstInput::Value(v) => Some(v.print(printer)),
+
+                        DataInstInput::SpvImm(_) => None,
+                    }),
+                )
+                .chain(output_type.map(|ty| format!(": {}", ty))),
             ),
             DataInstKind::SpvExtInst { ext_set, inst } => {
                 // FIXME(eddyb) should this be rendered more compactly?
@@ -1544,7 +1570,14 @@ impl Print for DataInstDef {
                         "OpExtInst (OpExtInstImport {:?}) {}",
                         &printer.cx[ext_set], inst
                     ),
-                    inputs.chain(output_type.map(|ty| format!(": {}", ty))),
+                    inputs
+                        .iter()
+                        .map(|input| match *input {
+                            DataInstInput::Value(v) => v.print(printer),
+
+                            DataInstInput::SpvImm(_) => unreachable!(),
+                        })
+                        .chain(output_type.map(|ty| format!(": {}", ty))),
                 )
             }
         };
@@ -1565,29 +1598,37 @@ impl Print for ControlInst {
 
         let attrs = attrs.print(printer);
 
-        let def = printer.pretty_join_space(
-            match kind {
-                ControlInstKind::SpvInst(opcode) => opcode.name(),
-            },
-            spv::print::operands(inputs.iter().map(|input| match *input {
-                ControlInstInput::Value(v) => spv::print::PrintOperand::IdLike(v.print(printer)),
+        let def = match *kind {
+            ControlInstKind::SpvInst(opcode) => printer.pretty_join_space(
+                opcode.name(),
+                spv::print::inst_operands(
+                    opcode,
+                    inputs.iter().filter_map(|input| match *input {
+                        ControlInstInput::Value(_) | ControlInstInput::TargetBlock(_) => None,
 
-                ControlInstInput::TargetBlock(block) => {
-                    let block_header = Use::Block(block).print(printer);
-                    spv::print::PrintOperand::IdLike(match target_block_inputs.get(&block) {
-                        Some(block_inputs) => printer.pretty_join_comma_sep(
-                            &(block_header + "("),
-                            block_inputs.iter().map(|v| v.print(printer)),
-                            ",",
-                            ")",
-                        ),
-                        None => block_header,
-                    })
-                }
+                        ControlInstInput::SpvImm(imm) => Some(imm),
+                    }),
+                    inputs.iter().filter_map(|input| match *input {
+                        ControlInstInput::Value(v) => Some(v.print(printer)),
 
-                ControlInstInput::SpvImm(imm) => spv::print::PrintOperand::Imm(imm),
-            })),
-        );
+                        ControlInstInput::TargetBlock(block) => {
+                            let block_header = Use::Block(block).print(printer);
+                            Some(match target_block_inputs.get(&block) {
+                                Some(block_inputs) => printer.pretty_join_comma_sep(
+                                    &(block_header + "("),
+                                    block_inputs.iter().map(|v| v.print(printer)),
+                                    ",",
+                                    ")",
+                                ),
+                                None => block_header,
+                            })
+                        }
+
+                        ControlInstInput::SpvImm(_) => None,
+                    }),
+                ),
+            ),
+        };
 
         attrs + &def
     }

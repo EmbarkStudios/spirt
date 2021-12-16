@@ -1,5 +1,3 @@
-use spirt::spv::print::PrintOperand;
-
 fn main() -> std::io::Result<()> {
     match &std::env::args().collect::<Vec<_>>()[..] {
         [_, in_file, out_file] => {
@@ -26,10 +24,17 @@ fn main() -> std::io::Result<()> {
                 }
 
                 eprint!("{}", inst.opcode.name());
-                spirt::spv::print::operands(inst.operands.iter().map(|operand| match *operand {
-                    spirt::spv::Operand::Imm(imm) => PrintOperand::Imm(imm),
-                    spirt::spv::Operand::Id(_, id) => PrintOperand::IdLike(format!("%{}", id)),
-                }))
+                spirt::spv::print::inst_operands(
+                    inst.opcode,
+                    inst.operands.iter().filter_map(|operand| match *operand {
+                        spirt::spv::Operand::Imm(imm) => Some(imm),
+                        spirt::spv::Operand::Id(..) => None,
+                    }),
+                    inst.operands.iter().filter_map(|operand| match *operand {
+                        spirt::spv::Operand::Imm(_) => None,
+                        spirt::spv::Operand::Id(_, id) => Some(format!("%{}", id)),
+                    }),
+                )
                 .for_each(|operand| eprint!(" {}", operand));
 
                 eprintln!();
