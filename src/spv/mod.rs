@@ -51,17 +51,9 @@ pub struct Inst {
     pub result_id: Option<Id>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub operands: SmallVec<[Operand; 2]>,
-}
-
-#[derive(PartialEq)]
-pub enum Operand {
-    // FIXME(eddyb) this is a bit wasteful because we don't have to fit the
-    // `OperandKind` of `Imm` in between the discriminant and the `u32`, but
-    // hopefully `Operand` isn't that size-sensitive.
-    Imm(Imm),
-
-    Id(spec::OperandKind, Id),
+    pub imm_operands: SmallVec<[Imm; 2]>,
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    pub id_operands: SmallVec<[Id; 4]>,
 }
 
 // FIXME(eddyb) consider replacing with a `struct` e.g.:
@@ -80,15 +72,14 @@ pub type Id = NonZeroU32;
 /// Given a single `LiteralString` (as one `Imm::Short` or a `Imm::LongStart`
 /// followed by some number of `Imm::LongCont` - will panic otherwise), returns a
 /// Rust `String` if the literal is valid UTF-8, or the validation error otherwise.
-fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error> {
+fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
     let wk = &spec::Spec::get().well_known;
 
-    let mut words = match *operands {
-        [Operand::Imm(Imm::Short(kind, first_word))]
-        | [Operand::Imm(Imm::LongStart(kind, first_word)), ..] => {
+    let mut words = match *imms {
+        [Imm::Short(kind, first_word)] | [Imm::LongStart(kind, first_word), ..] => {
             assert!(kind == wk.LiteralString);
-            iter::once(first_word).chain(operands[1..].iter().map(|operand| match *operand {
-                Operand::Imm(Imm::LongCont(kind, word)) => {
+            iter::once(first_word).chain(imms[1..].iter().map(|&imm| match imm {
+                Imm::LongCont(kind, word) => {
                     assert!(kind == wk.LiteralString);
                     word
                 }
@@ -98,7 +89,7 @@ fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error>
         _ => unreachable!(),
     };
 
-    let mut bytes = Vec::with_capacity(operands.len() * 4);
+    let mut bytes = Vec::with_capacity(imms.len() * 4);
     while let Some(word) = words.next() {
         for byte in word.to_le_bytes() {
             if byte == 0 {
@@ -112,7 +103,7 @@ fn extract_literal_string(operands: &[Operand]) -> Result<String, FromUtf8Error>
 }
 
 // FIXME(eddyb) this shouldn't just panic when `s.contains('\0')`.
-fn encode_literal_string(s: &str) -> impl Iterator<Item = Operand> + '_ {
+fn encode_literal_string(s: &str) -> impl Iterator<Item = Imm> + '_ {
     let wk = &spec::Spec::get().well_known;
 
     let bytes = s.as_bytes();
@@ -135,9 +126,9 @@ fn encode_literal_string(s: &str) -> impl Iterator<Item = Operand> + '_ {
         .map(move |(i, word)| {
             let kind = wk.LiteralString;
             match (i, total_words) {
-                (0, 1) => Operand::Imm(Imm::Short(kind, word)),
-                (0, _) => Operand::Imm(Imm::LongStart(kind, word)),
-                (_, _) => Operand::Imm(Imm::LongCont(kind, word)),
+                (0, 1) => Imm::Short(kind, word),
+                (0, _) => Imm::LongStart(kind, word),
+                (_, _) => Imm::LongCont(kind, word),
             }
         })
 }

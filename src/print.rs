@@ -1,10 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, BlockDef, BlockInput, Const, ConstCtor,
-    ConstCtorArg, ConstDef, Context, ControlInst, ControlInstInput, ControlInstKind, DataInst,
-    DataInstDef, DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ConstDef, Context, ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
+    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -400,7 +400,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                     // FIXME(eddyb) remove the duplication between
                                     // here and `TypeDef`'s `Print` impl.
                                     let has_compact_print = match ty_def.ctor {
-                                        TypeCtor::SpvInst(opcode) => [
+                                        TypeCtor::SpvInst { opcode, .. } => [
                                             wk.OpTypeBool,
                                             wk.OpTypeInt,
                                             wk.OpTypeFloat,
@@ -409,11 +409,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                         .contains(&opcode),
                                     };
 
-                                    has_compact_print
-                                        || ty_def
-                                            .ctor_args
-                                            .iter()
-                                            .all(|arg| matches!(arg, TypeCtorArg::SpvImm(_)))
+                                    has_compact_print || ty_def.ctor_args.is_empty()
                                 }
                                 InternedNode::Const(ct) => {
                                     let ct_def = &cx[ct];
@@ -421,18 +417,14 @@ impl<'a, 'b> Printer<'a, 'b> {
                                     // FIXME(eddyb) remove the duplication between
                                     // here and `ConstDef`'s `Print` impl.
                                     let has_compact_print = match ct_def.ctor {
-                                        ConstCtor::SpvInst(opcode) => {
+                                        ConstCtor::SpvInst { opcode, .. } => {
                                             [wk.OpConstantFalse, wk.OpConstantTrue, wk.OpConstant]
                                                 .contains(&opcode)
                                         }
                                         _ => false,
                                     };
 
-                                    has_compact_print
-                                        || ct_def
-                                            .ctor_args
-                                            .iter()
-                                            .all(|arg| matches!(arg, ConstCtorArg::SpvImm(_)))
+                                    has_compact_print || ct_def.ctor_args.is_empty()
                                 }
                             }
                     }
@@ -983,7 +975,7 @@ impl Print for ExportKey {
             &Self::LinkName(name) => format!("{:?}", &printer.cx[name]),
 
             Self::SpvEntryPoint {
-                params,
+                imms,
                 interface_global_vars,
             } => {
                 let wk = &spv::spec::Spec::get().well_known;
@@ -994,7 +986,7 @@ impl Print for ExportKey {
                         "OpEntryPoint",
                         spv::print::inst_operands(
                             wk.OpEntryPoint,
-                            params.iter().copied(),
+                            imms.iter().copied(),
                             iter::once(/* dummy target ID */ String::new())
                                 .chain(interface_global_vars.iter().map(|&gv| gv.print(printer))),
                         )
@@ -1077,11 +1069,11 @@ impl Print for Attr {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         match self {
-            Attr::SpvAnnotation { opcode, params } => printer.pretty_join_space(
+            Attr::SpvAnnotation { opcode, imms } => printer.pretty_join_space(
                 opcode.name(),
                 spv::print::inst_operands(
                     *opcode,
-                    params.iter().copied(),
+                    imms.iter().copied(),
                     [/* dummy target ID */ String::new()],
                 )
                 .skip(/* dummy target ID */ 1),
@@ -1125,15 +1117,14 @@ impl Print for TypeDef {
 
         // FIXME(eddyb) should this be done by lowering SPIR-V types to SPIR-T?
         #[allow(irrefutable_let_patterns)]
-        let compact_def = if let &TypeCtor::SpvInst(opcode) = ctor {
+        let compact_def = if let &TypeCtor::SpvInst { opcode, ref imms } = ctor {
             if opcode == wk.OpTypeBool {
                 Some("bool".to_string())
             } else if opcode == wk.OpTypeInt {
-                let (width, signed) = match ctor_args[..] {
-                    [
-                        TypeCtorArg::SpvImm(spv::Imm::Short(_, width)),
-                        TypeCtorArg::SpvImm(spv::Imm::Short(_, signedness)),
-                    ] => (width, signedness != 0),
+                let (width, signed) = match imms[..] {
+                    [spv::Imm::Short(_, width), spv::Imm::Short(_, signedness)] => {
+                        (width, signedness != 0)
+                    }
                     _ => unreachable!(),
                 };
 
@@ -1143,18 +1134,17 @@ impl Print for TypeDef {
                     format!("u{}", width)
                 })
             } else if opcode == wk.OpTypeFloat {
-                let width = match ctor_args[..] {
-                    [TypeCtorArg::SpvImm(spv::Imm::Short(_, width))] => width,
+                let width = match imms[..] {
+                    [spv::Imm::Short(_, width)] => width,
                     _ => unreachable!(),
                 };
 
                 Some(format!("f{}", width))
             } else if opcode == wk.OpTypeVector {
-                let (elem_ty, elem_count) = match ctor_args[..] {
-                    [
-                        TypeCtorArg::Type(elem_ty),
-                        TypeCtorArg::SpvImm(spv::Imm::Short(_, elem_count)),
-                    ] => (elem_ty, elem_count),
+                let (elem_ty, elem_count) = match (&imms[..], &ctor_args[..]) {
+                    (&[spv::Imm::Short(_, elem_count)], &[TypeCtorArg::Type(elem_ty)]) => {
+                        (elem_ty, elem_count)
+                    }
                     _ => unreachable!(),
                 };
 
@@ -1172,20 +1162,14 @@ impl Print for TypeDef {
                 def
             } else {
                 match *ctor {
-                    TypeCtor::SpvInst(opcode) => printer.pretty_join_space(
+                    TypeCtor::SpvInst { opcode, ref imms } => printer.pretty_join_space(
                         opcode.name(),
                         spv::print::inst_operands(
                             opcode,
-                            ctor_args.iter().filter_map(|&arg| match arg {
-                                TypeCtorArg::Type(_) | TypeCtorArg::Const(_) => None,
-
-                                TypeCtorArg::SpvImm(imm) => Some(imm),
-                            }),
-                            ctor_args.iter().filter_map(|&arg| match arg {
-                                TypeCtorArg::Type(ty) => Some(ty.print(printer)),
-                                TypeCtorArg::Const(ct) => Some(ct.print(printer)),
-
-                                TypeCtorArg::SpvImm(_) => None,
+                            imms.iter().copied(),
+                            ctor_args.iter().map(|&arg| match arg {
+                                TypeCtorArg::Type(ty) => ty.print(printer),
+                                TypeCtorArg::Const(ct) => ct.print(printer),
                             }),
                         ),
                     ),
@@ -1207,7 +1191,7 @@ impl Print for ConstDef {
 
         let wk = &spv::spec::Spec::get().well_known;
 
-        let compact_def = if let &ConstCtor::SpvInst(opcode) = ctor {
+        let compact_def = if let &ConstCtor::SpvInst { opcode, ref imms } = ctor {
             if opcode == wk.OpConstantFalse {
                 Some("false".to_string())
             } else if opcode == wk.OpConstantTrue {
@@ -1215,23 +1199,27 @@ impl Print for ConstDef {
             } else if opcode == wk.OpConstant {
                 // HACK(eddyb) it's simpler to only handle a limited subset of
                 // integer/float bit-widths, for now.
-                let raw_bits = match ctor_args[..] {
-                    [ConstCtorArg::SpvImm(spv::Imm::Short(_, x))] => Some(u64::from(x)),
-                    [
-                        ConstCtorArg::SpvImm(spv::Imm::LongStart(_, lo)),
-                        ConstCtorArg::SpvImm(spv::Imm::LongCont(_, hi)),
-                    ] => Some(u64::from(lo) | (u64::from(hi) << 32)),
+                let raw_bits = match imms[..] {
+                    [spv::Imm::Short(_, x)] => Some(u64::from(x)),
+                    [spv::Imm::LongStart(_, lo), spv::Imm::LongCont(_, hi)] => {
+                        Some(u64::from(lo) | (u64::from(hi) << 32))
+                    }
                     _ => None,
                 };
 
-                let ty_def = &printer.cx[*ty];
-                if let (Some(raw_bits), &TypeCtor::SpvInst(ty_opcode)) = (raw_bits, &ty_def.ctor) {
+                if let (
+                    Some(raw_bits),
+                    &TypeCtor::SpvInst {
+                        opcode: ty_opcode,
+                        imms: ref ty_imms,
+                    },
+                ) = (raw_bits, &printer.cx[*ty].ctor)
+                {
                     if ty_opcode == wk.OpTypeInt {
-                        let (width, signed) = match ty_def.ctor_args[..] {
-                            [
-                                TypeCtorArg::SpvImm(spv::Imm::Short(_, width)),
-                                TypeCtorArg::SpvImm(spv::Imm::Short(_, signedness)),
-                            ] => (width, signedness != 0),
+                        let (width, signed) = match ty_imms[..] {
+                            [spv::Imm::Short(_, width), spv::Imm::Short(_, signedness)] => {
+                                (width, signedness != 0)
+                            }
                             _ => unreachable!(),
                         };
 
@@ -1247,8 +1235,8 @@ impl Print for ConstDef {
                             None
                         }
                     } else if ty_opcode == wk.OpTypeFloat {
-                        let width = match ty_def.ctor_args[..] {
-                            [TypeCtorArg::SpvImm(spv::Imm::Short(_, width))] => width,
+                        let width = match ty_imms[..] {
+                            [spv::Imm::Short(_, width)] => width,
                             _ => unreachable!(),
                         };
 
@@ -1305,20 +1293,12 @@ impl Print for ConstDef {
             } else {
                 match *ctor {
                     ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
-                    ConstCtor::SpvInst(opcode) => printer.pretty_join_space(
+                    ConstCtor::SpvInst { opcode, ref imms } => printer.pretty_join_space(
                         opcode.name(),
                         spv::print::inst_operands(
                             opcode,
-                            ctor_args.iter().filter_map(|&arg| match arg {
-                                ConstCtorArg::Const(_) => None,
-
-                                ConstCtorArg::SpvImm(imm) => Some(imm),
-                            }),
-                            ctor_args.iter().filter_map(|&arg| match arg {
-                                ConstCtorArg::Const(ct) => Some(ct.print(printer)),
-
-                                ConstCtorArg::SpvImm(_) => None,
-                            }),
+                            imms.iter().copied(),
+                            ctor_args.iter().map(|&ct| ct.print(printer)),
                         )
                         .chain([format!(": {}", ty.print(printer))]),
                     ),
@@ -1354,13 +1334,14 @@ impl Print for GlobalVarDecl {
             // ideally the `GlobalVarDecl` would hold that type itself.
             let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
 
-            if type_of_ptr_to_def.ctor == TypeCtor::SpvInst(wk.OpTypePointer) {
-                match type_of_ptr_to_def.ctor_args[1] {
-                    TypeCtorArg::Type(ty) => ty.print(printer),
-                    _ => unreachable!(),
+            match type_of_ptr_to_def.ctor {
+                TypeCtor::SpvInst { opcode, .. } if opcode == wk.OpTypePointer => {
+                    match type_of_ptr_to_def.ctor_args[..] {
+                        [TypeCtorArg::Type(ty)] => ty.print(printer),
+                        _ => unreachable!(),
+                    }
                 }
-            } else {
-                format!("pointee type of {}", type_of_ptr_to.print(printer))
+                _ => format!("pointee type of {}", type_of_ptr_to.print(printer)),
             }
         };
         let addr_space = match *addr_space {
@@ -1538,28 +1519,16 @@ impl Print for DataInstDef {
         let def = match *kind {
             DataInstKind::FuncCall(func) => printer.pretty_join_comma_sep(
                 &format!("call {}(", func.print(printer)),
-                inputs.iter().map(|input| match *input {
-                    DataInstInput::Value(v) => v.print(printer),
-
-                    DataInstInput::SpvImm(_) => unreachable!(),
-                }),
+                inputs.iter().map(|v| v.print(printer)),
                 ",",
                 &output_type.map_or(")".to_string(), |ty| format!(") : {}", ty)),
             ),
-            DataInstKind::SpvInst(opcode) => printer.pretty_join_space(
+            DataInstKind::SpvInst { opcode, ref imms } => printer.pretty_join_space(
                 opcode.name(),
                 spv::print::inst_operands(
                     opcode,
-                    inputs.iter().filter_map(|input| match *input {
-                        DataInstInput::Value(_) => None,
-
-                        DataInstInput::SpvImm(imm) => Some(imm),
-                    }),
-                    inputs.iter().filter_map(|input| match *input {
-                        DataInstInput::Value(v) => Some(v.print(printer)),
-
-                        DataInstInput::SpvImm(_) => None,
-                    }),
+                    imms.iter().copied(),
+                    inputs.iter().map(|v| v.print(printer)),
                 )
                 .chain(output_type.map(|ty| format!(": {}", ty))),
             ),
@@ -1572,11 +1541,7 @@ impl Print for DataInstDef {
                     ),
                     inputs
                         .iter()
-                        .map(|input| match *input {
-                            DataInstInput::Value(v) => v.print(printer),
-
-                            DataInstInput::SpvImm(_) => unreachable!(),
-                        })
+                        .map(|v| v.print(printer))
                         .chain(output_type.map(|ty| format!(": {}", ty))),
                 )
             }
@@ -1599,21 +1564,17 @@ impl Print for ControlInst {
         let attrs = attrs.print(printer);
 
         let def = match *kind {
-            ControlInstKind::SpvInst(opcode) => printer.pretty_join_space(
+            ControlInstKind::SpvInst { opcode, ref imms } => printer.pretty_join_space(
                 opcode.name(),
                 spv::print::inst_operands(
                     opcode,
-                    inputs.iter().filter_map(|input| match *input {
-                        ControlInstInput::Value(_) | ControlInstInput::TargetBlock(_) => None,
-
-                        ControlInstInput::SpvImm(imm) => Some(imm),
-                    }),
-                    inputs.iter().filter_map(|input| match *input {
-                        ControlInstInput::Value(v) => Some(v.print(printer)),
+                    imms.iter().copied(),
+                    inputs.iter().map(|input| match *input {
+                        ControlInstInput::Value(v) => v.print(printer),
 
                         ControlInstInput::TargetBlock(block) => {
                             let block_header = Use::Block(block).print(printer);
-                            Some(match target_block_inputs.get(&block) {
+                            match target_block_inputs.get(&block) {
                                 Some(block_inputs) => printer.pretty_join_comma_sep(
                                     &(block_header + "("),
                                     block_inputs.iter().map(|v| v.print(printer)),
@@ -1621,10 +1582,8 @@ impl Print for ControlInst {
                                     ")",
                                 ),
                                 None => block_header,
-                            })
+                            }
                         }
-
-                        ControlInstInput::SpvImm(_) => None,
                     }),
                 ),
             ),

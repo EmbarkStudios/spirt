@@ -23,35 +23,13 @@ impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrint
     }
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> fmt::Result {
-        // FIXME(eddyb) maybe define this on `spec::Enumerant` and use it
-        // in `spv::read` as well?
-        enum EnumParamOperandKind {
-            Req(spec::OperandKind),
-            Opt(spec::OperandKind),
-        }
-        let all_params = enumerant
-            .req_params
-            .iter()
-            .copied()
-            .map(EnumParamOperandKind::Req)
-            .chain(
-                enumerant
-                    .rest_params
-                    .iter()
-                    .flat_map(|&kind| iter::repeat_with(move || EnumParamOperandKind::Opt(kind))),
-            );
-
         let mut first = true;
-        for kind in all_params {
-            let kind = match kind {
-                EnumParamOperandKind::Req(kind) => kind,
-                EnumParamOperandKind::Opt(kind) => {
-                    if self.is_exhausted() {
-                        break;
-                    }
-                    kind
+        for (mode, kind) in enumerant.all_params() {
+            if mode == spec::OperandMode::Optional {
+                if self.is_exhausted() {
+                    break;
                 }
-            };
+            }
 
             if first {
                 write!(self.out, "(")?;
@@ -200,41 +178,12 @@ impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrint
     }
 
     fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = String> {
-        let def = opcode.def();
-
-        // FIXME(eddyb) maybe define this on `spec::InstructionDef` and use it
-        // in `spv::read` as well?
-        enum InstOperandKind {
-            Req(spec::OperandKind),
-            Opt(spec::OperandKind),
-        }
-        let all_operands = def
-            .req_operands
-            .iter()
-            .copied()
-            .map(InstOperandKind::Req)
-            .chain(def.opt_operands.iter().copied().map(InstOperandKind::Opt))
-            .chain(def.rest_operands.iter().flat_map(|rest_unit| {
-                let (opt_a, req_b) = match *rest_unit {
-                    spec::RestOperandsUnit::One(kind) => (kind, None),
-                    spec::RestOperandsUnit::Two([a_kind, b_kind]) => (a_kind, Some(b_kind)),
-                };
-                iter::repeat_with(move || {
-                    iter::once(InstOperandKind::Opt(opt_a)).chain(req_b.map(InstOperandKind::Req))
-                })
-                .flatten()
-            }));
-
-        all_operands.map_while(move |kind| {
-            let kind = match kind {
-                InstOperandKind::Req(kind) => kind,
-                InstOperandKind::Opt(kind) => {
-                    if self.is_exhausted() {
-                        return None;
-                    }
-                    kind
+        opcode.def().all_operands().map_while(move |(mode, kind)| {
+            if mode == spec::OperandMode::Optional {
+                if self.is_exhausted() {
+                    return None;
                 }
-            };
+            }
             self.operand(kind).unwrap();
             Some(mem::take(&mut self.out))
         })

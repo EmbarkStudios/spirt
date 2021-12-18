@@ -113,10 +113,6 @@ def_well_known! {
         LiteralInteger,
         LiteralExtInstInteger,
         LiteralString,
-
-        IdRef,
-        IdResultType,
-        IdResult,
     ],
     // FIXME(eddyb) find a way to namespace these to avoid conflicts.
     storage_class: u32 = [
@@ -201,6 +197,45 @@ pub enum InstructionCategory {
 pub enum RestOperandsUnit {
     One(OperandKind),
     Two([OperandKind; 2]),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum OperandMode {
+    Required,
+    Optional,
+}
+
+impl InstructionDef {
+    /// Return a (potentially infinite) iterator of `OperandKind`s, along with
+    /// the `OperandMode` indicating whether an operand is expected (`Required`),
+    /// or that an operand's absence signals the end of operands (`Optional`),
+    /// which is also the exit signal for the "rest operands" infinite iterators.
+    pub fn all_operands(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
+        self.req_operands
+            .iter()
+            .copied()
+            .map(|kind| (OperandMode::Required, kind))
+            .chain(
+                self.opt_operands
+                    .iter()
+                    .copied()
+                    .map(|kind| (OperandMode::Optional, kind)),
+            )
+            .chain(self.rest_operands.iter().flat_map(|rest_unit| {
+                // If the rest operands come in pairs, only the first operand in
+                // the pair is optional, the second one must be present when the
+                // first one is (i.e. only the pair as a whole is optional).
+                let (opt_a, req_b) = match *rest_unit {
+                    RestOperandsUnit::One(kind) => (kind, None),
+                    RestOperandsUnit::Two([a_kind, b_kind]) => (a_kind, Some(b_kind)),
+                };
+                iter::repeat_with(move || {
+                    iter::once((OperandMode::Optional, opt_a))
+                        .chain(req_b.map(|kind| (OperandMode::Required, kind)))
+                })
+                .flatten()
+            }))
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -295,6 +330,24 @@ impl indexed::FlatIdx for BitIdx {
 pub struct Enumerant {
     pub req_params: ArrayVec<OperandKind, 4>,
     pub rest_params: Option<OperandKind>,
+}
+
+impl Enumerant {
+    /// Return a (potentially infinite) iterator of `OperandKind`s, along with
+    /// the `OperandMode` indicating whether an operand is expected (`Required`),
+    /// or that an operand's absence signals the end of operands (`Optional`),
+    /// which is also the exit signal for the "rest operands" infinite iterators.
+    pub fn all_params(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
+        self.req_params
+            .iter()
+            .copied()
+            .map(|kind| (OperandMode::Required, kind))
+            .chain(
+                self.rest_params
+                    .into_iter()
+                    .flat_map(|kind| iter::repeat_with(move || (OperandMode::Optional, kind))),
+            )
+    }
 }
 
 pub enum LiteralSize {

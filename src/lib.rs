@@ -81,7 +81,7 @@ pub enum ExportKey {
     LinkName(InternedStr),
 
     SpvEntryPoint {
-        params: SmallVec<[spv::Imm; 2]>,
+        imms: SmallVec<[spv::Imm; 2]>,
         // FIXME(eddyb) remove this by recomputing the interface vars.
         interface_global_vars: SmallVec<[GlobalVar; 4]>,
     },
@@ -114,7 +114,7 @@ pub enum Attr {
         opcode: spv::spec::Opcode,
         // FIXME(eddyb) this cannot represent IDs - is that desirable?
         // (for now we don't support `Op{ExecutionMode,Decorate}Id`)
-        params: SmallVec<[spv::Imm; 2]>,
+        imms: SmallVec<[spv::Imm; 2]>,
     },
 
     SpvDebugLine {
@@ -162,13 +162,20 @@ pub struct TypeDef {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TypeCtor {
-    SpvInst(spv::spec::Opcode),
+    SpvInst {
+        opcode: spv::spec::Opcode,
+
+        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+        // FIXME(eddyb) it might be worth investigating the performance implications
+        // of interning "long immediates", compared to the flattened representation.
+        imms: SmallVec<[spv::Imm; 2]>,
+    },
 }
 
 impl TypeCtor {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::SpvInst(opcode) => opcode.name(),
+            Self::SpvInst { opcode, .. } => opcode.name(),
         }
     }
 }
@@ -177,11 +184,6 @@ impl TypeCtor {
 pub enum TypeCtorArg {
     Type(Type),
     Const(Const),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investingating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    SpvImm(spv::Imm),
 }
 
 // FIXME(eddyb) maybe special-case some basic consts like integer literals.
@@ -190,24 +192,21 @@ pub struct ConstDef {
     pub attrs: AttrSet,
     pub ty: Type,
     pub ctor: ConstCtor,
-    pub ctor_args: SmallVec<[ConstCtorArg; 2]>,
+    pub ctor_args: SmallVec<[Const; 2]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum ConstCtor {
     PtrToGlobalVar(GlobalVar),
 
-    SpvInst(spv::spec::Opcode),
-}
+    SpvInst {
+        opcode: spv::spec::Opcode,
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ConstCtorArg {
-    Const(Const),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investingating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    SpvImm(spv::Imm),
+        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+        // FIXME(eddyb) it might be worth investigating the performance implications
+        // of interning "long immediates", compared to the flattened representation.
+        imms: SmallVec<[spv::Imm; 2]>,
+    },
 }
 
 /// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,
@@ -291,9 +290,8 @@ pub struct DataInstDef {
 
     pub output_type: Option<Type>,
 
-    // FIXME(eddyb) maybe split inputs into "params" and "value inputs"?
-    // (would "params" only contain immediates, or also e.g. types?)
-    pub inputs: SmallVec<[DataInstInput; 2]>,
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    pub inputs: SmallVec<[Value; 2]>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -302,19 +300,18 @@ pub enum DataInstKind {
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
 
-    SpvInst(spv::spec::Opcode),
-    SpvExtInst { ext_set: InternedStr, inst: u32 },
-}
+    SpvInst {
+        opcode: spv::spec::Opcode,
 
-#[derive(Copy, Clone)]
-pub enum DataInstInput {
-    Value(Value),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investigating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    // FIXME(eddyb) consider moving this to `Value`.
-    SpvImm(spv::Imm),
+        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+        // FIXME(eddyb) it might be worth investigating the performance implications
+        // of interning "long immediates", compared to the flattened representation.
+        imms: SmallVec<[spv::Imm; 2]>,
+    },
+    SpvExtInst {
+        ext_set: InternedStr,
+        inst: u32,
+    },
 }
 
 pub struct ControlInst {
@@ -332,7 +329,14 @@ pub struct ControlInst {
 
 #[derive(PartialEq, Eq)]
 pub enum ControlInstKind {
-    SpvInst(spv::spec::Opcode),
+    SpvInst {
+        opcode: spv::spec::Opcode,
+
+        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
+        // FIXME(eddyb) it might be worth investigating the performance implications
+        // of interning "long immediates", compared to the flattened representation.
+        imms: SmallVec<[spv::Imm; 2]>,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -340,12 +344,6 @@ pub enum ControlInstInput {
     Value(Value),
 
     TargetBlock(Block),
-
-    // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-    // FIXME(eddyb) it might be worth investigating the performance implications
-    // of interning "long immediates", compared to the flattened representation.
-    // FIXME(eddyb) consider moving this to `Value`.
-    SpvImm(spv::Imm),
 }
 
 #[derive(Copy, Clone)]

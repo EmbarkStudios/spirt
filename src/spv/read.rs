@@ -73,6 +73,7 @@ impl InstParseError {
             Self::NotEnoughWords => "truncated instruction".into(),
             Self::TooManyWords => "overlong instruction".into(),
             Self::IdZero => "ID %0 is illegal".into(),
+            // FIXME(eddyb) deduplicate this with `spv::write`.
             Self::UnsupportedEnumerand(kind, word) => {
                 let (name, def) = kind.name_and_def();
                 match def {
@@ -108,14 +109,13 @@ impl InstParser<'_> {
     }
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), InstParseError> {
-        for &kind in &enumerant.req_params {
-            self.operand(kind)?;
-        }
-
-        if let Some(rest_kind) = enumerant.rest_params {
-            while !self.is_exhausted() {
-                self.operand(rest_kind)?;
+        for (mode, kind) in enumerant.all_params() {
+            if mode == spec::OperandMode::Optional {
+                if self.is_exhausted() {
+                    break;
+                }
             }
+            self.operand(kind)?;
         }
 
         Ok(())
@@ -127,9 +127,7 @@ impl InstParser<'_> {
         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
         match kind.def() {
             spec::OperandKindDef::BitEnum { bits, .. } => {
-                self.inst
-                    .operands
-                    .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
+                self.inst.imm_operands.push(spv::Imm::Short(kind, word));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                     let bit_def = bits
@@ -140,9 +138,7 @@ impl InstParser<'_> {
             }
 
             spec::OperandKindDef::ValueEnum { variants } => {
-                self.inst
-                    .operands
-                    .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
+                self.inst.imm_operands.push(spv::Imm::Short(kind, word));
 
                 let variant_def = u16::try_from(word)
                     .ok()
@@ -153,32 +149,24 @@ impl InstParser<'_> {
 
             spec::OperandKindDef::Id => {
                 let id = word.try_into().map_err(|_| Error::IdZero)?;
-                self.inst.operands.push(spv::Operand::Id(kind, id));
+                self.inst.id_operands.push(id);
             }
 
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::Word,
             } => {
-                self.inst
-                    .operands
-                    .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
+                self.inst.imm_operands.push(spv::Imm::Short(kind, word));
             }
             spec::OperandKindDef::Literal {
                 size: spec::LiteralSize::NulTerminated,
             } => {
                 let has_nul = |word: u32| word.to_le_bytes().contains(&0);
                 if has_nul(word) {
-                    self.inst
-                        .operands
-                        .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
+                    self.inst.imm_operands.push(spv::Imm::Short(kind, word));
                 } else {
-                    self.inst
-                        .operands
-                        .push(spv::Operand::Imm(spv::Imm::LongStart(kind, word)));
+                    self.inst.imm_operands.push(spv::Imm::LongStart(kind, word));
                     for word in &mut self.words {
-                        self.inst
-                            .operands
-                            .push(spv::Operand::Imm(spv::Imm::LongCont(kind, word)));
+                        self.inst.imm_operands.push(spv::Imm::LongCont(kind, word));
                         if has_nul(word) {
                             break;
                         }
@@ -193,10 +181,8 @@ impl InstParser<'_> {
                     .result_type_id
                     .or_else(|| {
                         // `OpSwitch` takes its literal type from the first operand.
-                        match self.inst.operands.get(0)? {
-                            spv::Operand::Id(_, id) => self.known_ids.get(&id)?.result_type_id(),
-                            _ => None,
-                        }
+                        let &id = self.inst.id_operands.get(0)?;
+                        self.known_ids.get(&id)?.result_type_id()
                     })
                     .and_then(|id| self.known_ids.get(&id))
                     .ok_or(Error::MissingContextSensitiveLiteralType)?;
@@ -214,18 +200,12 @@ impl InstParser<'_> {
                 };
 
                 if extra_word_count == 0 {
-                    self.inst
-                        .operands
-                        .push(spv::Operand::Imm(spv::Imm::Short(kind, word)));
+                    self.inst.imm_operands.push(spv::Imm::Short(kind, word));
                 } else {
-                    self.inst
-                        .operands
-                        .push(spv::Operand::Imm(spv::Imm::LongStart(kind, word)));
+                    self.inst.imm_operands.push(spv::Imm::LongStart(kind, word));
                     for _ in 0..extra_word_count {
                         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
-                        self.inst
-                            .operands
-                            .push(spv::Operand::Imm(spv::Imm::LongCont(kind, word)));
+                        self.inst.imm_operands.push(spv::Imm::LongCont(kind, word));
                     }
                 }
             }
@@ -257,27 +237,13 @@ impl InstParser<'_> {
             }
         }
 
-        for &kind in &def.req_operands {
-            self.operand(kind)?;
-        }
-        for &kind in &def.opt_operands {
-            if self.is_exhausted() {
-                break;
-            }
-            self.operand(kind)?;
-        }
-        if let Some(rest_unit) = &def.rest_operands {
-            while !self.is_exhausted() {
-                match *rest_unit {
-                    spec::RestOperandsUnit::One(kind) => {
-                        self.operand(kind)?;
-                    }
-                    spec::RestOperandsUnit::Two([a_kind, b_kind]) => {
-                        self.operand(a_kind)?;
-                        self.operand(b_kind)?;
-                    }
+        for (mode, kind) in def.all_operands() {
+            if mode == spec::OperandMode::Optional {
+                if self.is_exhausted() {
+                    break;
                 }
             }
+            self.operand(kind)?;
         }
 
         // The instruction must consume its entire word count.
@@ -305,7 +271,7 @@ pub struct ModuleParser {
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V module ({})", reason),
+        format!("malformed SPIR-V ({})", reason),
     )
 }
 
@@ -384,7 +350,8 @@ impl Iterator for ModuleParser {
                 opcode,
                 result_type_id: None,
                 result_id: None,
-                operands: SmallVec::new(),
+                imm_operands: SmallVec::new(),
+                id_operands: SmallVec::new(),
             },
         };
 
@@ -396,16 +363,16 @@ impl Iterator for ModuleParser {
         // HACK(eddyb) `Option::map` allows using `?` for `Result` in the closure.
         let maybe_known_id_result = inst.result_id.map(|id| {
             let known_id_def = if opcode == wk.OpTypeInt {
-                KnownIdDef::TypeInt(match inst.operands[0] {
-                    spv::Operand::Imm(spv::Imm::Short(kind, n)) => {
+                KnownIdDef::TypeInt(match inst.imm_operands[0] {
+                    spv::Imm::Short(kind, n) => {
                         assert!(kind == wk.LiteralInteger);
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
             } else if opcode == wk.OpTypeFloat {
-                KnownIdDef::TypeFloat(match inst.operands[0] {
-                    spv::Operand::Imm(spv::Imm::Short(kind, n)) => {
+                KnownIdDef::TypeFloat(match inst.imm_operands[0] {
+                    spv::Imm::Short(kind, n) => {
                         assert!(kind == wk.LiteralInteger);
                         n.try_into().map_err(|_| invalid("Width cannot be 0"))?
                     }

@@ -3,11 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    print, AddrSpace, Attr, AttrSet, Block, BlockDef, BlockInput, Const, ConstCtor, ConstCtorArg,
-    ConstDef, Context, ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstInput,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    print, AddrSpace, Attr, AttrSet, Block, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
+    Context, ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstKind, DeclDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody,
+    Import, InternedStr, Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -16,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
-use std::{io, iter, mem};
+use std::{io, mem};
 
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
@@ -55,7 +54,7 @@ enum Export {
     },
     EntryPoint {
         func_id: spv::Id,
-        params: SmallVec<[spv::Imm; 2]>,
+        imms: SmallVec<[spv::Imm; 2]>,
         interface_ids: SmallVec<[spv::Id; 4]>,
     },
 }
@@ -77,14 +76,16 @@ struct IntraFuncInst {
     result_id: Option<spv::Id>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    operands: SmallVec<[spv::Operand; 2]>,
+    pub imm_operands: SmallVec<[spv::Imm; 2]>,
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    pub id_operands: SmallVec<[spv::Id; 4]>,
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V module ({})", reason),
+        format!("malformed SPIR-V ({})", reason),
     )
 }
 
@@ -104,8 +105,7 @@ impl Module {
         let wk = &spv_spec.well_known;
 
         // HACK(eddyb) used to quickly check whether an `OpVariable` is global.
-        let storage_class_function_operand =
-            spv::Operand::Imm(spv::Imm::Short(wk.StorageClass, wk.Function));
+        let storage_class_function_imm = spv::Imm::Short(wk.StorageClass, wk.Function);
 
         let mut module = {
             let [
@@ -209,15 +209,12 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
                 current_debug_line = if opcode == wk.OpLine {
-                    match inst.operands[..] {
-                        [
-                            spv::Operand::Id(fp_kind, file_path_id),
-                            spv::Operand::Imm(spv::Imm::Short(l_kind, line)),
-                            spv::Operand::Imm(spv::Imm::Short(c_kind, col)),
-                        ] => {
-                            assert!(
-                                fp_kind == wk.IdRef && [l_kind, c_kind] == [wk.LiteralInteger; 2]
-                            );
+                    match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                        (
+                            &[spv::Imm::Short(l_kind, line), spv::Imm::Short(c_kind, col)],
+                            &[file_path_id],
+                        ) => {
+                            assert!([l_kind, c_kind] == [wk.LiteralInteger; 2]);
                             let file_path = match id_defs.get(&file_path_id) {
                                 Some(&IdDef::SpvDebugString(s)) => s,
                                 _ => {
@@ -232,7 +229,7 @@ impl Module {
                         _ => unreachable!(),
                     }
                 } else {
-                    assert!(inst.operands.is_empty());
+                    assert!(inst.imm_operands.is_empty() && inst.id_operands.is_empty());
                     None
                 };
 
@@ -271,12 +268,10 @@ impl Module {
 
             // Take certain bitflags operands out of the instruction and rewrite
             // them into attributes instead.
-            inst.operands.retain(|operand| match *operand {
-                spv::Operand::Imm(imm @ spv::Imm::Short(kind, word))
-                    if kind == wk.FunctionControl =>
-                {
+            inst.imm_operands.retain(|imm| match *imm {
+                spv::Imm::Short(kind, word) if kind == wk.FunctionControl => {
                     if word != 0 {
-                        attrs.attrs.insert(Attr::SpvBitflagsOperand(imm));
+                        attrs.attrs.insert(Attr::SpvBitflagsOperand(*imm));
                     }
                     false
                 }
@@ -304,8 +299,8 @@ impl Module {
 
             let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let cap = match inst.operands[..] {
-                    [spv::Operand::Imm(spv::Imm::Short(kind, cap))] => {
+                let cap = match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                    (&[spv::Imm::Short(kind, cap)], &[]) => {
                         assert!(kind == wk.Capability);
                         cap
                     }
@@ -320,8 +315,12 @@ impl Module {
 
                 Seq::Capability
             } else if opcode == wk.OpExtension {
-                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let ext = spv::extract_literal_string(&inst.operands)
+                assert!(
+                    inst.result_type_id.is_none()
+                        && inst.result_id.is_none()
+                        && inst.id_operands.is_empty()
+                );
+                let ext = spv::extract_literal_string(&inst.imm_operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 match &mut module.dialect {
@@ -332,9 +331,9 @@ impl Module {
 
                 Seq::Extension
             } else if opcode == wk.OpExtInstImport {
-                assert!(inst.result_type_id.is_none());
+                assert!(inst.result_type_id.is_none() && inst.id_operands.is_empty());
                 let id = inst.result_id.unwrap();
-                let name = spv::extract_literal_string(&inst.operands)
+                let name = spv::extract_literal_string(&inst.imm_operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 id_defs.insert(id, IdDef::SpvExtInstImport(cx.intern(name)));
@@ -342,16 +341,14 @@ impl Module {
                 Seq::ExtInstImport
             } else if opcode == wk.OpMemoryModel {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let (addressing_model, memory_model) = match inst.operands[..] {
-                    [
-                        spv::Operand::Imm(spv::Imm::Short(am_kind, am)),
-                        spv::Operand::Imm(spv::Imm::Short(mm_kind, mm)),
-                    ] => {
-                        assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
-                        (am, mm)
-                    }
-                    _ => unreachable!(),
-                };
+                let (addressing_model, memory_model) =
+                    match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                        (&[spv::Imm::Short(am_kind, am), spv::Imm::Short(mm_kind, mm)], &[]) => {
+                            assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
+                            (am, mm)
+                        }
+                        _ => unreachable!(),
+                    };
 
                 if has_memory_model {
                     return Err(invalid("duplicate OpMemoryModel"));
@@ -367,9 +364,9 @@ impl Module {
 
                 Seq::MemoryModel
             } else if opcode == wk.OpString {
-                assert!(inst.result_type_id.is_none());
+                assert!(inst.result_type_id.is_none() && inst.id_operands.is_empty());
                 let id = inst.result_id.unwrap();
-                let s = spv::extract_literal_string(&inst.operands)
+                let s = spv::extract_literal_string(&inst.imm_operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 id_defs.insert(id, IdDef::SpvDebugString(cx.intern(s)));
@@ -379,10 +376,10 @@ impl Module {
                 Seq::DebugStringAndSource
             } else if opcode == wk.OpSource {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let (lang, version) = match inst.operands[..] {
+                let (lang, version) = match inst.imm_operands[..] {
                     [
-                        spv::Operand::Imm(spv::Imm::Short(l_kind, lang)),
-                        spv::Operand::Imm(spv::Imm::Short(v_kind, version)),
+                        spv::Imm::Short(l_kind, lang),
+                        spv::Imm::Short(v_kind, version),
                         ..,
                     ] => {
                         assert!(l_kind == wk.SourceLanguage && v_kind == wk.LiteralInteger);
@@ -398,9 +395,8 @@ impl Module {
                         .or_default(),
                 };
 
-                match inst.operands[2..] {
-                    [spv::Operand::Id(fp_kind, file_path_id), ref contents @ ..] => {
-                        assert!(fp_kind == wk.IdRef);
+                match (&inst.imm_operands[2..], &inst.id_operands[..]) {
+                    (contents, &[file_path_id]) => {
                         let file_path = match id_defs.get(&file_path_id) {
                             Some(&IdDef::SpvDebugString(s)) => s,
                             _ => {
@@ -425,16 +421,20 @@ impl Module {
                             let cont_inst = spv_insts.next().unwrap().unwrap();
 
                             assert!(
-                                cont_inst.result_type_id.is_none() && cont_inst.result_id.is_none()
+                                cont_inst.result_type_id.is_none()
+                                    && cont_inst.result_id.is_none()
+                                    && cont_inst.id_operands.is_empty()
                             );
-                            let cont_contents = spv::extract_literal_string(&cont_inst.operands)
-                                .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+                            let cont_contents = spv::extract_literal_string(
+                                &cont_inst.imm_operands,
+                            )
+                            .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
                             contents += &cont_contents;
                         }
 
                         debug_sources.file_contents.insert(file_path, contents);
                     }
-                    [] => {}
+                    (&[], &[]) => {}
                     _ => unreachable!(),
                 }
 
@@ -444,8 +444,12 @@ impl Module {
             } else if opcode == wk.OpSourceContinued {
                 return Err(invalid("must follow OpSource"));
             } else if opcode == wk.OpSourceExtension {
-                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let ext = spv::extract_literal_string(&inst.operands)
+                assert!(
+                    inst.result_type_id.is_none()
+                        && inst.result_id.is_none()
+                        && inst.id_operands.is_empty()
+                );
+                let ext = spv::extract_literal_string(&inst.imm_operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 match &mut module.debug_info {
@@ -458,8 +462,12 @@ impl Module {
                 // for organizatory purposes, see `Seq` for the in-module order.
                 Seq::DebugStringAndSource
             } else if opcode == wk.OpModuleProcessed {
-                assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let proc = spv::extract_literal_string(&inst.operands)
+                assert!(
+                    inst.result_type_id.is_none()
+                        && inst.result_id.is_none()
+                        && inst.id_operands.is_empty()
+                );
+                let proc = spv::extract_literal_string(&inst.imm_operands)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 match &mut module.debug_info {
@@ -474,33 +482,10 @@ impl Module {
             } else if opcode == wk.OpEntryPoint {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
-                let target_id = match inst.operands[1] {
-                    spv::Operand::Id(kind, id) => {
-                        assert!(kind == wk.IdRef);
-                        id
-                    }
-                    _ => unreachable!(),
-                };
-
-                let mut params = SmallVec::new();
-                let mut interface_ids = SmallVec::new();
-                for operand in iter::once(&inst.operands[0]).chain(&inst.operands[2..]) {
-                    match *operand {
-                        spv::Operand::Imm(imm) => {
-                            assert!(interface_ids.is_empty());
-                            params.push(imm);
-                        }
-                        spv::Operand::Id(kind, id) => {
-                            assert!(kind == wk.IdRef);
-                            interface_ids.push(id);
-                        }
-                    }
-                }
-
                 pending_exports.push(Export::EntryPoint {
-                    func_id: target_id,
-                    params,
-                    interface_ids,
+                    func_id: inst.id_operands[0],
+                    imms: inst.imm_operands,
+                    interface_ids: inst.id_operands[1..].iter().copied().collect(),
                 });
 
                 Seq::EntryPoint
@@ -519,20 +504,17 @@ impl Module {
             {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
-                let target_id = match inst.operands[0] {
-                    spv::Operand::Id(kind, id) => {
-                        assert!(kind == wk.IdRef);
-                        id
-                    }
-                    _ => unreachable!(),
-                };
+                let target_id = inst.id_operands[0];
+                if inst.id_operands.len() > 1 {
+                    return Err(invalid("unsupported decoration with ID"));
+                }
 
-                match inst.operands[1..] {
+                match inst.imm_operands[..] {
                     // Special-case `OpDecorate LinkageAttributes ... Import|Export`.
                     [
-                        spv::Operand::Imm(decoration @ spv::Imm::Short(..)),
+                        decoration @ spv::Imm::Short(..),
                         ref name @ ..,
-                        spv::Operand::Imm(spv::Imm::Short(lt_kind, linkage_type)),
+                        spv::Imm::Short(lt_kind, linkage_type),
                     ] if opcode == wk.OpDecorate
                         && decoration == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
                         && lt_kind == wk.LinkageType
@@ -550,20 +532,12 @@ impl Module {
                     }
 
                     _ => {
-                        let params = inst.operands[1..]
-                            .iter()
-                            .map(|operand| match *operand {
-                                spv::Operand::Imm(imm) => Ok(imm),
-                                spv::Operand::Id(..) => {
-                                    Err(invalid("unsupported decoration with ID"))
-                                }
-                            })
-                            .collect::<Result<_, _>>()?;
-                        pending_attrs
-                            .entry(target_id)
-                            .or_default()
-                            .attrs
-                            .insert(Attr::SpvAnnotation { opcode, params });
+                        pending_attrs.entry(target_id).or_default().attrs.insert(
+                            Attr::SpvAnnotation {
+                                opcode,
+                                imms: inst.imm_operands,
+                            },
+                        );
                     }
                 };
 
@@ -576,11 +550,8 @@ impl Module {
                 }
             } else if opcode == wk.OpTypeForwardPointer {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let (id, sc) = match inst.operands[..] {
-                    [spv::Operand::Id(kind, id), spv::Operand::Imm(sc)] => {
-                        assert!(kind == wk.IdRef);
-                        (id, sc)
-                    }
+                let (id, sc) = match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                    (&[sc], &[id]) => (id, sc),
                     _ => unreachable!(),
                 };
 
@@ -589,8 +560,11 @@ impl Module {
                 // serves as a first approximation for a "deferred error".
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst(opcode),
-                    ctor_args: [TypeCtorArg::SpvImm(sc)].into_iter().collect(),
+                    ctor: TypeCtor::SpvInst {
+                        opcode,
+                        imms: [sc].into_iter().collect(),
+                    },
+                    ctor_args: [].into_iter().collect(),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
@@ -599,16 +573,13 @@ impl Module {
                 assert!(inst.result_type_id.is_none());
                 let id = inst.result_id.unwrap();
                 let type_ctor_args = inst
-                    .operands
+                    .id_operands
                     .iter()
-                    .map(|operand| match *operand {
-                        spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                            Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
-                            Some(&IdDef::Const(ct)) => Ok(TypeCtorArg::Const(ct)),
-                            Some(id_def) => Err(id_def.descr(&cx)),
-                            None => Err(format!("a forward reference to %{}", id)),
-                        },
-                        spv::Operand::Imm(imm) => Ok(TypeCtorArg::SpvImm(imm)),
+                    .map(|&id| match id_defs.get(&id) {
+                        Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
+                        Some(&IdDef::Const(ct)) => Ok(TypeCtorArg::Const(ct)),
+                        Some(id_def) => Err(id_def.descr(&cx)),
+                        None => Err(format!("a forward reference to %{}", id)),
                     })
                     .map(|result| {
                         result.map_err(|descr| {
@@ -619,7 +590,10 @@ impl Module {
 
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst(opcode),
+                    ctor: TypeCtor::SpvInst {
+                        opcode,
+                        imms: inst.imm_operands,
+                    },
                     ctor_args: type_ctor_args,
                 });
                 id_defs.insert(id, IdDef::Type(ty));
@@ -628,15 +602,12 @@ impl Module {
             } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
                 let id = inst.result_id.unwrap();
                 let const_ctor_args = inst
-                    .operands
+                    .id_operands
                     .iter()
-                    .map(|operand| match *operand {
-                        spv::Operand::Id(_, id) => match id_defs.get(&id) {
-                            Some(&IdDef::Const(ct)) => Ok(ConstCtorArg::Const(ct)),
-                            Some(id_def) => Err(id_def.descr(&cx)),
-                            None => Err(format!("a forward reference to %{}", id)),
-                        },
-                        spv::Operand::Imm(imm) => Ok(ConstCtorArg::SpvImm(imm)),
+                    .map(|&id| match id_defs.get(&id) {
+                        Some(&IdDef::Const(ct)) => Ok(ct),
+                        Some(id_def) => Err(id_def.descr(&cx)),
+                        None => Err(format!("a forward reference to %{}", id)),
                     })
                     .map(|result| {
                         result.map_err(|descr| {
@@ -648,7 +619,10 @@ impl Module {
                 let ct = cx.intern(ConstDef {
                     attrs: mem::take(&mut attrs),
                     ty: result_type.unwrap(),
-                    ctor: ConstCtor::SpvInst(opcode),
+                    ctor: ConstCtor::SpvInst {
+                        opcode,
+                        imms: inst.imm_operands,
+                    },
                     ctor_args: const_ctor_args,
                 });
                 id_defs.insert(id, IdDef::Const(ct));
@@ -664,22 +638,19 @@ impl Module {
                 let global_var_id = inst.result_id.unwrap();
                 let type_of_ptr_to_global_var = result_type.unwrap();
 
-                if inst.operands[0] == storage_class_function_operand {
+                if inst.imm_operands[0] == storage_class_function_imm {
                     return Err(invalid("`Function` storage class outside function"));
                 }
 
-                let storage_class = match inst.operands[0] {
-                    spv::Operand::Imm(spv::Imm::Short(kind, storage_class)) => {
+                let storage_class = match inst.imm_operands[..] {
+                    [spv::Imm::Short(kind, storage_class)] => {
                         assert!(kind == wk.StorageClass);
                         storage_class
                     }
                     _ => unreachable!(),
                 };
-                let initializer = match inst.operands[1..] {
-                    [spv::Operand::Id(kind, initializer)] => {
-                        assert!(kind == wk.IdRef);
-                        Some(initializer)
-                    }
+                let initializer = match inst.id_operands[..] {
+                    [initializer] => Some(initializer),
                     [] => None,
                     _ => unreachable!(),
                 };
@@ -739,13 +710,10 @@ impl Module {
                 // type, *not* the function type, which is in `func_type`.
                 let func_ret_type = result_type.unwrap();
 
-                let func_type_id = match inst.operands[..] {
+                let func_type_id = match (&inst.imm_operands[..], &inst.id_operands[..]) {
                     // NOTE(eddyb) the `FunctionControl` operand is already gone,
                     // having been converted into an attribute above.
-                    [spv::Operand::Id(kind, func_type_id)] => {
-                        assert!(kind == wk.IdRef);
-                        func_type_id
-                    }
+                    (&[], &[func_type_id]) => func_type_id,
                     _ => unreachable!(),
                 };
 
@@ -753,14 +721,15 @@ impl Module {
                     match id_defs.get(&func_type_id) {
                         Some(&IdDef::Type(ty)) => {
                             let ty_def = &cx[ty];
-                            if ty_def.ctor == TypeCtor::SpvInst(wk.OpTypeFunction) {
-                                let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
-                                    TypeCtorArg::Type(ty) => ty,
-                                    _ => unreachable!(),
-                                });
-                                Some((types.next().unwrap(), types))
-                            } else {
-                                None
+                            match ty_def.ctor {
+                                TypeCtor::SpvInst { opcode, .. } if opcode == wk.OpTypeFunction => {
+                                    let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
+                                        TypeCtorArg::Type(ty) => ty,
+                                        _ => unreachable!(),
+                                    });
+                                    Some((types.next().unwrap(), types))
+                                }
+                                _ => None,
                             }
                         }
                         _ => None,
@@ -823,7 +792,7 @@ impl Module {
                 Seq::Function
             } else if opcode == wk.OpFunctionEnd {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                assert!(inst.operands.is_empty());
+                assert!(inst.imm_operands.is_empty() && inst.id_operands.is_empty());
 
                 let func_body = current_func_body
                     .take()
@@ -844,7 +813,8 @@ impl Module {
 
                     opcode,
                     result_id: inst.result_id,
-                    operands: inst.operands,
+                    imm_operands: inst.imm_operands,
+                    id_operands: inst.id_operands,
                 });
 
                 Seq::Function
@@ -937,7 +907,10 @@ impl Module {
                                         insts: vec![],
                                         terminator: ControlInst {
                                             attrs: AttrSet::default(),
-                                            kind: ControlInstKind::SpvInst(wk.OpNop),
+                                            kind: ControlInstKind::SpvInst {
+                                                opcode: wk.OpNop,
+                                                imms: [].into_iter().collect(),
+                                            },
                                             inputs: [].into_iter().collect(),
                                             target_block_inputs: IndexMap::new(),
                                         },
@@ -958,22 +931,11 @@ impl Module {
                                 let input_idx = *block_input_count;
                                 *block_input_count = input_idx.checked_add(1).unwrap();
 
+                                assert!(raw_inst.imm_operands.is_empty());
                                 // FIXME(eddyb) use `array_chunks` when that's stable.
-                                for input_and_source_block_id in raw_inst.operands.chunks(2) {
-                                    let [value_id, source_block_id]: &[_; 2] =
+                                for input_and_source_block_id in raw_inst.id_operands.chunks(2) {
+                                    let &[value_id, source_block_id]: &[_; 2] =
                                         input_and_source_block_id.try_into().unwrap();
-
-                                    let (value_id, source_block_id) =
-                                        match [value_id, source_block_id] {
-                                            [
-                                                &spv::Operand::Id(v_kind, value_id),
-                                                &spv::Operand::Id(sb_kind, source_block_id),
-                                            ] => {
-                                                assert!(v_kind == wk.IdRef && sb_kind == wk.IdRef);
-                                                (value_id, source_block_id)
-                                            }
-                                            _ => unreachable!(),
-                                        };
 
                                     phi_to_values
                                         .entry(PhiKey {
@@ -996,7 +958,10 @@ impl Module {
                                     &cx,
                                     DataInstDef {
                                         attrs: AttrSet::default(),
-                                        kind: DataInstKind::SpvInst(wk.OpNop),
+                                        kind: DataInstKind::SpvInst {
+                                            opcode: wk.OpNop,
+                                            imms: [].into_iter().collect(),
+                                        },
                                         output_type: None,
                                         inputs: [].into_iter().collect(),
                                     },
@@ -1041,7 +1006,8 @@ impl Module {
                     result_type,
                     opcode,
                     result_id,
-                    ref operands,
+                    ref imm_operands,
+                    ref id_operands,
                 } = *raw_inst;
 
                 let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
@@ -1084,7 +1050,7 @@ impl Module {
                         }
                     }
 
-                    assert!(operands.is_empty());
+                    assert!(imm_operands.is_empty() && id_operands.is_empty());
                     params.push(FuncParam {
                         attrs,
                         ty: result_type.unwrap(),
@@ -1190,12 +1156,14 @@ impl Module {
                     };
                     current_block_def.terminator = ControlInst {
                         attrs,
-                        kind: ControlInstKind::SpvInst(opcode),
-                        inputs: operands
+                        kind: ControlInstKind::SpvInst {
+                            opcode,
+                            imms: imm_operands.iter().copied().collect(),
+                        },
+                        inputs: id_operands
                             .iter()
-                            .map(|operand| match *operand {
-                                spv::Operand::Imm(imm) => Ok(ControlInstInput::SpvImm(imm)),
-                                spv::Operand::Id(_, id) => Ok(
+                            .map(|&id| {
+                                Ok(
                                     match lookup_global_or_local_id_for_data_or_control_inst_input(
                                         id,
                                     )? {
@@ -1205,7 +1173,7 @@ impl Module {
                                             ControlInstInput::TargetBlock(block)
                                         }
                                     },
-                                ),
+                                )
                             })
                             .collect::<io::Result<_>>()?,
                         target_block_inputs,
@@ -1237,15 +1205,10 @@ impl Module {
                     // operands, but it's not obvious how they should map to
                     // some "structured regions" replacement for the CFG.
                 } else {
-                    let mut operands = &operands[..];
+                    let mut id_operands = &id_operands[..];
                     let kind = if opcode == wk.OpFunctionCall {
-                        let callee_id = match operands[0] {
-                            spv::Operand::Id(kind, id) => {
-                                assert!(kind == wk.IdRef);
-                                id
-                            }
-                            _ => unreachable!(),
-                        };
+                        assert!(imm_operands.is_empty());
+                        let callee_id = id_operands[0];
                         let maybe_callee = id_defs
                             .get(&callee_id)
                             .map(|id_def| match *id_def {
@@ -1262,26 +1225,28 @@ impl Module {
 
                         match maybe_callee {
                             Some(callee) => {
-                                operands = &operands[1..];
+                                id_operands = &id_operands[1..];
                                 DataInstKind::FuncCall(callee)
                             }
 
                             // HACK(eddyb) this should be an error, but it shows
                             // up in Rust-GPU output (likely a zombie?).
-                            None => DataInstKind::SpvInst(opcode),
+                            None => DataInstKind::SpvInst {
+                                opcode,
+                                imms: imm_operands.iter().copied().collect(),
+                            },
                         }
                     } else if opcode == wk.OpExtInst {
-                        let (ext_set_id, inst) = match operands[..2] {
-                            [
-                                spv::Operand::Id(es_kind, ext_set_id),
-                                spv::Operand::Imm(spv::Imm::Short(i_kind, inst)),
-                            ] => {
-                                assert!(es_kind == wk.IdRef && i_kind == wk.LiteralExtInstInteger);
-                                (ext_set_id, inst)
+                        let ext_set_id = id_operands[0];
+                        id_operands = &id_operands[1..];
+
+                        let inst = match imm_operands[..] {
+                            [spv::Imm::Short(kind, inst)] => {
+                                assert!(kind == wk.LiteralExtInstInteger);
+                                inst
                             }
                             _ => unreachable!(),
                         };
-                        operands = &operands[2..];
 
                         let ext_set = match id_defs.get(&ext_set_id) {
                             Some(&IdDef::SpvExtInstImport(name)) => Ok(name),
@@ -1298,7 +1263,10 @@ impl Module {
 
                         DataInstKind::SpvExtInst { ext_set, inst }
                     } else {
-                        DataInstKind::SpvInst(opcode)
+                        DataInstKind::SpvInst {
+                            opcode,
+                            imms: imm_operands.iter().copied().collect(),
+                        }
                     };
 
                     let data_inst_def = DataInstDef {
@@ -1313,23 +1281,17 @@ impl Module {
                                 })
                             })
                             .transpose()?,
-                        inputs: operands
+                        inputs: id_operands
                             .iter()
-                            .map(|operand| match *operand {
-                                spv::Operand::Imm(imm) => Ok(DataInstInput::SpvImm(imm)),
-                                spv::Operand::Id(_, id) => Ok(
-                                    match lookup_global_or_local_id_for_data_or_control_inst_input(
-                                        id,
-                                    )? {
-                                        LocalIdDef::Value(v) => DataInstInput::Value(v),
-                                        LocalIdDef::BlockLabel(_) => {
-                                            return Err(invalid(
-                                                "unsupported use of block label as a value, \
-                                                 in non-terminator instruction",
-                                            ));
-                                        }
-                                    },
-                                ),
+                            .map(|&id| {
+                                match lookup_global_or_local_id_for_data_or_control_inst_input(id)?
+                                {
+                                    LocalIdDef::Value(v) => Ok(v),
+                                    LocalIdDef::BlockLabel(_) => Err(invalid(
+                                        "unsupported use of block label as a value, \
+                                         in non-terminator instruction",
+                                    )),
+                                }
                             })
                             .collect::<io::Result<_>>()?,
                     };
@@ -1457,7 +1419,7 @@ impl Module {
 
                 Export::EntryPoint {
                     func_id,
-                    params,
+                    imms,
                     interface_ids,
                 } => {
                     let func = match id_defs.get(&func_id) {
@@ -1492,7 +1454,7 @@ impl Module {
                         .collect::<Result<_, _>>()?;
                     Ok((
                         ExportKey::SpvEntryPoint {
-                            params,
+                            imms,
                             interface_global_vars,
                         },
                         Exportee::Func(func),

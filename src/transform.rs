@@ -1,9 +1,8 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor,
-    ConstCtorArg, ConstDef, ControlInst, ControlInstInput, ControlInstKind, DataInstDef,
-    DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
-    FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
+    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -163,9 +162,6 @@ pub trait Transformer: Sized {
     fn transform_const_def(&mut self, ct_def: &ConstDef) -> Transformed<ConstDef> {
         ct_def.inner_transform_with(self)
     }
-    fn transform_data_inst_input(&mut self, input: &DataInstInput) -> Transformed<DataInstInput> {
-        input.inner_transform_with(self)
-    }
     fn transform_control_inst_input(
         &mut self,
         input: &ControlInstInput,
@@ -277,16 +273,16 @@ impl InnerTransform for ExportKey {
             Self::LinkName(_) => Transformed::Unchanged,
 
             Self::SpvEntryPoint {
-                params,
+                imms,
                 interface_global_vars,
             } => transform!({
-                params -> Transformed::Unchanged,
+                imms -> Transformed::Unchanged,
                 interface_global_vars -> Transformed::map_iter(
                     interface_global_vars.iter(),
                     |&gv| transformer.transform_global_var_use(gv),
                 ).map(|new_iter| new_iter.collect()),
             } => Self::SpvEntryPoint {
-                params,
+                imms,
                 interface_global_vars,
             }),
         }
@@ -333,7 +329,7 @@ impl InnerTransform for TypeDef {
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
             ctor -> match ctor {
-                TypeCtor::SpvInst(_) => Transformed::Unchanged,
+                TypeCtor::SpvInst { opcode: _, imms: _ }  => Transformed::Unchanged,
             },
             ctor_args -> Transformed::map_iter(ctor_args.iter(), |arg| match *arg {
                 TypeCtorArg::Type(ty) => transform!({
@@ -343,8 +339,6 @@ impl InnerTransform for TypeDef {
                 TypeCtorArg::Const(ct) => transform!({
                     ct -> transformer.transform_const_use(ct),
                 } => TypeCtorArg::Const(ct)),
-
-                TypeCtorArg::SpvImm(_) => Transformed::Unchanged,
             }).map(|new_iter| new_iter.collect()),
         } => Self {
             attrs,
@@ -371,15 +365,12 @@ impl InnerTransform for ConstDef {
                     gv -> transformer.transform_global_var_use(*gv),
                 } => ConstCtor::PtrToGlobalVar(gv)),
 
-                ConstCtor::SpvInst(_) => Transformed::Unchanged
+                ConstCtor::SpvInst { opcode: _, imms: _ }  => Transformed::Unchanged
             },
-            ctor_args -> Transformed::map_iter(ctor_args.iter(), |arg| match *arg {
-                ConstCtorArg::Const(ct) => transform!({
-                    ct -> transformer.transform_const_use(ct),
-                } => ConstCtorArg::Const(ct)),
-
-                ConstCtorArg::SpvImm(_) => Transformed::Unchanged,
-            }).map(|new_iter| new_iter.collect()),
+            ctor_args -> Transformed::map_iter(
+                ctor_args.iter(),
+                |&ct| transformer.transform_const_use(ct),
+            ).map(|new_iter| new_iter.collect()),
         } => Self {
             attrs,
             ty,
@@ -516,25 +507,13 @@ impl InnerInPlaceTransform for DataInstDef {
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
             DataInstKind::FuncCall(func) => transformer.transform_func_use(*func).apply_to(func),
-            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::SpvInst { opcode: _, imms: _ } | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = output_type {
             transformer.transform_type_use(*ty).apply_to(ty);
         }
-        for input in inputs {
-            transformer.transform_data_inst_input(input).apply_to(input);
-        }
-    }
-}
-
-impl InnerTransform for DataInstInput {
-    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
-        match self {
-            Self::Value(v) => transform!({
-                v -> v.inner_transform_with(transformer),
-            } => Self::Value(v)),
-
-            Self::SpvImm(_) => Transformed::Unchanged,
+        for v in inputs {
+            v.inner_transform_with(transformer).apply_to(v);
         }
     }
 }
@@ -550,7 +529,7 @@ impl InnerInPlaceTransform for ControlInst {
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
-            ControlInstKind::SpvInst(_) => {}
+            ControlInstKind::SpvInst { opcode: _, imms: _ } => {}
         }
         for input in inputs {
             transformer
@@ -573,8 +552,6 @@ impl InnerTransform for ControlInstInput {
             } => Self::Value(v)),
 
             Self::TargetBlock(_) => Transformed::Unchanged,
-
-            Self::SpvImm(_) => Transformed::Unchanged,
         }
     }
 }

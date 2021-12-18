@@ -1,9 +1,8 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor,
-    ConstCtorArg, ConstDef, ControlInst, ControlInstInput, ControlInstKind, DataInstDef,
-    DataInstInput, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
-    FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
+    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -53,9 +52,6 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_data_inst_def(&mut self, data_inst_def: &'a DataInstDef) {
         data_inst_def.inner_visit_with(self);
-    }
-    fn visit_data_inst_input(&mut self, input: &'a DataInstInput) {
-        input.inner_visit_with(self);
     }
     fn visit_control_inst(&mut self, control_inst: &'a ControlInst) {
         control_inst.inner_visit_with(self);
@@ -140,7 +136,7 @@ impl InnerVisit for ExportKey {
             Self::LinkName(_) => {}
 
             Self::SpvEntryPoint {
-                params: _,
+                imms: _,
                 interface_global_vars,
             } => {
                 for &gv in interface_global_vars {
@@ -180,14 +176,12 @@ impl InnerVisit for TypeDef {
 
         visitor.visit_attr_set_use(*attrs);
         match ctor {
-            TypeCtor::SpvInst(_) => {}
+            TypeCtor::SpvInst { opcode: _, imms: _ } => {}
         }
         for &arg in ctor_args {
             match arg {
                 TypeCtorArg::Type(ty) => visitor.visit_type_use(ty),
                 TypeCtorArg::Const(ct) => visitor.visit_const_use(ct),
-
-                TypeCtorArg::SpvImm(_) => {}
             }
         }
     }
@@ -206,14 +200,10 @@ impl InnerVisit for ConstDef {
         visitor.visit_type_use(*ty);
         match *ctor {
             ConstCtor::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
-            ConstCtor::SpvInst(_) => {}
+            ConstCtor::SpvInst { opcode: _, imms: _ } => {}
         }
-        for &arg in ctor_args {
-            match arg {
-                ConstCtorArg::Const(ct) => visitor.visit_const_use(ct),
-
-                ConstCtorArg::SpvImm(_) => {}
-            }
+        for &ct in ctor_args {
+            visitor.visit_const_use(ct);
         }
     }
 }
@@ -329,23 +319,13 @@ impl InnerVisit for DataInstDef {
         visitor.visit_attr_set_use(*attrs);
         match *kind {
             DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
-            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::SpvInst { opcode: _, imms: _ } | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = *output_type {
             visitor.visit_type_use(ty);
         }
-        for input in inputs {
-            visitor.visit_data_inst_input(input);
-        }
-    }
-}
-
-impl InnerVisit for DataInstInput {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        match self {
-            Self::Value(v) => visitor.visit_value_use(v),
-
-            Self::SpvImm(_) => {}
+        for v in inputs {
+            visitor.visit_value_use(v);
         }
     }
 }
@@ -361,7 +341,7 @@ impl InnerVisit for ControlInst {
 
         visitor.visit_attr_set_use(*attrs);
         match kind {
-            ControlInstKind::SpvInst(_) => {}
+            ControlInstKind::SpvInst { opcode: _, imms: _ } => {}
         }
         for input in inputs {
             visitor.visit_control_inst_input(input);
@@ -380,8 +360,6 @@ impl InnerVisit for ControlInstInput {
             Self::Value(v) => visitor.visit_value_use(v),
 
             Self::TargetBlock(_) => {}
-
-            Self::SpvImm(_) => {}
         }
     }
 }

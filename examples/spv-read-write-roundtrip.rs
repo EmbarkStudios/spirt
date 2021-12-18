@@ -26,14 +26,8 @@ fn main() -> std::io::Result<()> {
                 eprint!("{}", inst.opcode.name());
                 spirt::spv::print::inst_operands(
                     inst.opcode,
-                    inst.operands.iter().filter_map(|operand| match *operand {
-                        spirt::spv::Operand::Imm(imm) => Some(imm),
-                        spirt::spv::Operand::Id(..) => None,
-                    }),
-                    inst.operands.iter().filter_map(|operand| match *operand {
-                        spirt::spv::Operand::Imm(_) => None,
-                        spirt::spv::Operand::Id(_, id) => Some(format!("%{}", id)),
-                    }),
+                    inst.imm_operands.iter().copied(),
+                    inst.id_operands.iter().map(|id| format!("%{}", id)),
                 )
                 .for_each(|operand| eprint!(" {}", operand));
 
