@@ -5,8 +5,58 @@ use smallvec::SmallVec;
 use std::fmt::Write;
 use std::{fmt, iter, mem, str};
 
+/// One component in a `PrintOutParts` (see its documentation for details).
+pub enum PrintOutPart<ID> {
+    /// Fully printed (into a `String`) part.
+    Printed(String),
+
+    /// Unprinted part, of its original type (allowing post-processing).
+    Id(ID),
+}
+
+/// The components outputted by printing a ("logical") SPIR-V operand, which
+/// have to be concatenated (after separately processing `ID`s) to obtain the
+/// complete printed operand.
+///
+/// With some rare exceptions (enumerand immediates, with `IdRef` parameters),
+/// most `PrintOutParts` will only have one `PrintOutPart`.
+pub struct PrintOutParts<ID> {
+    pub parts: SmallVec<[PrintOutPart<ID>; 1]>,
+}
+
+impl<ID> Default for PrintOutParts<ID> {
+    fn default() -> Self {
+        Self {
+            parts: SmallVec::new(),
+        }
+    }
+}
+
+impl PrintOutParts<String> {
+    pub fn concat(self) -> String {
+        self.parts
+            .into_iter()
+            .map(|part| match part {
+                PrintOutPart::Printed(s) | PrintOutPart::Id(s) => s,
+            })
+            .reduce(|out, extra| out + &extra)
+            .unwrap_or_default()
+    }
+}
+
+impl<ID> fmt::Write for PrintOutParts<ID> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if let Some(PrintOutPart::Printed(part)) = self.parts.last_mut() {
+            *part += s;
+        } else {
+            self.parts.push(PrintOutPart::Printed(s.to_string()));
+        }
+        Ok(())
+    }
+}
+
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
-struct OperandPrinter<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> {
+struct OperandPrinter<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> {
     /// Input immediate operands to print from (may be grouped e.g. into literals).
     imms: iter::Peekable<IMMS>,
 
@@ -14,10 +64,10 @@ struct OperandPrinter<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = Stri
     ids: iter::Peekable<IDS>,
 
     /// Output for the current operand (drained by the `inst_operands` method).
-    out: String,
+    out: PrintOutParts<ID>,
 }
 
-impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrinter<IMMS, IDS> {
+impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrinter<IMMS, ID, IDS> {
     fn is_exhausted(&mut self) -> bool {
         self.imms.peek().is_none() && self.ids.peek().is_none()
     }
@@ -98,7 +148,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrint
         let (name, def) = kind.name_and_def();
 
         // FIXME(eddyb) should this be a hard error?
-        let missing = || format!("/* missing {} */", name);
+        let write_missing = |this: &mut Self| write!(this.out, "/* missing {} */", name);
 
         let mut maybe_get_enum_word = || match self.imms.next() {
             Some(spv::Imm::Short(found_kind, word)) => {
@@ -106,17 +156,14 @@ impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrint
                 Some(word)
             }
             Some(spv::Imm::LongStart(..)) | Some(spv::Imm::LongCont(..)) => unreachable!(),
-            None => {
-                self.out.push_str(&missing());
-                None
-            }
+            None => None,
         };
 
         match def {
             spec::OperandKindDef::BitEnum { empty_name, bits } => {
                 let word = match maybe_get_enum_word() {
                     Some(word) => word,
-                    None => return Ok(()),
+                    None => return write_missing(self),
                 };
 
                 write!(self.out, "{}", name)?;
@@ -141,7 +188,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrint
             spec::OperandKindDef::ValueEnum { variants } => {
                 let word = match maybe_get_enum_word() {
                     Some(word) => word,
-                    None => return Ok(()),
+                    None => return write_missing(self),
                 };
 
                 let (variant_name, variant_def) =
@@ -149,35 +196,30 @@ impl<IMMS: Iterator<Item = spv::Imm>, IDS: Iterator<Item = String>> OperandPrint
                 write!(self.out, "{}.{}", name, variant_name)?;
                 self.enumerant_params(variant_def)
             }
-            spec::OperandKindDef::Id => {
-                let s = self.ids.next().unwrap_or_else(missing);
-                if self.out.is_empty() {
-                    self.out = s;
-                } else {
-                    self.out.push_str(&s);
+            spec::OperandKindDef::Id => match self.ids.next() {
+                Some(id) => {
+                    self.out.parts.push(PrintOutPart::Id(id));
+                    Ok(())
                 }
-                Ok(())
-            }
+                None => write_missing(self),
+            },
             spec::OperandKindDef::Literal { .. } => {
                 // FIXME(eddyb) there's no reason to take the first word now,
-                // `self.literal(kind)` could do itself.
-                let (found_kind, first_word) = match self.imms.next() {
-                    Some(spv::Imm::Short(kind, word)) | Some(spv::Imm::LongStart(kind, word)) => {
-                        (kind, word)
+                // `self.literal(kind)` could do it itself.
+                match self.imms.next() {
+                    Some(spv::Imm::Short(found_kind, word))
+                    | Some(spv::Imm::LongStart(found_kind, word)) => {
+                        assert!(kind == found_kind);
+                        self.literal(kind, word)
                     }
                     Some(spv::Imm::LongCont(..)) => unreachable!(),
-                    None => {
-                        self.out.push_str(&missing());
-                        return Ok(());
-                    }
-                };
-                assert!(kind == found_kind);
-                self.literal(kind, first_word)
+                    None => write_missing(self),
+                }
             }
         }
     }
 
-    fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = String> {
+    fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = PrintOutParts<ID>> {
         opcode.def().all_operands().map_while(move |(mode, kind)| {
             if mode == spec::OperandMode::Optional {
                 if self.is_exhausted() {
@@ -196,7 +238,7 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> String {
     let mut printer = OperandPrinter {
         imms: imms.into_iter().peekable(),
         ids: iter::empty().peekable(),
-        out: String::new(),
+        out: PrintOutParts::default(),
     };
     let &kind = match printer.imms.peek().unwrap() {
         spv::Imm::Short(kind, _) | spv::Imm::LongStart(kind, _) => kind,
@@ -204,7 +246,7 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> String {
     };
     printer.operand(kind).unwrap();
     assert!(printer.imms.next().is_none());
-    printer.out
+    printer.out.concat()
 }
 
 /// Print a single SPIR-V (short) immediate (e.g. an enumerand).
@@ -215,15 +257,15 @@ pub fn imm(kind: spec::OperandKind, word: u32) -> String {
 /// Group (ordered according to `opcode`) `imms` and `ids` into logical operands
 /// (i.e. long immediates are unflattened) and produce one output `String`
 /// by printing each of them.
-pub fn inst_operands(
+pub fn inst_operands<ID>(
     opcode: spec::Opcode,
     imms: impl IntoIterator<Item = spv::Imm>,
-    ids: impl IntoIterator<Item = String>,
-) -> impl Iterator<Item = String> {
+    ids: impl IntoIterator<Item = ID>,
+) -> impl Iterator<Item = PrintOutParts<ID>> {
     OperandPrinter {
         imms: imms.into_iter().peekable(),
         ids: ids.into_iter().peekable(),
-        out: String::new(),
+        out: PrintOutParts::default(),
     }
     .inst_operands(opcode)
 }

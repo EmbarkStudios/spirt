@@ -640,6 +640,49 @@ impl<'a, 'b> Printer<'a, 'b> {
             ]),
         )
     }
+
+    /// Pretty-print an arbitrary SPIR-V `opcode` with `imms` and `ids` as its
+    /// SPIR-V operands (with each `ID` in `ids` passed through `print_id`),
+    /// and optionally with a ` : ...` type annotation at the end (`result_type`).
+    ///
+    /// `print_id` can return `None` to indicate an ID operand is implicit in
+    /// SPIR-T, and should not be printed (e.g. decorations' target IDs).
+    ///
+    /// This should be used everywhere a SPIR-V instruction needs to be printed,
+    /// to ensure consistency across all such situations.
+    fn pretty_spv_inst<ID, OS: Into<Option<String>>>(
+        &self,
+        opcode: spv::spec::Opcode,
+        imms: &[spv::Imm],
+        ids: &[ID],
+        print_id: impl Fn(&ID) -> OS,
+        result_type: Option<Type>,
+    ) -> String {
+        self.pretty_join_space(
+            opcode.name(),
+            spv::print::inst_operands(opcode, imms.iter().copied(), ids.into_iter())
+                .filter_map(|operand| {
+                    if let [spv::print::PrintOutPart::Id(id)] = operand.parts[..] {
+                        print_id(id).into()
+                    } else {
+                        Some(
+                            operand
+                                .parts
+                                .into_iter()
+                                .map(|part| match part {
+                                    spv::print::PrintOutPart::Printed(s) => s,
+                                    spv::print::PrintOutPart::Id(id) => print_id(id)
+                                        .into()
+                                        .unwrap_or_else(|| "/* implicit ID */".to_string()),
+                                })
+                                .reduce(|out, extra| out + &extra)
+                                .unwrap_or_default(),
+                        )
+                    }
+                })
+                .chain(result_type.map(|ty| format!(": {}", ty.print(self)))),
+        )
+    }
 }
 
 /// Helper type for for `pretty_concat_pieces`.
@@ -974,23 +1017,24 @@ impl Print for ExportKey {
         match self {
             &Self::LinkName(name) => format!("{:?}", &printer.cx[name]),
 
+            // HACK(eddyb) `interface_global_vars` should be recomputed by
+            // `spv::lift` anyway, so hiding them here mimics that.
             Self::SpvEntryPoint {
                 imms,
-                interface_global_vars,
+                interface_global_vars: _,
             } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
+                struct ImplicitTargetId;
+
                 printer.pretty_join_comma_sep(
                     "(",
-                    [printer.pretty_join_space(
-                        "OpEntryPoint",
-                        spv::print::inst_operands(
-                            wk.OpEntryPoint,
-                            imms.iter().copied(),
-                            iter::once(/* dummy target ID */ String::new())
-                                .chain(interface_global_vars.iter().map(|&gv| gv.print(printer))),
-                        )
-                        .skip(/* dummy target ID */ 1),
+                    [printer.pretty_spv_inst(
+                        wk.OpEntryPoint,
+                        imms,
+                        &[ImplicitTargetId],
+                        |ImplicitTargetId| None,
+                        None,
                     )],
                     "",
                     ")",
@@ -1069,15 +1113,17 @@ impl Print for Attr {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         match self {
-            Attr::SpvAnnotation { opcode, imms } => printer.pretty_join_space(
-                opcode.name(),
-                spv::print::inst_operands(
+            Attr::SpvAnnotation { opcode, imms } => {
+                struct ImplicitTargetId;
+
+                printer.pretty_spv_inst(
                     *opcode,
-                    imms.iter().copied(),
-                    [/* dummy target ID */ String::new()],
+                    imms,
+                    &[ImplicitTargetId],
+                    |ImplicitTargetId| None,
+                    None,
                 )
-                .skip(/* dummy target ID */ 1),
-            ),
+            }
             &Attr::SpvDebugLine {
                 file_path,
                 line,
@@ -1162,16 +1208,15 @@ impl Print for TypeDef {
                 def
             } else {
                 match *ctor {
-                    TypeCtor::SpvInst { opcode, ref imms } => printer.pretty_join_space(
-                        opcode.name(),
-                        spv::print::inst_operands(
-                            opcode,
-                            imms.iter().copied(),
-                            ctor_args.iter().map(|&arg| match arg {
-                                TypeCtorArg::Type(ty) => ty.print(printer),
-                                TypeCtorArg::Const(ct) => ct.print(printer),
-                            }),
-                        ),
+                    TypeCtor::SpvInst { opcode, ref imms } => printer.pretty_spv_inst(
+                        opcode,
+                        imms,
+                        ctor_args,
+                        |&arg| match arg {
+                            TypeCtorArg::Type(ty) => ty.print(printer),
+                            TypeCtorArg::Const(ct) => ct.print(printer),
+                        },
+                        None,
                     ),
                 }
             },
@@ -1293,14 +1338,12 @@ impl Print for ConstDef {
             } else {
                 match *ctor {
                     ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
-                    ConstCtor::SpvInst { opcode, ref imms } => printer.pretty_join_space(
-                        opcode.name(),
-                        spv::print::inst_operands(
-                            opcode,
-                            imms.iter().copied(),
-                            ctor_args.iter().map(|&ct| ct.print(printer)),
-                        )
-                        .chain([format!(": {}", ty.print(printer))]),
+                    ConstCtor::SpvInst { opcode, ref imms } => printer.pretty_spv_inst(
+                        opcode,
+                        imms,
+                        ctor_args,
+                        |&ct| ct.print(printer),
+                        Some(*ty),
                     ),
                 }
             },
@@ -1514,24 +1557,16 @@ impl Print for DataInstDef {
 
         let attrs = attrs.print(printer);
 
-        let output_type = output_type.map(|ty| ty.print(printer));
-
         let def = match *kind {
             DataInstKind::FuncCall(func) => printer.pretty_join_comma_sep(
                 &format!("call {}(", func.print(printer)),
                 inputs.iter().map(|v| v.print(printer)),
                 ",",
-                &output_type.map_or(")".to_string(), |ty| format!(") : {}", ty)),
+                &output_type.map_or(")".to_string(), |ty| format!(") : {}", ty.print(printer))),
             ),
-            DataInstKind::SpvInst { opcode, ref imms } => printer.pretty_join_space(
-                opcode.name(),
-                spv::print::inst_operands(
-                    opcode,
-                    imms.iter().copied(),
-                    inputs.iter().map(|v| v.print(printer)),
-                )
-                .chain(output_type.map(|ty| format!(": {}", ty))),
-            ),
+            DataInstKind::SpvInst { opcode, ref imms } => {
+                printer.pretty_spv_inst(opcode, imms, inputs, |v| v.print(printer), *output_type)
+            }
             DataInstKind::SpvExtInst { ext_set, inst } => {
                 // FIXME(eddyb) should this be rendered more compactly?
                 printer.pretty_join_space(
@@ -1542,7 +1577,7 @@ impl Print for DataInstDef {
                     inputs
                         .iter()
                         .map(|v| v.print(printer))
-                        .chain(output_type.map(|ty| format!(": {}", ty))),
+                        .chain(output_type.map(|ty| format!(": {}", ty.print(printer)))),
                 )
             }
         };
@@ -1564,28 +1599,27 @@ impl Print for ControlInst {
         let attrs = attrs.print(printer);
 
         let def = match *kind {
-            ControlInstKind::SpvInst { opcode, ref imms } => printer.pretty_join_space(
-                opcode.name(),
-                spv::print::inst_operands(
-                    opcode,
-                    imms.iter().copied(),
-                    inputs.iter().map(|input| match *input {
-                        ControlInstInput::Value(v) => v.print(printer),
+            ControlInstKind::SpvInst { opcode, ref imms } => printer.pretty_spv_inst(
+                opcode,
+                imms,
+                inputs,
+                |input| match *input {
+                    ControlInstInput::Value(v) => v.print(printer),
 
-                        ControlInstInput::TargetBlock(block) => {
-                            let block_header = Use::Block(block).print(printer);
-                            match target_block_inputs.get(&block) {
-                                Some(block_inputs) => printer.pretty_join_comma_sep(
-                                    &(block_header + "("),
-                                    block_inputs.iter().map(|v| v.print(printer)),
-                                    ",",
-                                    ")",
-                                ),
-                                None => block_header,
-                            }
+                    ControlInstInput::TargetBlock(block) => {
+                        let block_header = Use::Block(block).print(printer);
+                        match target_block_inputs.get(&block) {
+                            Some(block_inputs) => printer.pretty_join_comma_sep(
+                                &(block_header + "("),
+                                block_inputs.iter().map(|v| v.print(printer)),
+                                ",",
+                                ")",
+                            ),
+                            None => block_header,
                         }
-                    }),
-                ),
+                    }
+                },
+                None,
             ),
         };
 
