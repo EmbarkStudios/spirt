@@ -4,9 +4,9 @@ use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
     AddrSpace, Attr, AttrSet, Block, BlockDef, BlockInput, Const, ConstCtor, ConstDef, Context,
-    ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlInst, ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
@@ -591,13 +591,13 @@ impl LazyInst<'_> {
                     id_operands: control_inst
                         .inputs
                         .iter()
-                        .map(|&input| match input {
-                            ControlInstInput::Value(v) => value_to_id(parent_func_ids, v),
-
-                            ControlInstInput::TargetBlock(block) => {
-                                parent_func_ids.blocks[&block].label_id
-                            }
-                        })
+                        .map(|&v| value_to_id(parent_func_ids, v))
+                        .chain(
+                            control_inst
+                                .target_blocks
+                                .iter()
+                                .map(|&block| parent_func_ids.blocks[&block].label_id),
+                        )
                         .collect(),
                 },
             },

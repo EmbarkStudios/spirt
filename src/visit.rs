@@ -1,8 +1,8 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
-    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlInst, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -55,9 +55,6 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_control_inst(&mut self, control_inst: &'a ControlInst) {
         control_inst.inner_visit_with(self);
-    }
-    fn visit_control_inst_input(&mut self, input: &'a ControlInstInput) {
-        input.inner_visit_with(self);
     }
     fn visit_value_use(&mut self, v: &'a Value) {
         v.inner_visit_with(self);
@@ -336,6 +333,7 @@ impl InnerVisit for ControlInst {
             attrs,
             kind,
             inputs,
+            target_blocks: _,
             target_block_inputs,
         } = self;
 
@@ -343,23 +341,13 @@ impl InnerVisit for ControlInst {
         match kind {
             ControlInstKind::SpvInst { opcode: _, imms: _ } => {}
         }
-        for input in inputs {
-            visitor.visit_control_inst_input(input);
+        for v in inputs {
+            visitor.visit_value_use(v);
         }
         for block_inputs in target_block_inputs.values() {
             for v in block_inputs {
                 visitor.visit_value_use(v);
             }
-        }
-    }
-}
-
-impl InnerVisit for ControlInstInput {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        match self {
-            Self::Value(v) => visitor.visit_value_use(v),
-
-            Self::TargetBlock(_) => {}
         }
     }
 }

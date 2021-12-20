@@ -4,9 +4,9 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     print, AddrSpace, Attr, AttrSet, Block, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
-    Context, ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstKind, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody,
-    Import, InternedStr, Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    Context, ControlInst, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee,
+    Func, FuncDecl, FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
+    Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -912,6 +912,7 @@ impl Module {
                                                 imms: [].into_iter().collect(),
                                             },
                                             inputs: [].into_iter().collect(),
+                                            target_blocks: [].into_iter().collect(),
                                             target_block_inputs: IndexMap::new(),
                                         },
                                     },
@@ -1154,28 +1155,37 @@ impl Module {
                         block_inputs_entry.insert(block_inputs);
                         Ok(())
                     };
+
+                    // Split the operands into value inputs (e.g. a branch's
+                    // condition or an `OpSwitch`'s selector) and target blocks.
+                    let mut inputs = SmallVec::new();
+                    let mut target_blocks = SmallVec::new();
+                    for &id in id_operands {
+                        match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
+                            LocalIdDef::Value(v) => {
+                                if !target_blocks.is_empty() {
+                                    return Err(invalid(
+                                        "out of order: value operand \
+                                         after target label ID",
+                                    ));
+                                }
+                                inputs.push(v);
+                            }
+                            LocalIdDef::BlockLabel(block) => {
+                                process_phis_for_edge_to(id, block)?;
+                                target_blocks.push(block);
+                            }
+                        }
+                    }
+
                     current_block_def.terminator = ControlInst {
                         attrs,
                         kind: ControlInstKind::SpvInst {
                             opcode,
                             imms: imm_operands.iter().copied().collect(),
                         },
-                        inputs: id_operands
-                            .iter()
-                            .map(|&id| {
-                                Ok(
-                                    match lookup_global_or_local_id_for_data_or_control_inst_input(
-                                        id,
-                                    )? {
-                                        LocalIdDef::Value(v) => ControlInstInput::Value(v),
-                                        LocalIdDef::BlockLabel(block) => {
-                                            process_phis_for_edge_to(id, block)?;
-                                            ControlInstInput::TargetBlock(block)
-                                        }
-                                    },
-                                )
-                            })
-                            .collect::<io::Result<_>>()?,
+                        inputs,
+                        target_blocks,
                         target_block_inputs,
                     };
                 } else if opcode == wk.OpPhi {

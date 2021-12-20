@@ -319,8 +319,10 @@ pub struct ControlInst {
 
     pub kind: ControlInstKind,
 
-    // FIXME(eddyb) find a better name, "input" doesn't work well for non-values.
-    pub inputs: SmallVec<[ControlInstInput; 2]>,
+    pub inputs: SmallVec<[Value; 2]>,
+
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    pub target_blocks: SmallVec<[Block; 4]>,
 
     // FIXME(eddyb) this is clunky because it models φ nodes (`OpPhi` in SPIR-V),
     // replace the CFG setup with stricter structural regions.
@@ -337,13 +339,6 @@ pub enum ControlInstKind {
         // of interning "long immediates", compared to the flattened representation.
         imms: SmallVec<[spv::Imm; 2]>,
     },
-}
-
-#[derive(Copy, Clone)]
-pub enum ControlInstInput {
-    Value(Value),
-
-    TargetBlock(Block),
 }
 
 #[derive(Copy, Clone)]

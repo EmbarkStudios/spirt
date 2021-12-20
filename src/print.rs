@@ -1,10 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, BlockDef, BlockInput, Const, ConstCtor,
-    ConstDef, Context, ControlInst, ControlInstInput, ControlInstKind, DataInst, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    ConstDef, Context, ControlInst, ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -664,12 +664,12 @@ impl<'a, 'b> Printer<'a, 'b> {
     ///
     /// This should be used everywhere a SPIR-V instruction needs to be printed,
     /// to ensure consistency across all such situations.
-    fn pretty_spv_inst<ID, OS: Into<Option<String>>>(
+    fn pretty_spv_inst<ID: Copy, OS: Into<Option<String>>>(
         &self,
         opcode: spv::spec::Opcode,
         imms: &[spv::Imm],
-        ids: &[ID],
-        print_id: impl Fn(&ID, &Self) -> OS,
+        ids: impl IntoIterator<Item = ID>,
+        print_id: impl Fn(ID, &Self) -> OS,
         result_type: Option<Type>,
     ) -> String {
         // Split operands into "angle brackets" (immediates) and "parens" (IDs),
@@ -678,7 +678,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         let mut next_extra_idx: usize = 0;
         let mut paren_operands = SmallVec::<[String; 16]>::new();
         let mut angle_bracket_operands =
-            spv::print::inst_operands(opcode, imms.iter().copied(), ids.into_iter())
+            spv::print::inst_operands(opcode, imms.iter().copied(), ids)
                 .filter_map(|operand| {
                     if let [spv::print::PrintOutPart::Id(id)] = operand.parts[..] {
                         paren_operands.extend(print_id(id, self).into());
@@ -1631,34 +1631,59 @@ impl Print for ControlInst {
             attrs,
             kind,
             inputs,
+            target_blocks,
             target_block_inputs,
         } = self;
 
         let attrs = attrs.print(printer);
 
-        let def = match *kind {
-            ControlInstKind::SpvInst { opcode, ref imms } => printer.pretty_spv_inst(
-                opcode,
-                imms,
-                inputs,
-                |input, printer| match *input {
-                    ControlInstInput::Value(v) => v.print(printer),
+        let mut targets: SmallVec<[_; 4]> = target_blocks
+            .iter()
+            .map(|&block| {
+                let block_header = format!("=> {}", Use::Block(block).print(printer));
+                match target_block_inputs.get(&block) {
+                    Some(block_inputs) => printer.pretty_join_comma_sep(
+                        &(block_header + "("),
+                        block_inputs.iter().map(|v| v.print(printer)),
+                        ",",
+                        ")",
+                    ),
+                    None => block_header,
+                }
+            })
+            .collect();
 
-                    ControlInstInput::TargetBlock(block) => {
-                        let block_header = Use::Block(block).print(printer);
-                        match target_block_inputs.get(&block) {
-                            Some(block_inputs) => printer.pretty_join_comma_sep(
-                                &(block_header + "("),
-                                block_inputs.iter().map(|v| v.print(printer)),
-                                ",",
-                                ")",
-                            ),
-                            None => block_header,
+        let def = match *kind {
+            ControlInstKind::SpvInst { opcode, ref imms } => {
+                #[derive(Copy, Clone)]
+                struct TargetBlockLabelId;
+
+                let header = printer.pretty_spv_inst(
+                    opcode,
+                    imms,
+                    inputs
+                        .iter()
+                        .map(Ok)
+                        .chain(target_blocks.iter().map(|_| Err(TargetBlockLabelId))),
+                    |id, printer| match id {
+                        Ok(v) => Some(v.print(printer)),
+                        Err(TargetBlockLabelId) => None,
+                    },
+                    None,
+                );
+
+                match targets.len() {
+                    0 => header,
+                    1 => header + " " + &targets[0],
+                    _ => {
+                        // FIXME(eddyb) automate reindenting (and make it configurable).
+                        for target in &mut targets {
+                            *target = target.replace("\n", "\n  ");
                         }
+                        header + " {\n  " + &targets.join(",\n  ") + ",\n}"
                     }
-                },
-                None,
-            ),
+                }
+            }
         };
 
         attrs + &def

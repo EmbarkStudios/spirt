@@ -1,8 +1,8 @@
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
-    ControlInst, ControlInstInput, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlInst, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -161,12 +161,6 @@ pub trait Transformer: Sized {
     }
     fn transform_const_def(&mut self, ct_def: &ConstDef) -> Transformed<ConstDef> {
         ct_def.inner_transform_with(self)
-    }
-    fn transform_control_inst_input(
-        &mut self,
-        input: &ControlInstInput,
-    ) -> Transformed<ControlInstInput> {
-        input.inner_transform_with(self)
     }
 
     // Non-leaves transformed in-place (defaulting to calling
@@ -524,6 +518,7 @@ impl InnerInPlaceTransform for ControlInst {
             attrs,
             kind,
             inputs,
+            target_blocks: _,
             target_block_inputs,
         } = self;
 
@@ -531,27 +526,13 @@ impl InnerInPlaceTransform for ControlInst {
         match kind {
             ControlInstKind::SpvInst { opcode: _, imms: _ } => {}
         }
-        for input in inputs {
-            transformer
-                .transform_control_inst_input(input)
-                .apply_to(input);
+        for v in inputs {
+            v.inner_transform_with(transformer).apply_to(v);
         }
         for block_inputs in target_block_inputs.values_mut() {
             for v in block_inputs {
                 v.inner_transform_with(transformer).apply_to(v);
             }
-        }
-    }
-}
-
-impl InnerTransform for ControlInstInput {
-    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
-        match self {
-            Self::Value(v) => transform!({
-                v -> v.inner_transform_with(transformer),
-            } => Self::Value(v)),
-
-            Self::TargetBlock(_) => Transformed::Unchanged,
         }
     }
 }
