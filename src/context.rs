@@ -262,6 +262,6 @@ macro_rules! uniq_indices {
 uniq_indices! {
     GlobalVar => crate::GlobalVarDecl,
     Func => crate::FuncDecl,
-    Block => crate::BlockDef,
+    Region => crate::RegionDef,
     DataInst => crate::DataInstDef,
 }

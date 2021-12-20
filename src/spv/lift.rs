@@ -3,10 +3,10 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, Block, BlockDef, BlockInput, Const, ConstCtor, ConstDef, Context,
-    ControlInst, ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlInst, ControlInstKind,
+    DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
+    FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Region,
+    RegionDef, RegionInputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
@@ -182,7 +182,7 @@ struct AllocatedIds<'a> {
 struct FuncIds {
     func_id: spv::Id,
     param_ids: SmallVec<[spv::Id; 4]>,
-    blocks: FxHashMap<Block, BlockIds>,
+    blocks: FxHashMap<Region, BlockIds>,
     data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
 }
 
@@ -233,31 +233,31 @@ impl<'a> NeedsIdsCollector<'a> {
                         DeclDef::Present(def) => Some(def),
                     };
 
-                    let all_blocks = func_def_body
+                    let all_regions = func_def_body
                         .into_iter()
-                        .flat_map(|func_def_body| &func_def_body.all_blocks)
+                        .flat_map(|func_def_body| &func_def_body.all_regions)
                         .copied();
                     let all_insts_with_output =
                         func_def_body.into_iter().flat_map(|func_def_body| {
                             func_def_body
-                                .all_blocks
+                                .all_regions
                                 .iter()
-                                .flat_map(|&block| {
-                                    func_def_body.blocks[block].insts.iter().copied()
+                                .flat_map(|&region| {
+                                    func_def_body.regions[region].insts.iter().copied()
                                 })
                                 .filter(|&inst| {
                                     func_def_body.data_insts[inst].output_type.is_some()
                                 })
                         });
 
-                    let mut blocks: FxHashMap<_, _> = all_blocks
+                    let mut blocks: FxHashMap<_, _> = all_regions
                         .clone()
-                        .map(|block| {
+                        .map(|region| {
                             Ok((
-                                block,
+                                region,
                                 BlockIds {
                                     label_id: alloc_id()?,
-                                    phis: func_def_body.unwrap().blocks[block]
+                                    phis: func_def_body.unwrap().regions[region]
                                         .inputs
                                         .iter()
                                         .map(|_| {
@@ -273,12 +273,12 @@ impl<'a> NeedsIdsCollector<'a> {
                         .collect::<Result<_, _>>()?;
 
                     // Collect phis from other blocks' edges into each block.
-                    for source_block in all_blocks {
-                        let source_block_def = &func_def_body.unwrap().blocks[source_block];
-                        let source_label_id = blocks[&source_block].label_id;
+                    for source_region in all_regions {
+                        let source_region_def = &func_def_body.unwrap().regions[source_region];
+                        let source_label_id = blocks[&source_region].label_id;
 
                         for (&target_block, block_inputs) in
-                            &source_block_def.terminator.target_block_inputs
+                            &source_region_def.terminator.target_inputs
                         {
                             let target_block_ids = blocks.get_mut(&target_block).unwrap();
                             for (target_phi, &v) in
@@ -327,7 +327,7 @@ enum LazyInst<'a> {
     },
     OpPhi {
         parent_func_ids: &'a FuncIds,
-        block_input: &'a BlockInput,
+        input_decl: &'a RegionInputDecl,
         phi: &'a Phi,
     },
     DataInst {
@@ -382,9 +382,9 @@ impl LazyInst<'_> {
             Self::OpLabel { label_id } => (Some(label_id), AttrSet::default(), None),
             Self::OpPhi {
                 parent_func_ids: _,
-                block_input,
+                input_decl,
                 phi,
-            } => (Some(phi.result_id), block_input.attrs, None),
+            } => (Some(phi.result_id), input_decl.attrs, None),
             Self::DataInst {
                 parent_func_ids: _,
                 result_id,
@@ -405,8 +405,8 @@ impl LazyInst<'_> {
         let value_to_id = |parent_func_ids: &FuncIds, v| match v {
             Value::Const(ct) => ids.globals[&Global::Const(ct)],
             Value::FuncParam { idx } => parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
-            Value::BlockInput { block, input_idx } => {
-                parent_func_ids.blocks[&block].phis[usize::try_from(input_idx).unwrap()].result_id
+            Value::RegionInput { region, input_idx } => {
+                parent_func_ids.blocks[&region].phis[usize::try_from(input_idx).unwrap()].result_id
             }
             Value::DataInstOutput(inst) => parent_func_ids.data_inst_output_ids[&inst],
         };
@@ -526,11 +526,11 @@ impl LazyInst<'_> {
             },
             Self::OpPhi {
                 parent_func_ids,
-                block_input,
+                input_decl,
                 phi,
             } => spv::Inst {
                 opcode: wk.OpPhi,
-                result_type_id: Some(ids.globals[&Global::Type(block_input.ty)]),
+                result_type_id: Some(ids.globals[&Global::Type(input_decl.ty)]),
                 result_id: Some(phi.result_id),
                 imm_operands: [].into_iter().collect(),
                 id_operands: phi
@@ -594,9 +594,9 @@ impl LazyInst<'_> {
                         .map(|&v| value_to_id(parent_func_ids, v))
                         .chain(
                             control_inst
-                                .target_blocks
+                                .targets
                                 .iter()
-                                .map(|&block| parent_func_ids.blocks[&block].label_id),
+                                .map(|&region| parent_func_ids.blocks[&region].label_id),
                         )
                         .collect(),
                 },
@@ -715,23 +715,23 @@ impl Module {
                     .chain(func_def_body.into_iter().flat_map(move |func_def_body| {
                         let FuncDefBody {
                             data_insts,
-                            blocks,
-                            all_blocks,
+                            regions,
+                            all_regions,
                         } = func_def_body;
 
-                        all_blocks.iter().flat_map(move |&block| {
-                            let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
-                            let BlockDef {
+                        all_regions.iter().flat_map(move |&region| {
+                            let &BlockIds { label_id, ref phis } = &func_ids.blocks[&region];
+                            let RegionDef {
                                 inputs,
                                 insts,
                                 terminator,
-                            } = &blocks[block];
+                            } = &regions[region];
 
                             iter::once(LazyInst::OpLabel { label_id })
-                                .chain(inputs.iter().zip(phis).map(|(block_input, phi)| {
+                                .chain(inputs.iter().zip(phis).map(|(input_decl, phi)| {
                                     LazyInst::OpPhi {
                                         parent_func_ids: func_ids,
-                                        block_input,
+                                        input_decl,
                                         phi,
                                     }
                                 }))

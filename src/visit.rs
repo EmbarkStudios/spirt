@@ -1,8 +1,9 @@
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, BlockDef, BlockInput, Const, ConstCtor, ConstDef,
-    ControlInst, ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
-    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlInst,
+    ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -273,16 +274,16 @@ impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             data_insts,
-            blocks,
-            all_blocks,
+            regions,
+            all_regions,
         } = self;
 
-        for &block in all_blocks {
-            let BlockDef {
+        for &region in all_regions {
+            let RegionDef {
                 inputs,
                 insts,
                 terminator,
-            } = &blocks[block];
+            } = &regions[region];
 
             for input in inputs {
                 input.inner_visit_with(visitor);
@@ -295,7 +296,7 @@ impl InnerVisit for FuncDefBody {
     }
 }
 
-impl InnerVisit for BlockInput {
+impl InnerVisit for RegionInputDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self { attrs, ty } = *self;
 
@@ -333,8 +334,8 @@ impl InnerVisit for ControlInst {
             attrs,
             kind,
             inputs,
-            target_blocks: _,
-            target_block_inputs,
+            targets: _,
+            target_inputs,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
@@ -344,8 +345,8 @@ impl InnerVisit for ControlInst {
         for v in inputs {
             visitor.visit_value_use(v);
         }
-        for block_inputs in target_block_inputs.values() {
-            for v in block_inputs {
+        for target_inputs in target_inputs.values() {
+            for v in target_inputs {
                 visitor.visit_value_use(v);
             }
         }
@@ -357,8 +358,8 @@ impl InnerVisit for Value {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
             Self::FuncParam { idx: _ }
-            | Self::BlockInput {
-                block: _,
+            | Self::RegionInput {
+                region: _,
                 input_idx: _,
             }
             | Self::DataInstOutput(_) => {}

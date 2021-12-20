@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
-pub use context::{AttrSet, Block, Const, Context, DataInst, Func, GlobalVar, InternedStr, Type};
+pub use context::{AttrSet, Const, Context, DataInst, Func, GlobalVar, InternedStr, Region, Type};
 
 pub mod print;
 pub mod transform;
@@ -265,19 +265,19 @@ pub struct FuncDefBody {
     // FIXME(eddyb) this might not be the most efficient storage,
     // but it prevents misuse.
     pub data_insts: context::UniqIdxMap<DataInst, DataInstDef>,
-    pub blocks: context::UniqIdxMap<Block, BlockDef>,
+    pub regions: context::UniqIdxMap<Region, RegionDef>,
 
-    // FIXME(eddyb) replace this with a hierarchical "region" system.
-    pub all_blocks: Vec<Block>,
+    // FIXME(eddyb) replace this with a hierarchical "structural region" system.
+    pub all_regions: Vec<Region>,
 }
 
-pub struct BlockDef {
-    pub inputs: SmallVec<[BlockInput; 2]>,
+pub struct RegionDef {
+    pub inputs: SmallVec<[RegionInputDecl; 2]>,
     pub insts: Vec<DataInst>,
     pub terminator: ControlInst,
 }
 
-pub struct BlockInput {
+pub struct RegionInputDecl {
     pub attrs: AttrSet,
 
     pub ty: Type,
@@ -322,11 +322,11 @@ pub struct ControlInst {
     pub inputs: SmallVec<[Value; 2]>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub target_blocks: SmallVec<[Block; 4]>,
+    pub targets: SmallVec<[Region; 4]>,
 
     // FIXME(eddyb) this is clunky because it models φ nodes (`OpPhi` in SPIR-V),
     // replace the CFG setup with stricter structural regions.
-    pub target_block_inputs: IndexMap<Block, SmallVec<[Value; 2]>>,
+    pub target_inputs: IndexMap<Region, SmallVec<[Value; 2]>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -344,9 +344,9 @@ pub enum ControlInstKind {
 #[derive(Copy, Clone)]
 pub enum Value {
     Const(Const),
-    // FIXME(eddyb) consider replacing this with inputs of the entry block.
+    // FIXME(eddyb) consider replacing this with inputs of the entry region.
     FuncParam { idx: u32 },
     // FIXME(eddyb) this variant alone increases the size of the `enum`.
-    BlockInput { block: Block, input_idx: u32 },
+    RegionInput { region: Region, input_idx: u32 },
     DataInstOutput(DataInst),
 }

@@ -1,10 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Block, BlockDef, BlockInput, Const, ConstCtor,
-    ConstDef, Context, ControlInst, ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef,
-    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, ControlInst,
+    ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionInputDecl, Type, TypeCtor,
+    TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use indexmap::IndexMap;
@@ -91,8 +91,8 @@ enum Use {
     GlobalVar(GlobalVar),
     Func(Func),
 
-    Block(Block),
-    BlockInput { block: Block, input_idx: u32 },
+    Region(Region),
+    RegionInput { region: Region, input_idx: u32 },
     DataInstOutput(DataInst),
 }
 
@@ -102,8 +102,8 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            Self::Block(_) => "block",
-            Self::BlockInput { .. } | Self::DataInstOutput(_) => "v",
+            Self::Region(_) => "region",
+            Self::RegionInput { .. } | Self::DataInstOutput(_) => "v",
         }
     }
 }
@@ -279,10 +279,10 @@ impl<'a> Visitor<'a> for Plan<'a> {
         match *v {
             Value::Const(_) | Value::FuncParam { .. } => {}
 
-            Value::BlockInput { block, input_idx } => {
+            Value::RegionInput { region, input_idx } => {
                 *self
                     .use_counts
-                    .entry(Use::BlockInput { block, input_idx })
+                    .entry(Use::RegionInput { region, input_idx })
                     .or_default() += 1;
             }
             Value::DataInstOutput(inst) => {
@@ -375,7 +375,8 @@ impl<'a, 'b> Printer<'a, 'b> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::Block(_) | Use::BlockInput { .. } | Use::DataInstOutput(_) = use_kind {
+                if let Use::Region(_) | Use::RegionInput { .. } | Use::DataInstOutput(_) = use_kind
+                {
                     return (use_kind, UseStyle::Inline);
                 }
 
@@ -429,7 +430,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                             }
                     }
                     Use::GlobalVar(_) | Use::Func(_) => false,
-                    Use::Block(_) | Use::BlockInput { .. } | Use::DataInstOutput(_) => {
+                    Use::Region(_) | Use::RegionInput { .. } | Use::DataInstOutput(_) => {
                         unreachable!()
                     }
                 };
@@ -443,7 +444,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::Block(_) | Use::BlockInput { .. } | Use::DataInstOutput(_) => {
+                        Use::Region(_) | Use::RegionInput { .. } | Use::DataInstOutput(_) => {
                             unreachable!()
                         }
                     };
@@ -457,28 +458,28 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         for (&_func, &func_decl) in &plan.func_decl_cache {
             if let DeclDef::Present(func_def_body) = &func_decl.def {
-                let mut block_counter = 0;
+                let mut region_counter = 0;
                 let mut value_counter = 0;
 
-                for &block in &func_def_body.all_blocks {
-                    let BlockDef {
+                for &region in &func_def_body.all_regions {
+                    let RegionDef {
                         inputs,
                         insts,
                         terminator: _,
-                    } = &func_def_body.blocks[block];
+                    } = &func_def_body.regions[region];
 
-                    // FIXME(eddyb) only insert here if the block is actually "used".
+                    // FIXME(eddyb) only insert here if the region is actually "used".
                     {
-                        let idx = block_counter;
-                        block_counter += 1;
-                        use_styles.insert(Use::Block(block), UseStyle::Anon { idx });
+                        let idx = region_counter;
+                        region_counter += 1;
+                        use_styles.insert(Use::Region(region), UseStyle::Anon { idx });
                     }
 
                     let defined_values = inputs
                         .iter()
                         .enumerate()
-                        .map(|(i, _)| Use::BlockInput {
-                            block,
+                        .map(|(i, _)| Use::RegionInput {
+                            region,
                             input_idx: i.try_into().unwrap(),
                         })
                         .chain(
@@ -824,7 +825,7 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::Block(_) | Self::BlockInput { .. } | Self::DataInstOutput(_) => {
+                Self::Region(_) | Self::RegionInput { .. } | Self::DataInstOutput(_) => {
                     "_".to_string()
                 }
             },
@@ -1483,26 +1484,26 @@ impl Print for FuncDecl {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
             DeclDef::Present(FuncDefBody {
                 data_insts,
-                blocks,
-                all_blocks,
+                regions,
+                all_regions,
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for &block in all_blocks {
-                    let BlockDef {
+                for &region in all_regions {
+                    let RegionDef {
                         inputs,
                         insts,
                         terminator,
-                    } = &blocks[block];
+                    } = &regions[region];
 
-                    let mut block_header = Use::Block(block).print(printer);
+                    let mut header = Use::Region(region).print(printer);
                     if !inputs.is_empty() {
-                        block_header = printer.pretty_join_comma_sep(
-                            &(block_header + "("),
+                        header = printer.pretty_join_comma_sep(
+                            &(header + "("),
                             inputs.iter().enumerate().map(|(input_idx, input)| {
                                 let AttrsAndDef { attrs, def } = input.print(printer);
                                 attrs
-                                    + &Value::BlockInput {
-                                        block,
+                                    + &Value::RegionInput {
+                                        region,
                                         input_idx: input_idx.try_into().unwrap(),
                                     }
                                     .print(printer)
@@ -1512,7 +1513,7 @@ impl Print for FuncDecl {
                             ")",
                         );
                     }
-                    writeln!(f, "  {} {{", block_header)?;
+                    writeln!(f, "  {} {{", header)?;
                     for &inst in insts {
                         let data_inst_def = &data_insts[inst];
                         let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
@@ -1567,7 +1568,7 @@ impl Print for FuncParam {
     }
 }
 
-impl Print for BlockInput {
+impl Print for RegionInputDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self { attrs, ty } = *self;
@@ -1631,24 +1632,24 @@ impl Print for ControlInst {
             attrs,
             kind,
             inputs,
-            target_blocks,
-            target_block_inputs,
+            targets,
+            target_inputs,
         } = self;
 
         let attrs = attrs.print(printer);
 
-        let mut targets: SmallVec<[_; 4]> = target_blocks
+        let mut targets: SmallVec<[_; 4]> = targets
             .iter()
-            .map(|&block| {
-                let block_header = format!("=> {}", Use::Block(block).print(printer));
-                match target_block_inputs.get(&block) {
-                    Some(block_inputs) => printer.pretty_join_comma_sep(
-                        &(block_header + "("),
-                        block_inputs.iter().map(|v| v.print(printer)),
+            .map(|&region| {
+                let header = format!("=> {}", Use::Region(region).print(printer));
+                match target_inputs.get(&region) {
+                    Some(target_inputs) => printer.pretty_join_comma_sep(
+                        &(header + "("),
+                        target_inputs.iter().map(|v| v.print(printer)),
                         ",",
                         ")",
                     ),
-                    None => block_header,
+                    None => header,
                 }
             })
             .collect();
@@ -1656,7 +1657,7 @@ impl Print for ControlInst {
         let def = match *kind {
             ControlInstKind::SpvInst { opcode, ref imms } => {
                 #[derive(Copy, Clone)]
-                struct TargetBlockLabelId;
+                struct TargetLabelId;
 
                 let header = printer.pretty_spv_inst(
                     opcode,
@@ -1664,10 +1665,10 @@ impl Print for ControlInst {
                     inputs
                         .iter()
                         .map(Ok)
-                        .chain(target_blocks.iter().map(|_| Err(TargetBlockLabelId))),
+                        .chain(targets.iter().map(|_| Err(TargetLabelId))),
                     |id, printer| match id {
                         Ok(v) => Some(v.print(printer)),
-                        Err(TargetBlockLabelId) => None,
+                        Err(TargetLabelId) => None,
                     },
                     None,
                 );
@@ -1696,8 +1697,8 @@ impl Print for Value {
         match *self {
             Self::Const(ct) => ct.print(printer),
             Self::FuncParam { idx } => format!("param{}", idx),
-            Self::BlockInput { block, input_idx } => {
-                Use::BlockInput { block, input_idx }.print(printer)
+            Self::RegionInput { region, input_idx } => {
+                Use::RegionInput { region, input_idx }.print(printer)
             }
             Self::DataInstOutput(inst) => Use::DataInstOutput(inst).print(printer),
         }
