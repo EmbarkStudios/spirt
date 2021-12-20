@@ -641,12 +641,26 @@ impl<'a, 'b> Printer<'a, 'b> {
         )
     }
 
+    /// Pretty-print a `: T` style "type ascription" suffix.
+    ///
+    /// This should be used everywhere some type ascription notation is needed,
+    /// to ensure consistency across all such situations.
+    fn pretty_type_ascription_suffix(&self, ty: Type) -> String {
+        self.pretty_join_space(":", [ty.print(self)])
+    }
+
     /// Pretty-print an arbitrary SPIR-V `opcode` with `imms` and `ids` as its
     /// SPIR-V operands (with each `ID` in `ids` passed through `print_id`),
-    /// and optionally with a ` : ...` type annotation at the end (`result_type`).
+    /// and optionally with a ` : ...` type ascription at the end (`result_type`).
     ///
     /// `print_id` can return `None` to indicate an ID operand is implicit in
     /// SPIR-T, and should not be printed (e.g. decorations' target IDs).
+    /// But if `print_id` doesn't need to return `Option<String>` (for `None`),
+    /// its return type can also be `String` (which allows passing in the
+    /// `Print::print` method, instead of a closure, as `print_id`).
+    ///
+    /// Immediate operands are wrapped in angle brackets, while `ID` operands are
+    /// wrapped in parentheses, e.g.: `OpFoo<Bar, 123, "baz">(v1, v2)`.
     ///
     /// This should be used everywhere a SPIR-V instruction needs to be printed,
     /// to ensure consistency across all such situations.
@@ -655,15 +669,20 @@ impl<'a, 'b> Printer<'a, 'b> {
         opcode: spv::spec::Opcode,
         imms: &[spv::Imm],
         ids: &[ID],
-        print_id: impl Fn(&ID) -> OS,
+        print_id: impl Fn(&ID, &Self) -> OS,
         result_type: Option<Type>,
     ) -> String {
-        self.pretty_join_space(
-            opcode.name(),
+        // Split operands into "angle brackets" (immediates) and "parens" (IDs),
+        // with compound operands (i.e. enumerand with ID parameter) using both,
+        // e.g: `OpFoo<Bar(/* #0 */)>(/* #0 */ v123)`.
+        let mut next_extra_idx: usize = 0;
+        let mut paren_operands = SmallVec::<[String; 16]>::new();
+        let mut angle_bracket_operands =
             spv::print::inst_operands(opcode, imms.iter().copied(), ids.into_iter())
                 .filter_map(|operand| {
                     if let [spv::print::PrintOutPart::Id(id)] = operand.parts[..] {
-                        print_id(id).into()
+                        paren_operands.extend(print_id(id, self).into());
+                        None
                     } else {
                         Some(
                             operand
@@ -671,17 +690,52 @@ impl<'a, 'b> Printer<'a, 'b> {
                                 .into_iter()
                                 .map(|part| match part {
                                     spv::print::PrintOutPart::Printed(s) => s,
-                                    spv::print::PrintOutPart::Id(id) => print_id(id)
-                                        .into()
-                                        .unwrap_or_else(|| "/* implicit ID */".to_string()),
+                                    spv::print::PrintOutPart::Id(id) => {
+                                        let comment = format!("/* #{} */", next_extra_idx);
+                                        next_extra_idx += 1;
+
+                                        let id = print_id(id, self)
+                                            .into()
+                                            .unwrap_or_else(|| "/* implicit ID */".to_string());
+                                        paren_operands.push(format!("{} {}", comment, id));
+
+                                        comment
+                                    }
                                 })
                                 .reduce(|out, extra| out + &extra)
                                 .unwrap_or_default(),
                         )
                     }
                 })
-                .chain(result_type.map(|ty| format!(": {}", ty.print(self)))),
-        )
+                .peekable();
+
+        // Put together all the pieces, angle-bracketed operands then parenthesized
+        // ones, e.g.: `OpFoo<Bar, 123, "baz">(v1, v2)` (with either group optional).
+        let mut out = opcode.name().to_string();
+
+        if angle_bracket_operands.peek().is_some() {
+            out = self.pretty_join_comma_sep(&(out + "<"), angle_bracket_operands, ",", ">");
+        }
+
+        let type_ascription_suffix = result_type.map(|ty| self.pretty_type_ascription_suffix(ty));
+
+        if !paren_operands.is_empty() {
+            out = self.pretty_join_comma_sep(
+                &(out + "("),
+                paren_operands,
+                ",",
+                type_ascription_suffix
+                    .map(|s| format!("){}", s))
+                    .as_deref()
+                    .unwrap_or(")"),
+            );
+        } else {
+            if let Some(type_ascription_suffix) = type_ascription_suffix {
+                out = out + &type_ascription_suffix;
+            }
+        }
+
+        out
     }
 }
 
@@ -760,11 +814,10 @@ impl Print for Use {
                     match node {
                         InternedNode::AttrSet(_) => def,
                         InternedNode::Type(_) | InternedNode::Const(_) => {
-                            let def = attrs_of_def + &def;
-                            if !def.chars().any(|c| c.is_whitespace()) {
+                            if attrs_of_def.is_empty() {
                                 def
                             } else {
-                                printer.pretty_join_comma_sep("(", [def], "", ")")
+                                attrs_of_def + &def
                             }
                         }
                     }
@@ -833,19 +886,9 @@ impl Print for Node<'_> {
                         def,
                     } = node.print(printer);
 
-                    let def = {
-                        let header = format!("{}{} =", node.category(), idx);
-                        match node {
-                            InternedNode::AttrSet(_) => header + " " + &def,
-                            InternedNode::Type(_) | InternedNode::Const(_) => {
-                                printer.pretty_join_space(&header, [def])
-                            }
-                        }
-                    };
-
                     AttrsAndDef {
                         attrs: attrs_of_def,
-                        def,
+                        def: format!("{}{} = {}", node.category(), idx, def),
                     }
                 }
                 _ => AttrsAndDef::default(),
@@ -1027,17 +1070,12 @@ impl Print for ExportKey {
 
                 struct ImplicitTargetId;
 
-                printer.pretty_join_comma_sep(
-                    "(",
-                    [printer.pretty_spv_inst(
-                        wk.OpEntryPoint,
-                        imms,
-                        &[ImplicitTargetId],
-                        |ImplicitTargetId| None,
-                        None,
-                    )],
-                    "",
-                    ")",
+                printer.pretty_spv_inst(
+                    wk.OpEntryPoint,
+                    imms,
+                    &[ImplicitTargetId],
+                    |ImplicitTargetId, _| None,
+                    None,
                 )
             }
         }
@@ -1120,7 +1158,7 @@ impl Print for Attr {
                     *opcode,
                     imms,
                     &[ImplicitTargetId],
-                    |ImplicitTargetId| None,
+                    |ImplicitTargetId, _| None,
                     None,
                 )
             }
@@ -1212,7 +1250,7 @@ impl Print for TypeDef {
                         opcode,
                         imms,
                         ctor_args,
-                        |&arg| match arg {
+                        |&arg, printer| match arg {
                             TypeCtorArg::Type(ty) => ty.print(printer),
                             TypeCtorArg::Const(ct) => ct.print(printer),
                         },
@@ -1338,13 +1376,9 @@ impl Print for ConstDef {
             } else {
                 match *ctor {
                     ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
-                    ConstCtor::SpvInst { opcode, ref imms } => printer.pretty_spv_inst(
-                        opcode,
-                        imms,
-                        ctor_args,
-                        |&ct| ct.print(printer),
-                        Some(*ty),
-                    ),
+                    ConstCtor::SpvInst { opcode, ref imms } => {
+                        printer.pretty_spv_inst(opcode, imms, ctor_args, Print::print, Some(*ty))
+                    }
                 }
             },
         }
@@ -1372,7 +1406,7 @@ impl Print for GlobalVarDecl {
 
         let wk = &spv::spec::Spec::get().well_known;
 
-        let ty = {
+        let type_ascription_suffix = {
             // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
             // ideally the `GlobalVarDecl` would hold that type itself.
             let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
@@ -1380,17 +1414,17 @@ impl Print for GlobalVarDecl {
             match type_of_ptr_to_def.ctor {
                 TypeCtor::SpvInst { opcode, .. } if opcode == wk.OpTypePointer => {
                     match type_of_ptr_to_def.ctor_args[..] {
-                        [TypeCtorArg::Type(ty)] => ty.print(printer),
+                        [TypeCtorArg::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
                         _ => unreachable!(),
                     }
                 }
-                _ => format!("pointee type of {}", type_of_ptr_to.print(printer)),
+                _ => format!(": pointee_type_of({})", type_of_ptr_to.print(printer)),
             }
         };
         let addr_space = match *addr_space {
             AddrSpace::SpvStorageClass(sc) => spv::print::imm(wk.StorageClass, sc),
         };
-        let header = format!(" in {}: {}", addr_space, ty);
+        let header = format!(" in {}{}", addr_space, type_ascription_suffix);
 
         let body = match def {
             DeclDef::Imported(import) => Some(format!("= {}", import.print(printer))),
@@ -1524,11 +1558,11 @@ impl Print for FuncDecl {
 impl Print for FuncParam {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
-        let Self { attrs, ty } = self;
+        let Self { attrs, ty } = *self;
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: format!(": {}", ty.print(printer)),
+            def: printer.pretty_type_ascription_suffix(ty),
         }
     }
 }
@@ -1536,11 +1570,11 @@ impl Print for FuncParam {
 impl Print for BlockInput {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
-        let Self { attrs, ty } = self;
+        let Self { attrs, ty } = *self;
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: format!(": {}", ty.print(printer)),
+            def: printer.pretty_type_ascription_suffix(ty),
         }
     }
 }
@@ -1557,30 +1591,34 @@ impl Print for DataInstDef {
 
         let attrs = attrs.print(printer);
 
-        let def = match *kind {
-            DataInstKind::FuncCall(func) => printer.pretty_join_comma_sep(
-                &format!("call {}(", func.print(printer)),
-                inputs.iter().map(|v| v.print(printer)),
-                ",",
-                &output_type.map_or(")".to_string(), |ty| format!(") : {}", ty.print(printer))),
-            ),
+        let header = match *kind {
+            DataInstKind::FuncCall(func) => format!("call {}", func.print(printer)),
             DataInstKind::SpvInst { opcode, ref imms } => {
-                printer.pretty_spv_inst(opcode, imms, inputs, |v| v.print(printer), *output_type)
+                return AttrsAndDef {
+                    attrs,
+                    def: printer.pretty_spv_inst(opcode, imms, inputs, Print::print, *output_type),
+                };
             }
             DataInstKind::SpvExtInst { ext_set, inst } => {
                 // FIXME(eddyb) should this be rendered more compactly?
-                printer.pretty_join_space(
-                    &format!(
-                        "OpExtInst (OpExtInstImport {:?}) {}",
-                        &printer.cx[ext_set], inst
-                    ),
-                    inputs
-                        .iter()
-                        .map(|v| v.print(printer))
-                        .chain(output_type.map(|ty| format!(": {}", ty.print(printer)))),
+                format!(
+                    "(OpExtInstImport<{:?}>).OpExtInst<{}>",
+                    &printer.cx[ext_set], inst
                 )
             }
         };
+
+        // FIXME(eddyb) deduplicate the "parens + optional type ascription"
+        // logic with `pretty_spv_inst`.
+        let def = printer.pretty_join_comma_sep(
+            &(header + "("),
+            inputs.iter().map(|v| v.print(printer)),
+            ",",
+            &output_type
+                .map(|ty| format!("){}", printer.pretty_type_ascription_suffix(ty)))
+                .as_deref()
+                .unwrap_or(")"),
+        );
 
         AttrsAndDef { attrs, def }
     }
@@ -1603,7 +1641,7 @@ impl Print for ControlInst {
                 opcode,
                 imms,
                 inputs,
-                |input| match *input {
+                |input, printer| match *input {
                     ControlInstInput::Value(v) => v.print(printer),
 
                     ControlInstInput::TargetBlock(block) => {
