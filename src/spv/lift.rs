@@ -6,7 +6,7 @@ use crate::{
     AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlInst, ControlInstKind,
     DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
     FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Region,
-    RegionDef, RegionInputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustc_hash::FxHashMap;
@@ -233,26 +233,25 @@ impl<'a> NeedsIdsCollector<'a> {
                         DeclDef::Present(def) => Some(def),
                     };
 
-                    let all_regions = func_def_body
+                    let cfg = func_def_body
                         .into_iter()
-                        .flat_map(|func_def_body| &func_def_body.all_regions)
-                        .copied();
+                        .flat_map(|func_def_body| &func_def_body.cfg);
                     let all_insts_with_output =
                         func_def_body.into_iter().flat_map(|func_def_body| {
                             func_def_body
-                                .all_regions
-                                .iter()
-                                .flat_map(|&region| {
-                                    func_def_body.regions[region].insts.iter().copied()
+                                .cfg
+                                .keys()
+                                .flat_map(|&region| match &func_def_body.regions[region].kind {
+                                    RegionKind::Block { insts, .. } => insts.iter().copied(),
                                 })
                                 .filter(|&inst| {
                                     func_def_body.data_insts[inst].output_type.is_some()
                                 })
                         });
 
-                    let mut blocks: FxHashMap<_, _> = all_regions
+                    let mut blocks: FxHashMap<_, _> = cfg
                         .clone()
-                        .map(|region| {
+                        .map(|(&region, _)| {
                             Ok((
                                 region,
                                 BlockIds {
@@ -273,13 +272,10 @@ impl<'a> NeedsIdsCollector<'a> {
                         .collect::<Result<_, _>>()?;
 
                     // Collect phis from other blocks' edges into each block.
-                    for source_region in all_regions {
-                        let source_region_def = &func_def_body.unwrap().regions[source_region];
+                    for (&source_region, control_inst) in cfg {
                         let source_label_id = blocks[&source_region].label_id;
 
-                        for (&target_block, block_inputs) in
-                            &source_region_def.terminator.target_inputs
-                        {
+                        for (&target_block, block_inputs) in &control_inst.target_inputs {
                             let target_block_ids = blocks.get_mut(&target_block).unwrap();
                             for (target_phi, &v) in
                                 target_block_ids.phis.iter_mut().zip(block_inputs)
@@ -716,16 +712,12 @@ impl Module {
                         let FuncDefBody {
                             data_insts,
                             regions,
-                            all_regions,
+                            cfg,
                         } = func_def_body;
 
-                        all_regions.iter().flat_map(move |&region| {
-                            let &BlockIds { label_id, ref phis } = &func_ids.blocks[&region];
-                            let RegionDef {
-                                inputs,
-                                insts,
-                                terminator,
-                            } = &regions[region];
+                        cfg.iter().flat_map(move |(&block, control_inst)| {
+                            let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
+                            let RegionDef { inputs, kind } = &regions[block];
 
                             iter::once(LazyInst::OpLabel { label_id })
                                 .chain(inputs.iter().zip(phis).map(|(input_decl, phi)| {
@@ -735,19 +727,21 @@ impl Module {
                                         phi,
                                     }
                                 }))
-                                .chain(insts.iter().map(move |&inst| {
-                                    let data_inst_def = &data_insts[inst];
-                                    LazyInst::DataInst {
-                                        parent_func_ids: func_ids,
-                                        result_id: data_inst_def
-                                            .output_type
-                                            .map(|_| func_ids.data_inst_output_ids[&inst]),
-                                        data_inst_def,
-                                    }
-                                }))
+                                .chain(match kind {
+                                    RegionKind::Block { insts } => insts.iter().map(move |&inst| {
+                                        let data_inst_def = &data_insts[inst];
+                                        LazyInst::DataInst {
+                                            parent_func_ids: func_ids,
+                                            result_id: data_inst_def
+                                                .output_type
+                                                .map(|_| func_ids.data_inst_output_ids[&inst]),
+                                            data_inst_def,
+                                        }
+                                    }),
+                                })
                                 .chain([LazyInst::ControlInst {
                                     parent_func_ids: func_ids,
-                                    control_inst: terminator,
+                                    control_inst,
                                 }])
                         })
                     }))

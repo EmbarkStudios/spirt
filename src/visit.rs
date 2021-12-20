@@ -2,8 +2,8 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlInst,
     ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor,
+    TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -275,23 +275,24 @@ impl InnerVisit for FuncDefBody {
         let Self {
             data_insts,
             regions,
-            all_regions,
+            cfg,
         } = self;
 
-        for &region in all_regions {
-            let RegionDef {
-                inputs,
-                insts,
-                terminator,
-            } = &regions[region];
+        for (&region, control_inst) in cfg {
+            let RegionDef { inputs, kind } = &regions[region];
 
             for input in inputs {
                 input.inner_visit_with(visitor);
             }
-            for &inst in insts {
-                visitor.visit_data_inst_def(&data_insts[inst]);
+            match kind {
+                RegionKind::Block { insts } => {
+                    for &inst in insts {
+                        visitor.visit_data_inst_def(&data_insts[inst]);
+                    }
+                }
             }
-            visitor.visit_control_inst(terminator);
+
+            visitor.visit_control_inst(control_inst);
         }
     }
 }

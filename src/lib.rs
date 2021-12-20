@@ -267,20 +267,25 @@ pub struct FuncDefBody {
     pub data_insts: context::UniqIdxMap<DataInst, DataInstDef>,
     pub regions: context::UniqIdxMap<Region, RegionDef>,
 
-    // FIXME(eddyb) replace this with a hierarchical "structural region" system.
-    pub all_regions: Vec<Region>,
+    /// The control-flow graph of the function, represented as per-region
+    /// control-flow instructions that execute "after" the region itself.
+    // FIXME(eddyb) replace this CFG setup with stricter structural regions.
+    pub cfg: IndexMap<Region, ControlInst>,
 }
 
 pub struct RegionDef {
     pub inputs: SmallVec<[RegionInputDecl; 2]>,
-    pub insts: Vec<DataInst>,
-    pub terminator: ControlInst,
+    pub kind: RegionKind,
 }
 
 pub struct RegionInputDecl {
     pub attrs: AttrSet,
 
     pub ty: Type,
+}
+
+pub enum RegionKind {
+    Block { insts: Vec<DataInst> },
 }
 
 pub struct DataInstDef {

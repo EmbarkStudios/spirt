@@ -3,7 +3,7 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, ControlInst,
     ControlInstKind, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
     FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionInputDecl, Type, TypeCtor,
+    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor,
     TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
@@ -461,12 +461,8 @@ impl<'a, 'b> Printer<'a, 'b> {
                 let mut region_counter = 0;
                 let mut value_counter = 0;
 
-                for &region in &func_def_body.all_regions {
-                    let RegionDef {
-                        inputs,
-                        insts,
-                        terminator: _,
-                    } = &func_def_body.regions[region];
+                for &region in func_def_body.cfg.keys() {
+                    let RegionDef { inputs, kind } = &func_def_body.regions[region];
 
                     // FIXME(eddyb) only insert here if the region is actually "used".
                     {
@@ -482,15 +478,15 @@ impl<'a, 'b> Printer<'a, 'b> {
                             region,
                             input_idx: i.try_into().unwrap(),
                         })
-                        .chain(
-                            insts
+                        .chain(match kind {
+                            RegionKind::Block { insts } => insts
                                 .iter()
                                 .copied()
                                 .filter(|&inst| {
                                     func_def_body.data_insts[inst].output_type.is_some()
                                 })
                                 .map(Use::DataInstOutput),
-                        );
+                        });
                     for use_kind in defined_values {
                         if let Some(use_style) = use_styles.get_mut(&use_kind) {
                             let idx = value_counter;
@@ -1485,15 +1481,11 @@ impl Print for FuncDecl {
             DeclDef::Present(FuncDefBody {
                 data_insts,
                 regions,
-                all_regions,
+                cfg,
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for &region in all_regions {
-                    let RegionDef {
-                        inputs,
-                        insts,
-                        terminator,
-                    } = &regions[region];
+                for (&region, control_inst) in cfg {
+                    let RegionDef { inputs, kind } = &regions[region];
 
                     let mut header = Use::Region(region).print(printer);
                     if !inputs.is_empty() {
@@ -1514,34 +1506,37 @@ impl Print for FuncDecl {
                         );
                     }
                     writeln!(f, "  {} {{", header)?;
-                    for &inst in insts {
-                        let data_inst_def = &data_insts[inst];
-                        let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
+                    match kind {
+                        RegionKind::Block { insts } => {
+                            for &inst in insts {
+                                let data_inst_def = &data_insts[inst];
+                                let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
 
-                        if data_inst_def.output_type.is_some() {
-                            let header = format!("{} =", Use::DataInstOutput(inst).print(printer));
-                            // FIXME(eddyb) the reindenting here hurts more than
-                            // it helps, maybe it eneds a heuristics?
-                            def = if false {
-                                printer.pretty_join_space(&header, [def])
-                            } else {
-                                header + " " + &def
-                            };
+                                if data_inst_def.output_type.is_some() {
+                                    let header =
+                                        format!("{} =", Use::DataInstOutput(inst).print(printer));
+                                    // FIXME(eddyb) the reindenting here hurts more than
+                                    // it helps, maybe it eneds a heuristics?
+                                    def = if false {
+                                        printer.pretty_join_space(&header, [def])
+                                    } else {
+                                        header + " " + &def
+                                    };
+                                }
+                                writeln!(f, "    {}", (attrs + &def).replace("\n", "\n    "))?;
+                            }
+
+                            // Visually isolate the control-flow instruction.
+                            if !insts.is_empty() {
+                                writeln!(f)?;
+                            }
                         }
-                        writeln!(f, "    {}", (attrs + &def).replace("\n", "\n    "))?;
                     }
-
-                    // Visually isolate the terminator
-                    if !insts.is_empty() {
-                        writeln!(f)?;
-                    }
-
                     writeln!(
                         f,
                         "    {}",
-                        terminator.print(printer).replace("\n", "\n    ")
+                        control_inst.print(printer).replace("\n", "\n    ")
                     )?;
-
                     writeln!(f, "  }}")?;
                 }
                 write!(f, "}}")

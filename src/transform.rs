@@ -2,8 +2,8 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlInst,
     ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor,
+    TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -455,23 +455,23 @@ impl InnerInPlaceTransform for FuncDefBody {
         let Self {
             data_insts,
             regions,
-            all_regions,
+            cfg,
         } = self;
 
-        for &region in all_regions.iter() {
-            let RegionDef {
-                inputs,
-                insts,
-                terminator,
-            } = &mut regions[region];
+        for (&region, control_inst) in cfg {
+            let RegionDef { inputs, kind } = &mut regions[region];
 
             for input in inputs {
                 input.inner_transform_with(transformer).apply_to(input);
             }
-            for inst in insts {
-                transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
+            match kind {
+                RegionKind::Block { insts } => {
+                    for inst in insts {
+                        transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
+                    }
+                }
             }
-            transformer.in_place_transform_control_inst(terminator);
+            transformer.in_place_transform_control_inst(control_inst);
         }
     }
 }

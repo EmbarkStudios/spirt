@@ -6,7 +6,7 @@ use crate::{
     print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlInst,
     ControlInstKind, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region,
-    RegionDef, RegionInputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
@@ -763,7 +763,7 @@ impl Module {
                     None => DeclDef::Present(FuncDefBody {
                         data_insts: Default::default(),
                         regions: Default::default(),
-                        all_regions: vec![],
+                        cfg: Default::default(),
                     }),
                 };
 
@@ -868,15 +868,19 @@ impl Module {
                 target_input_idx: u32,
             }
 
+            struct BlockDetails {
+                label_id: spv::Id,
+                input_count: u32,
+            }
+
             // Index IDs declared within the function, first.
             let mut local_id_defs = IndexMap::new();
             // `OpPhi`s are also collected here, to assign them per-edge.
             let mut phi_to_values = IndexMap::<PhiKey, SmallVec<[spv::Id; 1]>>::new();
-            let mut input_counts_per_block = IndexMap::<Region, u32>::new();
+            let mut block_details = IndexMap::<Region, BlockDetails>::new();
             let mut has_blocks = false;
             {
                 let mut next_param_idx = 0u32;
-                let mut current_block_id = None;
                 for raw_inst in &raw_insts {
                     let IntraFuncInst {
                         opcode, result_id, ..
@@ -899,38 +903,32 @@ impl Module {
                             if opcode == wk.OpLabel {
                                 // HACK(eddyb) can't generate the `Region` unique
                                 // index without inserting the (empty) `RegionDef`
-                                // first (with a dummy terminator).
+                                // first.
                                 let block = func_def_body.regions.insert(
                                     &cx,
                                     RegionDef {
                                         inputs: SmallVec::new(),
-                                        insts: vec![],
-                                        terminator: ControlInst {
-                                            attrs: AttrSet::default(),
-                                            kind: ControlInstKind::SpvInst {
-                                                opcode: wk.OpNop,
-                                                imms: [].into_iter().collect(),
-                                            },
-                                            inputs: [].into_iter().collect(),
-                                            targets: [].into_iter().collect(),
-                                            target_inputs: IndexMap::new(),
-                                        },
+                                        kind: RegionKind::Block { insts: vec![] },
                                     },
                                 );
-                                input_counts_per_block.insert(block, 0);
-                                current_block_id = Some(id);
+                                block_details.insert(
+                                    block,
+                                    BlockDetails {
+                                        label_id: id,
+                                        input_count: 0,
+                                    },
+                                );
                                 LocalIdDef::BlockLabel(block)
                             } else if opcode == wk.OpPhi {
-                                let current_block_id = match current_block_id {
-                                    Some(current_block_id) => current_block_id,
+                                let (&current_block, block_details) = match block_details.last_mut()
+                                {
+                                    Some(entry) => entry,
                                     // Error will be emitted later, below.
                                     None => continue,
                                 };
 
-                                let (&current_block, block_input_count) =
-                                    input_counts_per_block.last_mut().unwrap();
-                                let input_idx = *block_input_count;
-                                *block_input_count = input_idx.checked_add(1).unwrap();
+                                let input_idx = block_details.input_count;
+                                block_details.input_count = input_idx.checked_add(1).unwrap();
 
                                 assert!(raw_inst.imm_operands.is_empty());
                                 // FIXME(eddyb) use `array_chunks` when that's stable.
@@ -941,7 +939,7 @@ impl Module {
                                     phi_to_values
                                         .entry(PhiKey {
                                             source_block_id,
-                                            target_block_id: current_block_id,
+                                            target_block_id: block_details.label_id,
                                             target_input_idx: input_idx,
                                         })
                                         .or_default()
@@ -986,7 +984,7 @@ impl Module {
                         )));
                     }
                     DeclDef::Present(def) => {
-                        assert!(def.all_regions.is_empty());
+                        assert!(def.cfg.is_empty());
                         Some(def)
                     }
                 }
@@ -994,7 +992,7 @@ impl Module {
                 None
             };
 
-            let mut current_block_id = None;
+            let mut current_block_region_and_details = None;
             for (raw_inst_idx, raw_inst) in raw_insts.iter().enumerate() {
                 let lookahead_raw_inst = |dist| {
                     raw_inst_idx
@@ -1043,7 +1041,7 @@ impl Module {
 
                 if opcode == wk.OpFunctionParameter {
                     if let Some(func_def_body) = &func_def_body {
-                        if !func_def_body.all_regions.is_empty() {
+                        if !func_def_body.cfg.is_empty() {
                             return Err(invalid(
                                 "out of order: `OpFunctionParameter`s should come \
                                  before the function's blocks",
@@ -1068,21 +1066,25 @@ impl Module {
                         return Err(invalid("block lacks terminator instruction"));
                     }
 
-                    // An empty block was inserted earlier, to be able to
-                    // have an entry in `local_id_defs`.
-                    let block = match local_id_defs[&result_id.unwrap()] {
-                        LocalIdDef::BlockLabel(block) => block,
+                    // An empty `RegionKind::Block` region was inserted earlier,
+                    // to be able to have an entry in `local_id_defs`.
+                    let region = match local_id_defs[&result_id.unwrap()] {
+                        LocalIdDef::BlockLabel(region) => region,
                         _ => unreachable!(),
                     };
-                    func_def_body.all_regions.push(block);
-                    current_block_id = Some(result_id.unwrap());
+                    let current_block_details = &block_details[&region];
+                    assert_eq!(current_block_details.label_id, result_id.unwrap());
+                    current_block_region_and_details = Some((region, current_block_details));
                     continue;
                 }
-                let current_block = func_def_body.all_regions.last().copied().ok_or_else(|| {
-                    invalid("out of order: not expected before the function's blocks")
-                })?;
-                let current_region_def = &mut func_def_body.regions[current_block];
-                let current_block_id = current_block_id.unwrap();
+                let (current_block_region, current_block_details) =
+                    current_block_region_and_details.ok_or_else(|| {
+                        invalid("out of order: not expected before the function's blocks")
+                    })?;
+                let current_region_def = &mut func_def_body.regions[current_block_region];
+                let current_block_insts = match &mut current_region_def.kind {
+                    RegionKind::Block { insts } => insts,
+                };
 
                 if is_last_in_block {
                     if opcode.def().category != spec::InstructionCategory::ControlFlow
@@ -1112,48 +1114,47 @@ impl Module {
                             ))),
                         }
                     };
-                    let mut process_phis_for_edge_to =
-                        |target_block_id, target_block| -> io::Result<_> {
-                            use indexmap::map::Entry;
+                    let mut process_phis_for_edge_to = |target_block| -> io::Result<_> {
+                        use indexmap::map::Entry;
 
-                            let target_input_count = input_counts_per_block[&target_block];
-                            if target_input_count == 0 {
-                                return Ok(());
-                            }
+                        let target_block_details = &block_details[&target_block];
+                        if target_block_details.input_count == 0 {
+                            return Ok(());
+                        }
 
-                            let target_inputs_entry = match target_inputs.entry(target_block) {
-                                // Only resolve `OpPhi`s exactly once.
-                                Entry::Occupied(_) => return Ok(()),
-                                Entry::Vacant(entry) => entry,
-                            };
-
-                            let target_inputs = (0..target_input_count)
-                                .map(|target_input_idx| {
-                                    let phi_key = PhiKey {
-                                        source_block_id: current_block_id,
-                                        target_block_id,
-                                        target_input_idx,
-                                    };
-                                    let phi_value_ids =
-                                        phi_to_values.remove(&phi_key).unwrap_or_default();
-
-                                    match phi_value_ids[..] {
-                                        [] => Err(invalid(&format!(
-                                            "{} is missing",
-                                            descr_phi_case(&phi_key)
-                                        ))),
-                                        [id] => phi_value_id_to_value(&phi_key, id),
-                                        [..] => Err(invalid(&format!(
-                                            "{} is duplicated",
-                                            descr_phi_case(&phi_key)
-                                        ))),
-                                    }
-                                })
-                                .collect::<Result<_, _>>()?;
-
-                            target_inputs_entry.insert(target_inputs);
-                            Ok(())
+                        let target_inputs_entry = match target_inputs.entry(target_block) {
+                            // Only resolve `OpPhi`s exactly once.
+                            Entry::Occupied(_) => return Ok(()),
+                            Entry::Vacant(entry) => entry,
                         };
+
+                        let target_inputs = (0..target_block_details.input_count)
+                            .map(|target_input_idx| {
+                                let phi_key = PhiKey {
+                                    source_block_id: current_block_details.label_id,
+                                    target_block_id: target_block_details.label_id,
+                                    target_input_idx,
+                                };
+                                let phi_value_ids =
+                                    phi_to_values.remove(&phi_key).unwrap_or_default();
+
+                                match phi_value_ids[..] {
+                                    [] => Err(invalid(&format!(
+                                        "{} is missing",
+                                        descr_phi_case(&phi_key)
+                                    ))),
+                                    [id] => phi_value_id_to_value(&phi_key, id),
+                                    [..] => Err(invalid(&format!(
+                                        "{} is duplicated",
+                                        descr_phi_case(&phi_key)
+                                    ))),
+                                }
+                            })
+                            .collect::<Result<_, _>>()?;
+
+                        target_inputs_entry.insert(target_inputs);
+                        Ok(())
+                    };
 
                     // Split the operands into value inputs (e.g. a branch's
                     // condition or an `OpSwitch`'s selector) and target blocks.
@@ -1171,24 +1172,27 @@ impl Module {
                                 inputs.push(v);
                             }
                             LocalIdDef::BlockLabel(block) => {
-                                process_phis_for_edge_to(id, block)?;
+                                process_phis_for_edge_to(block)?;
                                 targets.push(block);
                             }
                         }
                     }
 
-                    current_region_def.terminator = ControlInst {
-                        attrs,
-                        kind: ControlInstKind::SpvInst {
-                            opcode,
-                            imms: imm_operands.iter().copied().collect(),
+                    func_def_body.cfg.insert(
+                        current_block_region,
+                        ControlInst {
+                            attrs,
+                            kind: ControlInstKind::SpvInst {
+                                opcode,
+                                imms: imm_operands.iter().copied().collect(),
+                            },
+                            inputs,
+                            targets,
+                            target_inputs,
                         },
-                        inputs,
-                        targets,
-                        target_inputs,
-                    };
+                    );
                 } else if opcode == wk.OpPhi {
-                    if !current_region_def.insts.is_empty() {
+                    if !current_block_insts.is_empty() {
                         return Err(invalid(
                             "out of order: `OpPhi`s should come before \
                              the rest of the block's instructions",
@@ -1317,7 +1321,7 @@ impl Module {
                         },
                         None => func_def_body.data_insts.insert(&cx, data_inst_def),
                     };
-                    current_region_def.insts.push(inst);
+                    current_block_insts.push(inst);
                 }
             }
 
@@ -1377,7 +1381,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if func_def_body.all_regions.is_empty() {
+                if func_def_body.cfg.is_empty() {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(
@@ -1387,7 +1391,7 @@ impl Module {
                     )));
                 }
 
-                let entry_block = func_def_body.all_regions[0];
+                let &entry_block = func_def_body.cfg.keys().next().unwrap();
                 if !func_def_body.regions[entry_block].inputs.is_empty() {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
