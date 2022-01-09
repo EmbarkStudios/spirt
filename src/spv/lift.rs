@@ -83,10 +83,7 @@ impl FuncDecl {
 
         cx.intern(TypeDef {
             attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst(spv::Inst {
-                opcode: wk.OpTypeFunction,
-                imms: [].into_iter().collect(),
-            }),
+            ctor: TypeCtor::SpvInst(wk.OpTypeFunction.into()),
             ctor_args: iter::once(self.ret_type)
                 .chain(self.params.iter().map(|param| param.ty))
                 .map(TypeCtorArg::Type)
@@ -519,19 +516,13 @@ impl LazyInst<'_> {
                 }
             }
             Self::OpFunctionParameter { param_id: _, param } => spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode: wk.OpFunctionParameter,
-                    imms: [].into_iter().collect(),
-                },
+                without_ids: wk.OpFunctionParameter.into(),
                 result_type_id: Some(ids.globals[&Global::Type(param.ty)]),
                 result_id,
                 ids: [].into_iter().collect(),
             },
             Self::OpLabel { label_id: _ } => spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode: wk.OpLabel,
-                    imms: [].into_iter().collect(),
-                },
+                without_ids: wk.OpLabel.into(),
                 result_type_id: None,
                 result_id,
                 ids: [].into_iter().collect(),
@@ -541,10 +532,7 @@ impl LazyInst<'_> {
                 input_decl,
                 phi,
             } => spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode: wk.OpPhi,
-                    imms: [].into_iter().collect(),
-                },
+                without_ids: wk.OpPhi.into(),
                 result_type_id: Some(ids.globals[&Global::Type(input_decl.ty)]),
                 result_id: Some(phi.result_id),
                 ids: phi
@@ -561,13 +549,9 @@ impl LazyInst<'_> {
                 data_inst_def,
             } => {
                 let (inst, extra_initial_id_operand) = match &data_inst_def.kind {
-                    &DataInstKind::FuncCall(callee) => (
-                        spv::Inst {
-                            opcode: wk.OpFunctionCall,
-                            imms: [].into_iter().collect(),
-                        },
-                        Some(ids.funcs[&callee].func_id),
-                    ),
+                    &DataInstKind::FuncCall(callee) => {
+                        (wk.OpFunctionCall.into(), Some(ids.funcs[&callee].func_id))
+                    }
                     DataInstKind::SpvInst(inst) => (inst.clone(), None),
                     &DataInstKind::SpvExtInst { ext_set, inst } => (
                         spv::Inst {
@@ -617,10 +601,7 @@ impl LazyInst<'_> {
                 },
             },
             Self::OpFunctionEnd => spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode: wk.OpFunctionEnd,
-                    imms: [].into_iter().collect(),
-                },
+                without_ids: wk.OpFunctionEnd.into(),
                 result_type_id: None,
                 result_id: None,
                 ids: [].into_iter().collect(),

@@ -347,10 +347,7 @@ impl Iterator for ModuleParser {
             known_ids: &self.known_ids,
             words: self.words[1..inst_len].iter().copied(),
             inst: spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode,
-                    imms: SmallVec::new(),
-                },
+                without_ids: opcode.into(),
                 result_type_id: None,
                 result_id: None,
                 ids: SmallVec::new(),

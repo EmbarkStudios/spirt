@@ -54,6 +54,15 @@ pub struct Inst {
     pub imms: SmallVec<[Imm; 2]>,
 }
 
+impl From<spec::Opcode> for Inst {
+    fn from(opcode: spec::Opcode) -> Self {
+        Self {
+            opcode,
+            imms: SmallVec::new(),
+        }
+    }
+}
+
 /// A full SPIR-V instruction (like `Inst` but including input/output ID operands).
 pub struct InstWithIds {
     pub without_ids: Inst,

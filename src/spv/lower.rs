@@ -950,10 +950,7 @@ impl Module {
                                     &cx,
                                     DataInstDef {
                                         attrs: AttrSet::default(),
-                                        kind: DataInstKind::SpvInst(spv::Inst {
-                                            opcode: wk.OpNop,
-                                            imms: [].into_iter().collect(),
-                                        }),
+                                        kind: DataInstKind::SpvInst(wk.OpNop.into()),
                                         output_type: None,
                                         inputs: [].into_iter().collect(),
                                     },
