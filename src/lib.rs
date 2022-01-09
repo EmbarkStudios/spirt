@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 mod context;
 pub use context::{AttrSet, Const, Context, DataInst, Func, GlobalVar, InternedStr, Region, Type};
 
+pub mod cfg;
 pub mod print;
 pub mod transform;
 pub mod visit;
@@ -270,7 +271,7 @@ pub struct FuncDefBody {
     /// The control-flow graph of the function, represented as per-region
     /// control-flow instructions that execute "after" the region itself.
     // FIXME(eddyb) replace this CFG setup with stricter structural regions.
-    pub cfg: IndexMap<Region, ControlInst>,
+    pub cfg: cfg::ControlFlowGraph,
 }
 
 pub struct RegionDef {
@@ -316,33 +317,6 @@ pub enum DataInstKind {
     SpvExtInst {
         ext_set: InternedStr,
         inst: u32,
-    },
-}
-
-pub struct ControlInst {
-    pub attrs: AttrSet,
-
-    pub kind: ControlInstKind,
-
-    pub inputs: SmallVec<[Value; 2]>,
-
-    // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub targets: SmallVec<[Region; 4]>,
-
-    // FIXME(eddyb) this is clunky because it models φ nodes (`OpPhi` in SPIR-V),
-    // replace the CFG setup with stricter structural regions.
-    pub target_inputs: IndexMap<Region, SmallVec<[Value; 2]>>,
-}
-
-#[derive(PartialEq, Eq)]
-pub enum ControlInstKind {
-    SpvInst {
-        opcode: spv::spec::Opcode,
-
-        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-        // FIXME(eddyb) it might be worth investigating the performance implications
-        // of interning "long immediates", compared to the flattened representation.
-        imms: SmallVec<[spv::Imm; 2]>,
     },
 }
 
