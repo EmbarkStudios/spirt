@@ -18,50 +18,62 @@ use std::path::Path;
 use std::{io, iter};
 
 impl spv::Dialect {
-    fn capability_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    fn capability_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
         let wk = &spec::Spec::get().well_known;
-        self.capabilities.iter().map(move |&cap| spv::Inst {
-            opcode: wk.OpCapability,
+        self.capabilities.iter().map(move |&cap| spv::InstWithIds {
+            without_ids: spv::Inst {
+                opcode: wk.OpCapability,
+                imms: iter::once(spv::Imm::Short(wk.Capability, cap)).collect(),
+            },
             result_type_id: None,
             result_id: None,
-            imms: iter::once(spv::Imm::Short(wk.Capability, cap)).collect(),
             ids: [].into_iter().collect(),
         })
     }
 
-    pub fn extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    pub fn extension_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
         let wk = &spec::Spec::get().well_known;
-        self.extensions.iter().map(move |ext| spv::Inst {
-            opcode: wk.OpExtension,
+        self.extensions.iter().map(move |ext| spv::InstWithIds {
+            without_ids: spv::Inst {
+                opcode: wk.OpExtension,
+                imms: spv::encode_literal_string(ext).collect(),
+            },
             result_type_id: None,
             result_id: None,
-            imms: spv::encode_literal_string(ext).collect(),
             ids: [].into_iter().collect(),
         })
     }
 }
 
 impl spv::ModuleDebugInfo {
-    fn source_extension_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    fn source_extension_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
         let wk = &spec::Spec::get().well_known;
-        self.source_extensions.iter().map(move |ext| spv::Inst {
-            opcode: wk.OpSourceExtension,
-            result_type_id: None,
-            result_id: None,
-            imms: spv::encode_literal_string(ext).collect(),
-            ids: [].into_iter().collect(),
-        })
+        self.source_extensions
+            .iter()
+            .map(move |ext| spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpSourceExtension,
+                    imms: spv::encode_literal_string(ext).collect(),
+                },
+                result_type_id: None,
+                result_id: None,
+                ids: [].into_iter().collect(),
+            })
     }
 
-    fn module_processed_insts(&self) -> impl Iterator<Item = spv::Inst> + '_ {
+    fn module_processed_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
         let wk = &spec::Spec::get().well_known;
-        self.module_processes.iter().map(move |proc| spv::Inst {
-            opcode: wk.OpModuleProcessed,
-            result_type_id: None,
-            result_id: None,
-            imms: spv::encode_literal_string(proc).collect(),
-            ids: [].into_iter().collect(),
-        })
+        self.module_processes
+            .iter()
+            .map(move |proc| spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpModuleProcessed,
+                    imms: spv::encode_literal_string(proc).collect(),
+                },
+                result_type_id: None,
+                result_id: None,
+                ids: [].into_iter().collect(),
+            })
     }
 }
 
@@ -71,10 +83,10 @@ impl FuncDecl {
 
         cx.intern(TypeDef {
             attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst {
+            ctor: TypeCtor::SpvInst(spv::Inst {
                 opcode: wk.OpTypeFunction,
                 imms: [].into_iter().collect(),
-            },
+            }),
             ctor_args: iter::once(self.ret_type)
                 .chain(self.params.iter().map(|param| param.ty))
                 .map(TypeCtorArg::Type)
@@ -162,7 +174,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         match data_inst_def.kind {
             DataInstKind::FuncCall(_) => {}
 
-            DataInstKind::SpvInst { opcode: _, imms: _ } => {}
+            DataInstKind::SpvInst(_) => {}
             DataInstKind::SpvExtInst { ext_set, .. } => {
                 self.ext_inst_imports.insert(&self.cx[ext_set]);
             }
@@ -395,7 +407,7 @@ impl LazyInst<'_> {
         }
     }
 
-    fn to_inst_and_attrs(self, module: &Module, ids: &AllocatedIds) -> (spv::Inst, AttrSet) {
+    fn to_inst_and_attrs(self, module: &Module, ids: &AllocatedIds) -> (spv::InstWithIds, AttrSet) {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
 
@@ -413,12 +425,11 @@ impl LazyInst<'_> {
             Self::Global(global) => match global {
                 Global::Type(ty) => {
                     let ty_def = &cx[ty];
-                    match ty_def.ctor {
-                        TypeCtor::SpvInst { opcode, ref imms } => spv::Inst {
-                            opcode,
+                    match &ty_def.ctor {
+                        TypeCtor::SpvInst(inst) => spv::InstWithIds {
+                            without_ids: inst.clone(),
                             result_type_id: None,
                             result_id,
-                            imms: imms.iter().copied().collect(),
                             ids: ty_def
                                 .ctor_args
                                 .iter()
@@ -434,8 +445,8 @@ impl LazyInst<'_> {
                 }
                 Global::Const(ct) => {
                     let ct_def = &cx[ct];
-                    match ct_def.ctor {
-                        ConstCtor::PtrToGlobalVar(gv) => {
+                    match &ct_def.ctor {
+                        &ConstCtor::PtrToGlobalVar(gv) => {
                             assert!(ct_def.attrs == AttrSet::default());
                             assert!(ct_def.ctor_args.is_empty());
 
@@ -453,20 +464,21 @@ impl LazyInst<'_> {
                                 DeclDef::Present(GlobalVarDefBody { initializer }) => initializer
                                     .map(|initializer| ids.globals[&Global::Const(initializer)]),
                             };
-                            spv::Inst {
-                                opcode: wk.OpVariable,
+                            spv::InstWithIds {
+                                without_ids: spv::Inst {
+                                    opcode: wk.OpVariable,
+                                    imms: iter::once(storage_class).collect(),
+                                },
                                 result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
                                 result_id,
-                                imms: iter::once(storage_class).collect(),
                                 ids: initializer.into_iter().collect(),
                             }
                         }
 
-                        ConstCtor::SpvInst { opcode, ref imms } => spv::Inst {
-                            opcode,
+                        ConstCtor::SpvInst(inst) => spv::InstWithIds {
+                            without_ids: inst.clone(),
                             result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
                             result_id,
-                            imms: imms.iter().copied().collect(),
                             ids: ct_def
                                 .ctor_args
                                 .iter()
@@ -495,38 +507,46 @@ impl LazyInst<'_> {
                     })
                     .unwrap_or(0);
 
-                spv::Inst {
-                    opcode: wk.OpFunction,
+                spv::InstWithIds {
+                    without_ids: spv::Inst {
+                        opcode: wk.OpFunction,
+                        imms: iter::once(spv::Imm::Short(wk.FunctionControl, func_ctrl)).collect(),
+                    },
                     result_type_id: Some(ids.globals[&Global::Type(func_decl.ret_type)]),
                     result_id,
-                    imms: iter::once(spv::Imm::Short(wk.FunctionControl, func_ctrl)).collect(),
                     ids: iter::once(ids.globals[&Global::Type(func_decl.spv_func_type(cx))])
                         .collect(),
                 }
             }
-            Self::OpFunctionParameter { param_id: _, param } => spv::Inst {
-                opcode: wk.OpFunctionParameter,
+            Self::OpFunctionParameter { param_id: _, param } => spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpFunctionParameter,
+                    imms: [].into_iter().collect(),
+                },
                 result_type_id: Some(ids.globals[&Global::Type(param.ty)]),
                 result_id,
-                imms: [].into_iter().collect(),
                 ids: [].into_iter().collect(),
             },
-            Self::OpLabel { label_id: _ } => spv::Inst {
-                opcode: wk.OpLabel,
+            Self::OpLabel { label_id: _ } => spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpLabel,
+                    imms: [].into_iter().collect(),
+                },
                 result_type_id: None,
                 result_id,
-                imms: [].into_iter().collect(),
                 ids: [].into_iter().collect(),
             },
             Self::OpPhi {
                 parent_func_ids,
                 input_decl,
                 phi,
-            } => spv::Inst {
-                opcode: wk.OpPhi,
+            } => spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpPhi,
+                    imms: [].into_iter().collect(),
+                },
                 result_type_id: Some(ids.globals[&Global::Type(input_decl.ty)]),
                 result_id: Some(phi.result_id),
-                imms: [].into_iter().collect(),
                 ids: phi
                     .cases
                     .iter()
@@ -540,28 +560,30 @@ impl LazyInst<'_> {
                 result_id: _,
                 data_inst_def,
             } => {
-                let (opcode, imms, extra_initial_id_operand) = match data_inst_def.kind {
-                    DataInstKind::FuncCall(callee) => (
-                        wk.OpFunctionCall,
-                        [].into_iter().collect(),
+                let (inst, extra_initial_id_operand) = match &data_inst_def.kind {
+                    &DataInstKind::FuncCall(callee) => (
+                        spv::Inst {
+                            opcode: wk.OpFunctionCall,
+                            imms: [].into_iter().collect(),
+                        },
                         Some(ids.funcs[&callee].func_id),
                     ),
-                    DataInstKind::SpvInst { opcode, ref imms } => {
-                        (opcode, imms.iter().copied().collect(), None)
-                    }
-                    DataInstKind::SpvExtInst { ext_set, inst } => (
-                        wk.OpExtInst,
-                        iter::once(spv::Imm::Short(wk.LiteralExtInstInteger, inst)).collect(),
+                    DataInstKind::SpvInst(inst) => (inst.clone(), None),
+                    &DataInstKind::SpvExtInst { ext_set, inst } => (
+                        spv::Inst {
+                            opcode: wk.OpExtInst,
+                            imms: iter::once(spv::Imm::Short(wk.LiteralExtInstInteger, inst))
+                                .collect(),
+                        },
                         Some(ids.ext_inst_imports[&cx[ext_set]]),
                     ),
                 };
-                spv::Inst {
-                    opcode,
+                spv::InstWithIds {
+                    without_ids: inst,
                     result_type_id: data_inst_def
                         .output_type
                         .map(|ty| ids.globals[&Global::Type(ty)]),
                     result_id,
-                    imms,
                     ids: extra_initial_id_operand
                         .into_iter()
                         .chain(
@@ -576,12 +598,11 @@ impl LazyInst<'_> {
             Self::ControlInst {
                 parent_func_ids,
                 control_inst,
-            } => match control_inst.kind {
-                ControlInstKind::SpvInst { opcode, ref imms } => spv::Inst {
-                    opcode,
+            } => match &control_inst.kind {
+                ControlInstKind::SpvInst(inst) => spv::InstWithIds {
+                    without_ids: inst.clone(),
                     result_type_id: None,
                     result_id: None,
-                    imms: imms.iter().copied().collect(),
                     ids: control_inst
                         .inputs
                         .iter()
@@ -595,11 +616,13 @@ impl LazyInst<'_> {
                         .collect(),
                 },
             },
-            Self::OpFunctionEnd => spv::Inst {
-                opcode: wk.OpFunctionEnd,
+            Self::OpFunctionEnd => spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpFunctionEnd,
+                    imms: [].into_iter().collect(),
+                },
                 result_type_id: None,
                 result_id: None,
-                imms: [].into_iter().collect(),
                 ids: [].into_iter().collect(),
             },
         };
@@ -764,24 +787,28 @@ impl Module {
             emitter.push_inst(&ext_inst)?;
         }
         for (&name, &id) in &ids.ext_inst_imports {
-            emitter.push_inst(&spv::Inst {
-                opcode: wk.OpExtInstImport,
+            emitter.push_inst(&spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpExtInstImport,
+                    imms: spv::encode_literal_string(name).collect(),
+                },
                 result_type_id: None,
                 result_id: Some(id),
-                imms: spv::encode_literal_string(name).collect(),
                 ids: [].into_iter().collect(),
             })?;
         }
-        emitter.push_inst(&spv::Inst {
-            opcode: wk.OpMemoryModel,
+        emitter.push_inst(&spv::InstWithIds {
+            without_ids: spv::Inst {
+                opcode: wk.OpMemoryModel,
+                imms: [
+                    spv::Imm::Short(wk.AddressingModel, dialect.addressing_model),
+                    spv::Imm::Short(wk.MemoryModel, dialect.memory_model),
+                ]
+                .into_iter()
+                .collect(),
+            },
             result_type_id: None,
             result_id: None,
-            imms: [
-                spv::Imm::Short(wk.AddressingModel, dialect.addressing_model),
-                spv::Imm::Short(wk.MemoryModel, dialect.memory_model),
-            ]
-            .into_iter()
-            .collect(),
             ids: [].into_iter().collect(),
         })?;
 
@@ -796,17 +823,16 @@ impl Module {
 
             for attr in cx[attrs].attrs.iter() {
                 match attr {
-                    Attr::SpvAnnotation { opcode, imms } => {
+                    Attr::SpvAnnotation(inst @ spv::Inst { opcode, .. }) => {
                         let target_id = result_id.expect(
                             "FIXME: it shouldn't be possible to attach \
                                  attributes to instructions without an output",
                         );
 
-                        let inst = spv::Inst {
-                            opcode: *opcode,
+                        let inst = spv::InstWithIds {
+                            without_ids: inst.clone(),
                             result_type_id: None,
                             result_id: None,
-                            imms: imms.iter().copied().collect(),
                             ids: iter::once(target_id).collect(),
                         };
 
@@ -825,17 +851,19 @@ impl Module {
                     let target_id = result_id.unwrap();
                     match import {
                         Import::LinkName(name) => {
-                            decoration_insts.push(spv::Inst {
-                                opcode: wk.OpDecorate,
+                            decoration_insts.push(spv::InstWithIds {
+                                without_ids: spv::Inst {
+                                    opcode: wk.OpDecorate,
+                                    imms: iter::once(spv::Imm::Short(
+                                        wk.Decoration,
+                                        wk.LinkageAttributes,
+                                    ))
+                                    .chain(spv::encode_literal_string(&cx[name]))
+                                    .chain([spv::Imm::Short(wk.LinkageType, wk.Import)])
+                                    .collect(),
+                                },
                                 result_type_id: None,
                                 result_id: None,
-                                imms: iter::once(spv::Imm::Short(
-                                    wk.Decoration,
-                                    wk.LinkageAttributes,
-                                ))
-                                .chain(spv::encode_literal_string(&cx[name]))
-                                .chain([spv::Imm::Short(wk.LinkageType, wk.Import)])
-                                .collect(),
                                 ids: iter::once(target_id).collect(),
                             });
                         }
@@ -851,14 +879,16 @@ impl Module {
             };
             match export_key {
                 &ExportKey::LinkName(name) => {
-                    decoration_insts.push(spv::Inst {
-                        opcode: wk.OpDecorate,
+                    decoration_insts.push(spv::InstWithIds {
+                        without_ids: spv::Inst {
+                            opcode: wk.OpDecorate,
+                            imms: iter::once(spv::Imm::Short(wk.Decoration, wk.LinkageAttributes))
+                                .chain(spv::encode_literal_string(&cx[name]))
+                                .chain([spv::Imm::Short(wk.LinkageType, wk.Export)])
+                                .collect(),
+                        },
                         result_type_id: None,
                         result_id: None,
-                        imms: iter::once(spv::Imm::Short(wk.Decoration, wk.LinkageAttributes))
-                            .chain(spv::encode_literal_string(&cx[name]))
-                            .chain([spv::Imm::Short(wk.LinkageType, wk.Export)])
-                            .collect(),
                         ids: iter::once(target_id).collect(),
                     });
                 }
@@ -866,11 +896,13 @@ impl Module {
                     imms,
                     interface_global_vars,
                 } => {
-                    entry_point_insts.push(spv::Inst {
-                        opcode: wk.OpEntryPoint,
+                    entry_point_insts.push(spv::InstWithIds {
+                        without_ids: spv::Inst {
+                            opcode: wk.OpEntryPoint,
+                            imms: imms.iter().copied().collect(),
+                        },
                         result_type_id: None,
                         result_id: None,
-                        imms: imms.iter().copied().collect(),
                         ids: iter::once(target_id)
                             .chain(
                                 interface_global_vars
@@ -892,11 +924,13 @@ impl Module {
         }
 
         for (&s, &id) in &ids.debug_strings {
-            emitter.push_inst(&spv::Inst {
-                opcode: wk.OpString,
+            emitter.push_inst(&spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpString,
+                    imms: spv::encode_literal_string(s).collect(),
+                },
                 result_type_id: None,
                 result_id: Some(id),
-                imms: spv::encode_literal_string(s).collect(),
                 ids: [].into_iter().collect(),
             })?;
         }
@@ -909,11 +943,13 @@ impl Module {
                 .into_iter()
             };
             if sources.file_contents.is_empty() {
-                emitter.push_inst(&spv::Inst {
-                    opcode: wk.OpSource,
+                emitter.push_inst(&spv::InstWithIds {
+                    without_ids: spv::Inst {
+                        opcode: wk.OpSource,
+                        imms: lang_imms().collect(),
+                    },
                     result_type_id: None,
                     result_id: None,
-                    imms: lang_imms().collect(),
                     ids: [].into_iter().collect(),
                 })?;
             } else {
@@ -931,13 +967,15 @@ impl Module {
                     let (contents_initial, mut contents_rest) =
                         contents.split_at(contents.len().min(MAX_OP_SOURCE_CONTENTS_LEN));
 
-                    emitter.push_inst(&spv::Inst {
-                        opcode: wk.OpSource,
+                    emitter.push_inst(&spv::InstWithIds {
+                        without_ids: spv::Inst {
+                            opcode: wk.OpSource,
+                            imms: lang_imms()
+                                .chain(spv::encode_literal_string(contents_initial))
+                                .collect(),
+                        },
                         result_type_id: None,
                         result_id: None,
-                        imms: lang_imms()
-                            .chain(spv::encode_literal_string(contents_initial))
-                            .collect(),
                         ids: iter::once(ids.debug_strings[&cx[file]]).collect(),
                     })?;
 
@@ -946,11 +984,13 @@ impl Module {
                             .split_at(contents_rest.len().min(MAX_OP_SOURCE_CONT_CONTENTS_LEN));
                         contents_rest = rest;
 
-                        emitter.push_inst(&spv::Inst {
-                            opcode: wk.OpSourceContinued,
+                        emitter.push_inst(&spv::InstWithIds {
+                            without_ids: spv::Inst {
+                                opcode: wk.OpSourceContinued,
+                                imms: spv::encode_literal_string(cont_chunk).collect(),
+                            },
                             result_type_id: None,
                             result_id: None,
-                            imms: spv::encode_literal_string(cont_chunk).collect(),
                             ids: [].into_iter().collect(),
                         })?;
                     }
@@ -1019,11 +1059,10 @@ impl Module {
                         [].into_iter().collect(),
                     ),
                 };
-                emitter.push_inst(&spv::Inst {
-                    opcode,
+                emitter.push_inst(&spv::InstWithIds {
+                    without_ids: spv::Inst { opcode, imms },
                     result_type_id: None,
                     result_id: None,
-                    imms,
                     ids,
                 })?;
             }

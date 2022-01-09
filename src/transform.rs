@@ -324,7 +324,7 @@ impl InnerTransform for TypeDef {
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
             ctor -> match ctor {
-                TypeCtor::SpvInst { opcode: _, imms: _ }  => Transformed::Unchanged,
+                TypeCtor::SpvInst(_)  => Transformed::Unchanged,
             },
             ctor_args -> Transformed::map_iter(ctor_args.iter(), |arg| match *arg {
                 TypeCtorArg::Type(ty) => transform!({
@@ -360,7 +360,7 @@ impl InnerTransform for ConstDef {
                     gv -> transformer.transform_global_var_use(*gv),
                 } => ConstCtor::PtrToGlobalVar(gv)),
 
-                ConstCtor::SpvInst { opcode: _, imms: _ }  => Transformed::Unchanged
+                ConstCtor::SpvInst(_)  => Transformed::Unchanged
             },
             ctor_args -> Transformed::map_iter(
                 ctor_args.iter(),
@@ -502,7 +502,7 @@ impl InnerInPlaceTransform for DataInstDef {
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
             DataInstKind::FuncCall(func) => transformer.transform_func_use(*func).apply_to(func),
-            DataInstKind::SpvInst { opcode: _, imms: _ } | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = output_type {
             transformer.transform_type_use(*ty).apply_to(ty);
@@ -525,7 +525,7 @@ impl InnerInPlaceTransform for ControlInst {
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
-            ControlInstKind::SpvInst { opcode: _, imms: _ } => {}
+            ControlInstKind::SpvInst(_) => {}
         }
         for v in inputs {
             v.inner_transform_with(transformer).apply_to(v);

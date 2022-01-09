@@ -110,13 +110,7 @@ pub struct AttrSetDef {
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
-    SpvAnnotation {
-        // FIXME(eddyb) determine this based on the annotation.
-        opcode: spv::spec::Opcode,
-        // FIXME(eddyb) this cannot represent IDs - is that desirable?
-        // (for now we don't support `Op{ExecutionMode,Decorate}Id`)
-        imms: SmallVec<[spv::Imm; 2]>,
-    },
+    SpvAnnotation(spv::Inst),
 
     SpvDebugLine {
         file_path: OrdAssertEq<InternedStr>,
@@ -163,20 +157,13 @@ pub struct TypeDef {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TypeCtor {
-    SpvInst {
-        opcode: spv::spec::Opcode,
-
-        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-        // FIXME(eddyb) it might be worth investigating the performance implications
-        // of interning "long immediates", compared to the flattened representation.
-        imms: SmallVec<[spv::Imm; 2]>,
-    },
+    SpvInst(spv::Inst),
 }
 
 impl TypeCtor {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::SpvInst { opcode, .. } => opcode.name(),
+            Self::SpvInst(inst) => inst.opcode.name(),
         }
     }
 }
@@ -200,14 +187,7 @@ pub struct ConstDef {
 pub enum ConstCtor {
     PtrToGlobalVar(GlobalVar),
 
-    SpvInst {
-        opcode: spv::spec::Opcode,
-
-        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-        // FIXME(eddyb) it might be worth investigating the performance implications
-        // of interning "long immediates", compared to the flattened representation.
-        imms: SmallVec<[spv::Imm; 2]>,
-    },
+    SpvInst(spv::Inst),
 }
 
 /// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,
@@ -306,18 +286,8 @@ pub enum DataInstKind {
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
 
-    SpvInst {
-        opcode: spv::spec::Opcode,
-
-        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-        // FIXME(eddyb) it might be worth investigating the performance implications
-        // of interning "long immediates", compared to the flattened representation.
-        imms: SmallVec<[spv::Imm; 2]>,
-    },
-    SpvExtInst {
-        ext_set: InternedStr,
-        inst: u32,
-    },
+    SpvInst(spv::Inst),
+    SpvExtInst { ext_set: InternedStr, inst: u32 },
 }
 
 #[derive(Copy, Clone)]

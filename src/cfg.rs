@@ -25,12 +25,5 @@ pub struct ControlInst {
 
 #[derive(PartialEq, Eq)]
 pub enum ControlInstKind {
-    SpvInst {
-        opcode: spv::spec::Opcode,
-
-        // FIXME(eddyb) reconsider whether flattening "long immediates" is a good idea.
-        // FIXME(eddyb) it might be worth investigating the performance implications
-        // of interning "long immediates", compared to the flattened representation.
-        imms: SmallVec<[spv::Imm; 2]>,
-    },
+    SpvInst(spv::Inst),
 }

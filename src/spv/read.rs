@@ -39,7 +39,7 @@ struct InstParser<'a> {
     words: iter::Copied<slice::Iter<'a, u32>>,
 
     /// Output instruction, being parsed.
-    inst: spv::Inst,
+    inst: spv::InstWithIds,
 }
 
 enum InstParseError {
@@ -214,7 +214,7 @@ impl InstParser<'_> {
         Ok(())
     }
 
-    fn inst(mut self, def: &spec::InstructionDef) -> Result<spv::Inst, InstParseError> {
+    fn inst(mut self, def: &spec::InstructionDef) -> Result<spv::InstWithIds, InstParseError> {
         use InstParseError as Error;
 
         {
@@ -323,7 +323,7 @@ impl ModuleParser {
 }
 
 impl Iterator for ModuleParser {
-    type Item = io::Result<spv::Inst>;
+    type Item = io::Result<spv::InstWithIds>;
     fn next(&mut self) -> Option<Self::Item> {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
@@ -346,11 +346,13 @@ impl Iterator for ModuleParser {
         let parser = InstParser {
             known_ids: &self.known_ids,
             words: self.words[1..inst_len].iter().copied(),
-            inst: spv::Inst {
-                opcode,
+            inst: spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode,
+                    imms: SmallVec::new(),
+                },
                 result_type_id: None,
                 result_id: None,
-                imms: SmallVec::new(),
                 ids: SmallVec::new(),
             },
         };

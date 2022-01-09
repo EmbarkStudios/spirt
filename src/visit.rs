@@ -174,7 +174,7 @@ impl InnerVisit for TypeDef {
 
         visitor.visit_attr_set_use(*attrs);
         match ctor {
-            TypeCtor::SpvInst { opcode: _, imms: _ } => {}
+            TypeCtor::SpvInst(_) => {}
         }
         for &arg in ctor_args {
             match arg {
@@ -198,7 +198,7 @@ impl InnerVisit for ConstDef {
         visitor.visit_type_use(*ty);
         match *ctor {
             ConstCtor::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
-            ConstCtor::SpvInst { opcode: _, imms: _ } => {}
+            ConstCtor::SpvInst(_) => {}
         }
         for &ct in ctor_args {
             visitor.visit_const_use(ct);
@@ -318,7 +318,7 @@ impl InnerVisit for DataInstDef {
         visitor.visit_attr_set_use(*attrs);
         match *kind {
             DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
-            DataInstKind::SpvInst { opcode: _, imms: _ } | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = *output_type {
             visitor.visit_type_use(ty);
@@ -341,7 +341,7 @@ impl InnerVisit for ControlInst {
 
         visitor.visit_attr_set_use(*attrs);
         match kind {
-            ControlInstKind::SpvInst { opcode: _, imms: _ } => {}
+            ControlInstKind::SpvInst(_) => {}
         }
         for v in inputs {
             visitor.visit_value_use(v);

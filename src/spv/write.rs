@@ -200,7 +200,7 @@ impl ModuleEmitter {
     }
 
     // FIXME(eddyb) sanity-check the operands against the definition of `inst.opcode`.
-    pub fn push_inst(&mut self, inst: &spv::Inst) -> io::Result<()> {
+    pub fn push_inst(&mut self, inst: &spv::InstWithIds) -> io::Result<()> {
         let (inst_name, def) = inst.opcode.name_and_def();
         let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
 

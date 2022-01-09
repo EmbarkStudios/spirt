@@ -43,17 +43,40 @@ pub struct DebugSources {
     pub file_contents: IndexMap<InternedStr, String>,
 }
 
+/// A SPIR-V instruction, in its minimal form (opcode and immediate operands).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Inst {
     pub opcode: spec::Opcode,
+
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    // FIXME(eddyb) it might be worth investigating the performance implications
+    // of interning "long immediates", compared to the flattened representation.
+    pub imms: SmallVec<[Imm; 2]>,
+}
+
+/// A full SPIR-V instruction (like `Inst` but including input/output ID operands).
+pub struct InstWithIds {
+    pub without_ids: Inst,
 
     // FIXME(eddyb) consider nesting "Result Type ID" in "Result ID".
     pub result_type_id: Option<Id>,
     pub result_id: Option<Id>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub imms: SmallVec<[Imm; 2]>,
-    // FIXME(eddyb) change the inline size of this to fit most instructions.
     pub ids: SmallVec<[Id; 4]>,
+}
+
+// HACK(eddyb) access to `Inst` fields for convenience.
+impl std::ops::Deref for InstWithIds {
+    type Target = Inst;
+    fn deref(&self) -> &Inst {
+        &self.without_ids
+    }
+}
+impl std::ops::DerefMut for InstWithIds {
+    fn deref_mut(&mut self) -> &mut Inst {
+        &mut self.without_ids
+    }
 }
 
 // FIXME(eddyb) consider replacing with a `struct` e.g.:

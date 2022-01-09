@@ -400,14 +400,14 @@ impl<'a, 'b> Printer<'a, 'b> {
 
                                     // FIXME(eddyb) remove the duplication between
                                     // here and `TypeDef`'s `Print` impl.
-                                    let has_compact_print = match ty_def.ctor {
-                                        TypeCtor::SpvInst { opcode, .. } => [
+                                    let has_compact_print = match &ty_def.ctor {
+                                        TypeCtor::SpvInst(inst) => [
                                             wk.OpTypeBool,
                                             wk.OpTypeInt,
                                             wk.OpTypeFloat,
                                             wk.OpTypeVector,
                                         ]
-                                        .contains(&opcode),
+                                        .contains(&inst.opcode),
                                     };
 
                                     has_compact_print || ty_def.ctor_args.is_empty()
@@ -417,10 +417,10 @@ impl<'a, 'b> Printer<'a, 'b> {
 
                                     // FIXME(eddyb) remove the duplication between
                                     // here and `ConstDef`'s `Print` impl.
-                                    let has_compact_print = match ct_def.ctor {
-                                        ConstCtor::SpvInst { opcode, .. } => {
+                                    let has_compact_print = match &ct_def.ctor {
+                                        ConstCtor::SpvInst(inst) => {
                                             [wk.OpConstantFalse, wk.OpConstantTrue, wk.OpConstant]
-                                                .contains(&opcode)
+                                                .contains(&inst.opcode)
                                         }
                                         _ => false,
                                     };
@@ -1148,7 +1148,7 @@ impl Print for Attr {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         match self {
-            Attr::SpvAnnotation { opcode, imms } => {
+            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
                 struct ImplicitTargetId;
 
                 printer.pretty_spv_inst(
@@ -1198,7 +1198,7 @@ impl Print for TypeDef {
 
         // FIXME(eddyb) should this be done by lowering SPIR-V types to SPIR-T?
         #[allow(irrefutable_let_patterns)]
-        let compact_def = if let &TypeCtor::SpvInst { opcode, ref imms } = ctor {
+        let compact_def = if let &TypeCtor::SpvInst(spv::Inst { opcode, ref imms }) = ctor {
             if opcode == wk.OpTypeBool {
                 Some("bool".to_string())
             } else if opcode == wk.OpTypeInt {
@@ -1243,7 +1243,7 @@ impl Print for TypeDef {
                 def
             } else {
                 match *ctor {
-                    TypeCtor::SpvInst { opcode, ref imms } => printer.pretty_spv_inst(
+                    TypeCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
                         opcode,
                         imms,
                         ctor_args,
@@ -1271,7 +1271,7 @@ impl Print for ConstDef {
 
         let wk = &spv::spec::Spec::get().well_known;
 
-        let compact_def = if let &ConstCtor::SpvInst { opcode, ref imms } = ctor {
+        let compact_def = if let &ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) = ctor {
             if opcode == wk.OpConstantFalse {
                 Some("false".to_string())
             } else if opcode == wk.OpConstantTrue {
@@ -1289,10 +1289,10 @@ impl Print for ConstDef {
 
                 if let (
                     Some(raw_bits),
-                    &TypeCtor::SpvInst {
+                    &TypeCtor::SpvInst(spv::Inst {
                         opcode: ty_opcode,
                         imms: ref ty_imms,
-                    },
+                    }),
                 ) = (raw_bits, &printer.cx[*ty].ctor)
                 {
                     if ty_opcode == wk.OpTypeInt {
@@ -1373,7 +1373,7 @@ impl Print for ConstDef {
             } else {
                 match *ctor {
                     ConstCtor::PtrToGlobalVar(gv) => format!("&{}", gv.print(printer)),
-                    ConstCtor::SpvInst { opcode, ref imms } => {
+                    ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => {
                         printer.pretty_spv_inst(opcode, imms, ctor_args, Print::print, Some(*ty))
                     }
                 }
@@ -1408,8 +1408,8 @@ impl Print for GlobalVarDecl {
             // ideally the `GlobalVarDecl` would hold that type itself.
             let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
 
-            match type_of_ptr_to_def.ctor {
-                TypeCtor::SpvInst { opcode, .. } if opcode == wk.OpTypePointer => {
+            match &type_of_ptr_to_def.ctor {
+                TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypePointer => {
                     match type_of_ptr_to_def.ctor_args[..] {
                         [TypeCtorArg::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
                         _ => unreachable!(),
@@ -1589,7 +1589,7 @@ impl Print for DataInstDef {
 
         let header = match *kind {
             DataInstKind::FuncCall(func) => format!("call {}", func.print(printer)),
-            DataInstKind::SpvInst { opcode, ref imms } => {
+            DataInstKind::SpvInst(spv::Inst { opcode, ref imms }) => {
                 return AttrsAndDef {
                     attrs,
                     def: printer.pretty_spv_inst(opcode, imms, inputs, Print::print, *output_type),
@@ -1650,7 +1650,7 @@ impl Print for ControlInst {
             .collect();
 
         let def = match *kind {
-            ControlInstKind::SpvInst { opcode, ref imms } => {
+            ControlInstKind::SpvInst(spv::Inst { opcode, ref imms }) => {
                 #[derive(Copy, Clone)]
                 struct TargetLabelId;
 

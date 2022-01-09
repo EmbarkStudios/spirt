@@ -71,14 +71,13 @@ struct IntraFuncInst {
     attrs: AttrSet,
     result_type: Option<Type>,
 
+    without_ids: spv::Inst,
+
     // Instruction aspects that cannot be lowered initially (due to forward refs):
-    opcode: spec::Opcode,
     result_id: Option<spv::Id>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub imms: SmallVec<[spv::Imm; 2]>,
-    // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub ids: SmallVec<[spv::Id; 4]>,
+    ids: SmallVec<[spv::Id; 4]>,
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -481,7 +480,7 @@ impl Module {
 
                 pending_exports.push(Export::EntryPoint {
                     func_id: inst.ids[0],
-                    imms: inst.imms,
+                    imms: inst.without_ids.imms,
                     interface_ids: inst.ids[1..].iter().copied().collect(),
                 });
 
@@ -529,12 +528,11 @@ impl Module {
                     }
 
                     _ => {
-                        pending_attrs.entry(target_id).or_default().attrs.insert(
-                            Attr::SpvAnnotation {
-                                opcode,
-                                imms: inst.imms,
-                            },
-                        );
+                        pending_attrs
+                            .entry(target_id)
+                            .or_default()
+                            .attrs
+                            .insert(Attr::SpvAnnotation(inst.without_ids));
                     }
                 };
 
@@ -557,10 +555,10 @@ impl Module {
                 // serves as a first approximation for a "deferred error".
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst {
+                    ctor: TypeCtor::SpvInst(spv::Inst {
                         opcode,
                         imms: [sc].into_iter().collect(),
-                    },
+                    }),
                     ctor_args: [].into_iter().collect(),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
@@ -587,10 +585,7 @@ impl Module {
 
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst {
-                        opcode,
-                        imms: inst.imms,
-                    },
+                    ctor: TypeCtor::SpvInst(inst.without_ids),
                     ctor_args: type_ctor_args,
                 });
                 id_defs.insert(id, IdDef::Type(ty));
@@ -616,10 +611,7 @@ impl Module {
                 let ct = cx.intern(ConstDef {
                     attrs: mem::take(&mut attrs),
                     ty: result_type.unwrap(),
-                    ctor: ConstCtor::SpvInst {
-                        opcode,
-                        imms: inst.imms,
-                    },
+                    ctor: ConstCtor::SpvInst(inst.without_ids),
                     ctor_args: const_ctor_args,
                 });
                 id_defs.insert(id, IdDef::Const(ct));
@@ -718,8 +710,8 @@ impl Module {
                     match id_defs.get(&func_type_id) {
                         Some(&IdDef::Type(ty)) => {
                             let ty_def = &cx[ty];
-                            match ty_def.ctor {
-                                TypeCtor::SpvInst { opcode, .. } if opcode == wk.OpTypeFunction => {
+                            match &ty_def.ctor {
+                                TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypeFunction => {
                                     let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
                                         TypeCtorArg::Type(ty) => ty,
                                         _ => unreachable!(),
@@ -808,9 +800,11 @@ impl Module {
                     attrs: mem::take(&mut attrs),
                     result_type,
 
-                    opcode,
+                    without_ids: spv::Inst {
+                        opcode,
+                        imms: inst.without_ids.imms,
+                    },
                     result_id: inst.result_id,
-                    imms: inst.imms,
                     ids: inst.ids,
                 });
 
@@ -880,7 +874,9 @@ impl Module {
                 let mut next_param_idx = 0u32;
                 for raw_inst in &raw_insts {
                     let IntraFuncInst {
-                        opcode, result_id, ..
+                        without_ids: spv::Inst { opcode, ref imms },
+                        result_id,
+                        ..
                     } = *raw_inst;
 
                     if let Some(id) = result_id {
@@ -927,7 +923,7 @@ impl Module {
                                 let input_idx = block_details.input_count;
                                 block_details.input_count = input_idx.checked_add(1).unwrap();
 
-                                assert!(raw_inst.imms.is_empty());
+                                assert!(imms.is_empty());
                                 // FIXME(eddyb) use `array_chunks` when that's stable.
                                 for input_and_source_block_id in raw_inst.ids.chunks(2) {
                                     let &[value_id, source_block_id]: &[_; 2] =
@@ -954,10 +950,10 @@ impl Module {
                                     &cx,
                                     DataInstDef {
                                         attrs: AttrSet::default(),
-                                        kind: DataInstKind::SpvInst {
+                                        kind: DataInstKind::SpvInst(spv::Inst {
                                             opcode: wk.OpNop,
                                             imms: [].into_iter().collect(),
-                                        },
+                                        }),
                                         output_type: None,
                                         inputs: [].into_iter().collect(),
                                     },
@@ -1000,9 +996,8 @@ impl Module {
                 let IntraFuncInst {
                     attrs,
                     result_type,
-                    opcode,
+                    without_ids: spv::Inst { opcode, ref imms },
                     result_id,
-                    ref imms,
                     ref ids,
                 } = *raw_inst;
 
@@ -1055,8 +1050,9 @@ impl Module {
                 }
                 let func_def_body = func_def_body.as_deref_mut().unwrap();
 
-                let is_last_in_block = lookahead_raw_inst(1)
-                    .map_or(true, |next_raw_inst| next_raw_inst.opcode == wk.OpLabel);
+                let is_last_in_block = lookahead_raw_inst(1).map_or(true, |next_raw_inst| {
+                    next_raw_inst.without_ids.opcode == wk.OpLabel
+                });
 
                 if opcode == wk.OpLabel {
                     if is_last_in_block {
@@ -1179,10 +1175,7 @@ impl Module {
                         current_block_region,
                         ControlInst {
                             attrs,
-                            kind: ControlInstKind::SpvInst {
-                                opcode,
-                                imms: imms.iter().copied().collect(),
-                            },
+                            kind: ControlInstKind::SpvInst(raw_inst.without_ids.clone()),
                             inputs,
                             targets,
                             target_inputs,
@@ -1201,7 +1194,9 @@ impl Module {
                     });
                 } else if [wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode) {
                     let is_second_to_last_in_block = lookahead_raw_inst(2)
-                        .map_or(true, |next_raw_inst| next_raw_inst.opcode == wk.OpLabel);
+                        .map_or(true, |next_raw_inst| {
+                            next_raw_inst.without_ids.opcode == wk.OpLabel
+                        });
 
                     if !is_second_to_last_in_block {
                         return Err(invalid(
@@ -1241,10 +1236,7 @@ impl Module {
 
                             // HACK(eddyb) this should be an error, but it shows
                             // up in Rust-GPU output (likely a zombie?).
-                            None => DataInstKind::SpvInst {
-                                opcode,
-                                imms: imms.iter().copied().collect(),
-                            },
+                            None => DataInstKind::SpvInst(raw_inst.without_ids.clone()),
                         }
                     } else if opcode == wk.OpExtInst {
                         let ext_set_id = ids[0];
@@ -1273,10 +1265,7 @@ impl Module {
 
                         DataInstKind::SpvExtInst { ext_set, inst }
                     } else {
-                        DataInstKind::SpvInst {
-                            opcode,
-                            imms: imms.iter().copied().collect(),
-                        }
+                        DataInstKind::SpvInst(raw_inst.without_ids.clone())
                     };
 
                     let data_inst_def = DataInstDef {
