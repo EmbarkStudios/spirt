@@ -51,9 +51,9 @@ pub struct Inst {
     pub result_id: Option<Id>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub imm_operands: SmallVec<[Imm; 2]>,
+    pub imms: SmallVec<[Imm; 2]>,
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub id_operands: SmallVec<[Id; 4]>,
+    pub ids: SmallVec<[Id; 4]>,
 }
 
 // FIXME(eddyb) consider replacing with a `struct` e.g.:

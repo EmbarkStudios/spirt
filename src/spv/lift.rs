@@ -24,8 +24,8 @@ impl spv::Dialect {
             opcode: wk.OpCapability,
             result_type_id: None,
             result_id: None,
-            imm_operands: iter::once(spv::Imm::Short(wk.Capability, cap)).collect(),
-            id_operands: [].into_iter().collect(),
+            imms: iter::once(spv::Imm::Short(wk.Capability, cap)).collect(),
+            ids: [].into_iter().collect(),
         })
     }
 
@@ -35,8 +35,8 @@ impl spv::Dialect {
             opcode: wk.OpExtension,
             result_type_id: None,
             result_id: None,
-            imm_operands: spv::encode_literal_string(ext).collect(),
-            id_operands: [].into_iter().collect(),
+            imms: spv::encode_literal_string(ext).collect(),
+            ids: [].into_iter().collect(),
         })
     }
 }
@@ -48,8 +48,8 @@ impl spv::ModuleDebugInfo {
             opcode: wk.OpSourceExtension,
             result_type_id: None,
             result_id: None,
-            imm_operands: spv::encode_literal_string(ext).collect(),
-            id_operands: [].into_iter().collect(),
+            imms: spv::encode_literal_string(ext).collect(),
+            ids: [].into_iter().collect(),
         })
     }
 
@@ -59,8 +59,8 @@ impl spv::ModuleDebugInfo {
             opcode: wk.OpModuleProcessed,
             result_type_id: None,
             result_id: None,
-            imm_operands: spv::encode_literal_string(proc).collect(),
-            id_operands: [].into_iter().collect(),
+            imms: spv::encode_literal_string(proc).collect(),
+            ids: [].into_iter().collect(),
         })
     }
 }
@@ -418,8 +418,8 @@ impl LazyInst<'_> {
                             opcode,
                             result_type_id: None,
                             result_id,
-                            imm_operands: imms.iter().copied().collect(),
-                            id_operands: ty_def
+                            imms: imms.iter().copied().collect(),
+                            ids: ty_def
                                 .ctor_args
                                 .iter()
                                 .map(|&arg| {
@@ -457,8 +457,8 @@ impl LazyInst<'_> {
                                 opcode: wk.OpVariable,
                                 result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
                                 result_id,
-                                imm_operands: iter::once(storage_class).collect(),
-                                id_operands: initializer.into_iter().collect(),
+                                imms: iter::once(storage_class).collect(),
+                                ids: initializer.into_iter().collect(),
                             }
                         }
 
@@ -466,8 +466,8 @@ impl LazyInst<'_> {
                             opcode,
                             result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
                             result_id,
-                            imm_operands: imms.iter().copied().collect(),
-                            id_operands: ct_def
+                            imms: imms.iter().copied().collect(),
+                            ids: ct_def
                                 .ctor_args
                                 .iter()
                                 .map(|&ct| ids.globals[&Global::Const(ct)])
@@ -499,27 +499,24 @@ impl LazyInst<'_> {
                     opcode: wk.OpFunction,
                     result_type_id: Some(ids.globals[&Global::Type(func_decl.ret_type)]),
                     result_id,
-                    imm_operands: iter::once(spv::Imm::Short(wk.FunctionControl, func_ctrl))
+                    imms: iter::once(spv::Imm::Short(wk.FunctionControl, func_ctrl)).collect(),
+                    ids: iter::once(ids.globals[&Global::Type(func_decl.spv_func_type(cx))])
                         .collect(),
-                    id_operands: iter::once(
-                        ids.globals[&Global::Type(func_decl.spv_func_type(cx))],
-                    )
-                    .collect(),
                 }
             }
             Self::OpFunctionParameter { param_id: _, param } => spv::Inst {
                 opcode: wk.OpFunctionParameter,
                 result_type_id: Some(ids.globals[&Global::Type(param.ty)]),
                 result_id,
-                imm_operands: [].into_iter().collect(),
-                id_operands: [].into_iter().collect(),
+                imms: [].into_iter().collect(),
+                ids: [].into_iter().collect(),
             },
             Self::OpLabel { label_id: _ } => spv::Inst {
                 opcode: wk.OpLabel,
                 result_type_id: None,
                 result_id,
-                imm_operands: [].into_iter().collect(),
-                id_operands: [].into_iter().collect(),
+                imms: [].into_iter().collect(),
+                ids: [].into_iter().collect(),
             },
             Self::OpPhi {
                 parent_func_ids,
@@ -529,8 +526,8 @@ impl LazyInst<'_> {
                 opcode: wk.OpPhi,
                 result_type_id: Some(ids.globals[&Global::Type(input_decl.ty)]),
                 result_id: Some(phi.result_id),
-                imm_operands: [].into_iter().collect(),
-                id_operands: phi
+                imms: [].into_iter().collect(),
+                ids: phi
                     .cases
                     .iter()
                     .flat_map(|&(v, source_block_id)| {
@@ -543,7 +540,7 @@ impl LazyInst<'_> {
                 result_id: _,
                 data_inst_def,
             } => {
-                let (opcode, imm_operands, extra_initial_id_operand) = match data_inst_def.kind {
+                let (opcode, imms, extra_initial_id_operand) = match data_inst_def.kind {
                     DataInstKind::FuncCall(callee) => (
                         wk.OpFunctionCall,
                         [].into_iter().collect(),
@@ -564,8 +561,8 @@ impl LazyInst<'_> {
                         .output_type
                         .map(|ty| ids.globals[&Global::Type(ty)]),
                     result_id,
-                    imm_operands,
-                    id_operands: extra_initial_id_operand
+                    imms,
+                    ids: extra_initial_id_operand
                         .into_iter()
                         .chain(
                             data_inst_def
@@ -584,8 +581,8 @@ impl LazyInst<'_> {
                     opcode,
                     result_type_id: None,
                     result_id: None,
-                    imm_operands: imms.iter().copied().collect(),
-                    id_operands: control_inst
+                    imms: imms.iter().copied().collect(),
+                    ids: control_inst
                         .inputs
                         .iter()
                         .map(|&v| value_to_id(parent_func_ids, v))
@@ -602,8 +599,8 @@ impl LazyInst<'_> {
                 opcode: wk.OpFunctionEnd,
                 result_type_id: None,
                 result_id: None,
-                imm_operands: [].into_iter().collect(),
-                id_operands: [].into_iter().collect(),
+                imms: [].into_iter().collect(),
+                ids: [].into_iter().collect(),
             },
         };
         (inst, attrs)
@@ -771,21 +768,21 @@ impl Module {
                 opcode: wk.OpExtInstImport,
                 result_type_id: None,
                 result_id: Some(id),
-                imm_operands: spv::encode_literal_string(name).collect(),
-                id_operands: [].into_iter().collect(),
+                imms: spv::encode_literal_string(name).collect(),
+                ids: [].into_iter().collect(),
             })?;
         }
         emitter.push_inst(&spv::Inst {
             opcode: wk.OpMemoryModel,
             result_type_id: None,
             result_id: None,
-            imm_operands: [
+            imms: [
                 spv::Imm::Short(wk.AddressingModel, dialect.addressing_model),
                 spv::Imm::Short(wk.MemoryModel, dialect.memory_model),
             ]
             .into_iter()
             .collect(),
-            id_operands: [].into_iter().collect(),
+            ids: [].into_iter().collect(),
         })?;
 
         // Collect the various sources of attributes.
@@ -809,8 +806,8 @@ impl Module {
                             opcode: *opcode,
                             result_type_id: None,
                             result_id: None,
-                            imm_operands: imms.iter().copied().collect(),
-                            id_operands: iter::once(target_id).collect(),
+                            imms: imms.iter().copied().collect(),
+                            ids: iter::once(target_id).collect(),
                         };
 
                         if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
@@ -832,14 +829,14 @@ impl Module {
                                 opcode: wk.OpDecorate,
                                 result_type_id: None,
                                 result_id: None,
-                                imm_operands: iter::once(spv::Imm::Short(
+                                imms: iter::once(spv::Imm::Short(
                                     wk.Decoration,
                                     wk.LinkageAttributes,
                                 ))
                                 .chain(spv::encode_literal_string(&cx[name]))
                                 .chain([spv::Imm::Short(wk.LinkageType, wk.Import)])
                                 .collect(),
-                                id_operands: iter::once(target_id).collect(),
+                                ids: iter::once(target_id).collect(),
                             });
                         }
                     }
@@ -858,14 +855,11 @@ impl Module {
                         opcode: wk.OpDecorate,
                         result_type_id: None,
                         result_id: None,
-                        imm_operands: iter::once(spv::Imm::Short(
-                            wk.Decoration,
-                            wk.LinkageAttributes,
-                        ))
-                        .chain(spv::encode_literal_string(&cx[name]))
-                        .chain([spv::Imm::Short(wk.LinkageType, wk.Export)])
-                        .collect(),
-                        id_operands: iter::once(target_id).collect(),
+                        imms: iter::once(spv::Imm::Short(wk.Decoration, wk.LinkageAttributes))
+                            .chain(spv::encode_literal_string(&cx[name]))
+                            .chain([spv::Imm::Short(wk.LinkageType, wk.Export)])
+                            .collect(),
+                        ids: iter::once(target_id).collect(),
                     });
                 }
                 ExportKey::SpvEntryPoint {
@@ -876,8 +870,8 @@ impl Module {
                         opcode: wk.OpEntryPoint,
                         result_type_id: None,
                         result_id: None,
-                        imm_operands: imms.iter().copied().collect(),
-                        id_operands: iter::once(target_id)
+                        imms: imms.iter().copied().collect(),
+                        ids: iter::once(target_id)
                             .chain(
                                 interface_global_vars
                                     .iter()
@@ -902,12 +896,12 @@ impl Module {
                 opcode: wk.OpString,
                 result_type_id: None,
                 result_id: Some(id),
-                imm_operands: spv::encode_literal_string(s).collect(),
-                id_operands: [].into_iter().collect(),
+                imms: spv::encode_literal_string(s).collect(),
+                ids: [].into_iter().collect(),
             })?;
         }
         for (lang, sources) in &debug_info.source_languages {
-            let lang_imm_operands = || {
+            let lang_imms = || {
                 [
                     spv::Imm::Short(wk.SourceLanguage, lang.lang),
                     spv::Imm::Short(wk.LiteralInteger, lang.version),
@@ -919,8 +913,8 @@ impl Module {
                     opcode: wk.OpSource,
                     result_type_id: None,
                     result_id: None,
-                    imm_operands: lang_imm_operands().collect(),
-                    id_operands: [].into_iter().collect(),
+                    imms: lang_imms().collect(),
+                    ids: [].into_iter().collect(),
                 })?;
             } else {
                 for (&file, contents) in &sources.file_contents {
@@ -941,10 +935,10 @@ impl Module {
                         opcode: wk.OpSource,
                         result_type_id: None,
                         result_id: None,
-                        imm_operands: lang_imm_operands()
+                        imms: lang_imms()
                             .chain(spv::encode_literal_string(contents_initial))
                             .collect(),
-                        id_operands: iter::once(ids.debug_strings[&cx[file]]).collect(),
+                        ids: iter::once(ids.debug_strings[&cx[file]]).collect(),
                     })?;
 
                     while !contents_rest.is_empty() {
@@ -956,8 +950,8 @@ impl Module {
                             opcode: wk.OpSourceContinued,
                             result_type_id: None,
                             result_id: None,
-                            imm_operands: spv::encode_literal_string(cont_chunk).collect(),
-                            id_operands: [].into_iter().collect(),
+                            imms: spv::encode_literal_string(cont_chunk).collect(),
+                            ids: [].into_iter().collect(),
                         })?;
                     }
                 }
@@ -1008,7 +1002,7 @@ impl Module {
                 _ => None,
             });
             if current_debug_line != new_debug_line {
-                let (opcode, imm_operands, id_operands) = match new_debug_line {
+                let (opcode, imms, ids) = match new_debug_line {
                     Some((file_path_id, line, col)) => (
                         wk.OpLine,
                         [
@@ -1029,8 +1023,8 @@ impl Module {
                     opcode,
                     result_type_id: None,
                     result_id: None,
-                    imm_operands,
-                    id_operands,
+                    imms,
+                    ids,
                 })?;
             }
             current_debug_line = new_debug_line;

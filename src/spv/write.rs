@@ -215,8 +215,8 @@ impl ModuleEmitter {
         let total_word_count = 1
             + (inst.result_type_id.is_some() as usize)
             + (inst.result_id.is_some() as usize)
-            + inst.imm_operands.len()
-            + inst.id_operands.len();
+            + inst.imms.len()
+            + inst.ids.len();
 
         self.words.reserve(total_word_count);
         let expected_final_pos = self.words.len() + total_word_count;
@@ -233,8 +233,8 @@ impl ModuleEmitter {
         );
 
         OperandEmitter {
-            imms: inst.imm_operands.iter().copied(),
-            ids: inst.id_operands.iter().copied(),
+            imms: inst.imms.iter().copied(),
+            ids: inst.ids.iter().copied(),
             out: &mut self.words,
         }
         .inst_operands(def)

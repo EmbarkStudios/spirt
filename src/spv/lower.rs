@@ -76,9 +76,9 @@ struct IntraFuncInst {
     result_id: Option<spv::Id>,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub imm_operands: SmallVec<[spv::Imm; 2]>,
+    pub imms: SmallVec<[spv::Imm; 2]>,
     // FIXME(eddyb) change the inline size of this to fit most instructions.
-    pub id_operands: SmallVec<[spv::Id; 4]>,
+    pub ids: SmallVec<[spv::Id; 4]>,
 }
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
@@ -209,7 +209,7 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
                 current_debug_line = if opcode == wk.OpLine {
-                    match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                    match (&inst.imms[..], &inst.ids[..]) {
                         (
                             &[spv::Imm::Short(l_kind, line), spv::Imm::Short(c_kind, col)],
                             &[file_path_id],
@@ -229,7 +229,7 @@ impl Module {
                         _ => unreachable!(),
                     }
                 } else {
-                    assert!(inst.imm_operands.is_empty() && inst.id_operands.is_empty());
+                    assert!(inst.imms.is_empty() && inst.ids.is_empty());
                     None
                 };
 
@@ -268,7 +268,7 @@ impl Module {
 
             // Take certain bitflags operands out of the instruction and rewrite
             // them into attributes instead.
-            inst.imm_operands.retain(|imm| match *imm {
+            inst.imms.retain(|imm| match *imm {
                 spv::Imm::Short(kind, word) if kind == wk.FunctionControl => {
                     if word != 0 {
                         attrs.attrs.insert(Attr::SpvBitflagsOperand(*imm));
@@ -299,7 +299,7 @@ impl Module {
 
             let next_seq = if opcode == wk.OpCapability {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let cap = match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                let cap = match (&inst.imms[..], &inst.ids[..]) {
                     (&[spv::Imm::Short(kind, cap)], &[]) => {
                         assert!(kind == wk.Capability);
                         cap
@@ -318,9 +318,9 @@ impl Module {
                 assert!(
                     inst.result_type_id.is_none()
                         && inst.result_id.is_none()
-                        && inst.id_operands.is_empty()
+                        && inst.ids.is_empty()
                 );
-                let ext = spv::extract_literal_string(&inst.imm_operands)
+                let ext = spv::extract_literal_string(&inst.imms)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 match &mut module.dialect {
@@ -331,9 +331,9 @@ impl Module {
 
                 Seq::Extension
             } else if opcode == wk.OpExtInstImport {
-                assert!(inst.result_type_id.is_none() && inst.id_operands.is_empty());
+                assert!(inst.result_type_id.is_none() && inst.ids.is_empty());
                 let id = inst.result_id.unwrap();
-                let name = spv::extract_literal_string(&inst.imm_operands)
+                let name = spv::extract_literal_string(&inst.imms)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 id_defs.insert(id, IdDef::SpvExtInstImport(cx.intern(name)));
@@ -341,14 +341,13 @@ impl Module {
                 Seq::ExtInstImport
             } else if opcode == wk.OpMemoryModel {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let (addressing_model, memory_model) =
-                    match (&inst.imm_operands[..], &inst.id_operands[..]) {
-                        (&[spv::Imm::Short(am_kind, am), spv::Imm::Short(mm_kind, mm)], &[]) => {
-                            assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
-                            (am, mm)
-                        }
-                        _ => unreachable!(),
-                    };
+                let (addressing_model, memory_model) = match (&inst.imms[..], &inst.ids[..]) {
+                    (&[spv::Imm::Short(am_kind, am), spv::Imm::Short(mm_kind, mm)], &[]) => {
+                        assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
+                        (am, mm)
+                    }
+                    _ => unreachable!(),
+                };
 
                 if has_memory_model {
                     return Err(invalid("duplicate OpMemoryModel"));
@@ -364,9 +363,9 @@ impl Module {
 
                 Seq::MemoryModel
             } else if opcode == wk.OpString {
-                assert!(inst.result_type_id.is_none() && inst.id_operands.is_empty());
+                assert!(inst.result_type_id.is_none() && inst.ids.is_empty());
                 let id = inst.result_id.unwrap();
-                let s = spv::extract_literal_string(&inst.imm_operands)
+                let s = spv::extract_literal_string(&inst.imms)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 id_defs.insert(id, IdDef::SpvDebugString(cx.intern(s)));
@@ -376,7 +375,7 @@ impl Module {
                 Seq::DebugStringAndSource
             } else if opcode == wk.OpSource {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let (lang, version) = match inst.imm_operands[..] {
+                let (lang, version) = match inst.imms[..] {
                     [
                         spv::Imm::Short(l_kind, lang),
                         spv::Imm::Short(v_kind, version),
@@ -395,7 +394,7 @@ impl Module {
                         .or_default(),
                 };
 
-                match (&inst.imm_operands[2..], &inst.id_operands[..]) {
+                match (&inst.imms[2..], &inst.ids[..]) {
                     (contents, &[file_path_id]) => {
                         let file_path = match id_defs.get(&file_path_id) {
                             Some(&IdDef::SpvDebugString(s)) => s,
@@ -423,12 +422,10 @@ impl Module {
                             assert!(
                                 cont_inst.result_type_id.is_none()
                                     && cont_inst.result_id.is_none()
-                                    && cont_inst.id_operands.is_empty()
+                                    && cont_inst.ids.is_empty()
                             );
-                            let cont_contents = spv::extract_literal_string(
-                                &cont_inst.imm_operands,
-                            )
-                            .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
+                            let cont_contents = spv::extract_literal_string(&cont_inst.imms)
+                                .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
                             contents += &cont_contents;
                         }
 
@@ -447,9 +444,9 @@ impl Module {
                 assert!(
                     inst.result_type_id.is_none()
                         && inst.result_id.is_none()
-                        && inst.id_operands.is_empty()
+                        && inst.ids.is_empty()
                 );
-                let ext = spv::extract_literal_string(&inst.imm_operands)
+                let ext = spv::extract_literal_string(&inst.imms)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 match &mut module.debug_info {
@@ -465,9 +462,9 @@ impl Module {
                 assert!(
                     inst.result_type_id.is_none()
                         && inst.result_id.is_none()
-                        && inst.id_operands.is_empty()
+                        && inst.ids.is_empty()
                 );
-                let proc = spv::extract_literal_string(&inst.imm_operands)
+                let proc = spv::extract_literal_string(&inst.imms)
                     .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
 
                 match &mut module.debug_info {
@@ -483,9 +480,9 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
                 pending_exports.push(Export::EntryPoint {
-                    func_id: inst.id_operands[0],
-                    imms: inst.imm_operands,
-                    interface_ids: inst.id_operands[1..].iter().copied().collect(),
+                    func_id: inst.ids[0],
+                    imms: inst.imms,
+                    interface_ids: inst.ids[1..].iter().copied().collect(),
                 });
 
                 Seq::EntryPoint
@@ -504,12 +501,12 @@ impl Module {
             {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
 
-                let target_id = inst.id_operands[0];
-                if inst.id_operands.len() > 1 {
+                let target_id = inst.ids[0];
+                if inst.ids.len() > 1 {
                     return Err(invalid("unsupported decoration with ID"));
                 }
 
-                match inst.imm_operands[..] {
+                match inst.imms[..] {
                     // Special-case `OpDecorate LinkageAttributes ... Import|Export`.
                     [
                         decoration @ spv::Imm::Short(..),
@@ -535,7 +532,7 @@ impl Module {
                         pending_attrs.entry(target_id).or_default().attrs.insert(
                             Attr::SpvAnnotation {
                                 opcode,
-                                imms: inst.imm_operands,
+                                imms: inst.imms,
                             },
                         );
                     }
@@ -550,7 +547,7 @@ impl Module {
                 }
             } else if opcode == wk.OpTypeForwardPointer {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                let (id, sc) = match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                let (id, sc) = match (&inst.imms[..], &inst.ids[..]) {
                     (&[sc], &[id]) => (id, sc),
                     _ => unreachable!(),
                 };
@@ -573,7 +570,7 @@ impl Module {
                 assert!(inst.result_type_id.is_none());
                 let id = inst.result_id.unwrap();
                 let type_ctor_args = inst
-                    .id_operands
+                    .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
                         Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
@@ -592,7 +589,7 @@ impl Module {
                     attrs: mem::take(&mut attrs),
                     ctor: TypeCtor::SpvInst {
                         opcode,
-                        imms: inst.imm_operands,
+                        imms: inst.imms,
                     },
                     ctor_args: type_ctor_args,
                 });
@@ -602,7 +599,7 @@ impl Module {
             } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
                 let id = inst.result_id.unwrap();
                 let const_ctor_args = inst
-                    .id_operands
+                    .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
                         Some(&IdDef::Const(ct)) => Ok(ct),
@@ -621,7 +618,7 @@ impl Module {
                     ty: result_type.unwrap(),
                     ctor: ConstCtor::SpvInst {
                         opcode,
-                        imms: inst.imm_operands,
+                        imms: inst.imms,
                     },
                     ctor_args: const_ctor_args,
                 });
@@ -638,18 +635,18 @@ impl Module {
                 let global_var_id = inst.result_id.unwrap();
                 let type_of_ptr_to_global_var = result_type.unwrap();
 
-                if inst.imm_operands[0] == storage_class_function_imm {
+                if inst.imms[0] == storage_class_function_imm {
                     return Err(invalid("`Function` storage class outside function"));
                 }
 
-                let storage_class = match inst.imm_operands[..] {
+                let storage_class = match inst.imms[..] {
                     [spv::Imm::Short(kind, storage_class)] => {
                         assert!(kind == wk.StorageClass);
                         storage_class
                     }
                     _ => unreachable!(),
                 };
-                let initializer = match inst.id_operands[..] {
+                let initializer = match inst.ids[..] {
                     [initializer] => Some(initializer),
                     [] => None,
                     _ => unreachable!(),
@@ -710,7 +707,7 @@ impl Module {
                 // type, *not* the function type, which is in `func_type`.
                 let func_ret_type = result_type.unwrap();
 
-                let func_type_id = match (&inst.imm_operands[..], &inst.id_operands[..]) {
+                let func_type_id = match (&inst.imms[..], &inst.ids[..]) {
                     // NOTE(eddyb) the `FunctionControl` operand is already gone,
                     // having been converted into an attribute above.
                     (&[], &[func_type_id]) => func_type_id,
@@ -792,7 +789,7 @@ impl Module {
                 Seq::Function
             } else if opcode == wk.OpFunctionEnd {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
-                assert!(inst.imm_operands.is_empty() && inst.id_operands.is_empty());
+                assert!(inst.imms.is_empty() && inst.ids.is_empty());
 
                 let func_body = current_func_body
                     .take()
@@ -813,8 +810,8 @@ impl Module {
 
                     opcode,
                     result_id: inst.result_id,
-                    imm_operands: inst.imm_operands,
-                    id_operands: inst.id_operands,
+                    imms: inst.imms,
+                    ids: inst.ids,
                 });
 
                 Seq::Function
@@ -930,9 +927,9 @@ impl Module {
                                 let input_idx = block_details.input_count;
                                 block_details.input_count = input_idx.checked_add(1).unwrap();
 
-                                assert!(raw_inst.imm_operands.is_empty());
+                                assert!(raw_inst.imms.is_empty());
                                 // FIXME(eddyb) use `array_chunks` when that's stable.
-                                for input_and_source_block_id in raw_inst.id_operands.chunks(2) {
+                                for input_and_source_block_id in raw_inst.ids.chunks(2) {
                                     let &[value_id, source_block_id]: &[_; 2] =
                                         input_and_source_block_id.try_into().unwrap();
 
@@ -1005,8 +1002,8 @@ impl Module {
                     result_type,
                     opcode,
                     result_id,
-                    ref imm_operands,
-                    ref id_operands,
+                    ref imms,
+                    ref ids,
                 } = *raw_inst;
 
                 let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
@@ -1049,7 +1046,7 @@ impl Module {
                         }
                     }
 
-                    assert!(imm_operands.is_empty() && id_operands.is_empty());
+                    assert!(imms.is_empty() && ids.is_empty());
                     params.push(FuncParam {
                         attrs,
                         ty: result_type.unwrap(),
@@ -1160,7 +1157,7 @@ impl Module {
                     // condition or an `OpSwitch`'s selector) and target blocks.
                     let mut inputs = SmallVec::new();
                     let mut targets = SmallVec::new();
-                    for &id in id_operands {
+                    for &id in ids {
                         match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
                             LocalIdDef::Value(v) => {
                                 if !targets.is_empty() {
@@ -1184,7 +1181,7 @@ impl Module {
                             attrs,
                             kind: ControlInstKind::SpvInst {
                                 opcode,
-                                imms: imm_operands.iter().copied().collect(),
+                                imms: imms.iter().copied().collect(),
                             },
                             inputs,
                             targets,
@@ -1218,10 +1215,10 @@ impl Module {
                     // operands, but it's not obvious how they should map to
                     // some "structured regions" replacement for the CFG.
                 } else {
-                    let mut id_operands = &id_operands[..];
+                    let mut ids = &ids[..];
                     let kind = if opcode == wk.OpFunctionCall {
-                        assert!(imm_operands.is_empty());
-                        let callee_id = id_operands[0];
+                        assert!(imms.is_empty());
+                        let callee_id = ids[0];
                         let maybe_callee = id_defs
                             .get(&callee_id)
                             .map(|id_def| match *id_def {
@@ -1238,7 +1235,7 @@ impl Module {
 
                         match maybe_callee {
                             Some(callee) => {
-                                id_operands = &id_operands[1..];
+                                ids = &ids[1..];
                                 DataInstKind::FuncCall(callee)
                             }
 
@@ -1246,14 +1243,14 @@ impl Module {
                             // up in Rust-GPU output (likely a zombie?).
                             None => DataInstKind::SpvInst {
                                 opcode,
-                                imms: imm_operands.iter().copied().collect(),
+                                imms: imms.iter().copied().collect(),
                             },
                         }
                     } else if opcode == wk.OpExtInst {
-                        let ext_set_id = id_operands[0];
-                        id_operands = &id_operands[1..];
+                        let ext_set_id = ids[0];
+                        ids = &ids[1..];
 
-                        let inst = match imm_operands[..] {
+                        let inst = match imms[..] {
                             [spv::Imm::Short(kind, inst)] => {
                                 assert!(kind == wk.LiteralExtInstInteger);
                                 inst
@@ -1278,7 +1275,7 @@ impl Module {
                     } else {
                         DataInstKind::SpvInst {
                             opcode,
-                            imms: imm_operands.iter().copied().collect(),
+                            imms: imms.iter().copied().collect(),
                         }
                     };
 
@@ -1294,7 +1291,7 @@ impl Module {
                                 })
                             })
                             .transpose()?,
-                        inputs: id_operands
+                        inputs: ids
                             .iter()
                             .map(|&id| {
                                 match lookup_global_or_local_id_for_data_or_control_inst_input(id)?

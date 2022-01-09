@@ -26,8 +26,8 @@ fn main() -> std::io::Result<()> {
                 eprint!("{}", inst.opcode.name());
                 spirt::spv::print::inst_operands(
                     inst.opcode,
-                    inst.imm_operands.iter().copied(),
-                    inst.id_operands.iter().map(|id| format!("%{}", id)),
+                    inst.imms.iter().copied(),
+                    inst.ids.iter().map(|id| format!("%{}", id)),
                 )
                 .for_each(|operand_parts| eprint!(" {}", operand_parts.concat()));
 
