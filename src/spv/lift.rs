@@ -582,9 +582,31 @@ impl LazyInst<'_> {
             Self::ControlInst {
                 parent_func_ids,
                 control_inst,
-            } => match &control_inst.kind {
-                ControlInstKind::SpvInst(inst) => spv::InstWithIds {
-                    without_ids: inst.clone(),
+            } => {
+                let inst = match &control_inst.kind {
+                    ControlInstKind::Unreachable => wk.OpUnreachable.into(),
+                    ControlInstKind::Return => {
+                        if control_inst.inputs.is_empty() {
+                            wk.OpReturn.into()
+                        } else {
+                            wk.OpReturnValue.into()
+                        }
+                    }
+                    ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(
+                        inst,
+                    )) => inst.clone(),
+
+                    ControlInstKind::Branch => wk.OpBranch.into(),
+
+                    ControlInstKind::SelectBranch(crate::cfg::SelectionKind::BoolCond) => {
+                        wk.OpBranchConditional.into()
+                    }
+                    ControlInstKind::SelectBranch(crate::cfg::SelectionKind::SpvInst(inst)) => {
+                        inst.clone()
+                    }
+                };
+                spv::InstWithIds {
+                    without_ids: inst,
                     result_type_id: None,
                     result_id: None,
                     ids: control_inst
@@ -598,8 +620,8 @@ impl LazyInst<'_> {
                                 .map(|&region| parent_func_ids.blocks[&region].label_id),
                         )
                         .collect(),
-                },
-            },
+                }
+            }
             Self::OpFunctionEnd => spv::InstWithIds {
                 without_ids: wk.OpFunctionEnd.into(),
                 result_type_id: None,

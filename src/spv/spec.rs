@@ -98,6 +98,13 @@ def_well_known! {
         OpSelectionMerge,
         OpLoopMerge,
 
+        OpUnreachable,
+        OpReturn,
+        OpReturnValue,
+        OpBranch,
+        OpBranchConditional,
+        OpSwitch,
+
         OpFunctionCall,
     ],
     operand_kind: OperandKind = [

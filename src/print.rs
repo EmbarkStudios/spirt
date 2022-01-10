@@ -1650,7 +1650,49 @@ impl Print for ControlInst {
             .collect();
 
         let def = match *kind {
-            ControlInstKind::SpvInst(spv::Inst { opcode, ref imms }) => {
+            ControlInstKind::Unreachable => {
+                assert!(targets.is_empty() && inputs.is_empty());
+                "unreachable".to_string()
+            }
+            ControlInstKind::Return => {
+                assert!(targets.is_empty());
+                match inputs[..] {
+                    [] => "return".to_string(),
+                    [v] => format!("return {}", v.print(printer)),
+                    _ => unreachable!(),
+                }
+            }
+            ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(
+                spv::Inst { opcode, ref imms },
+            )) => {
+                assert!(targets.is_empty());
+                printer.pretty_spv_inst(opcode, imms, inputs, Print::print, None)
+            }
+
+            ControlInstKind::Branch => {
+                assert_eq!((targets.len(), inputs.len()), (1, 0));
+                format!("branch {}", targets[0])
+            }
+
+            ControlInstKind::SelectBranch(crate::cfg::SelectionKind::BoolCond) => {
+                assert_eq!((targets.len(), inputs.len()), (2, 1));
+
+                // FIXME(eddyb) automate reindenting (and make it configurable).
+                for target in &mut targets {
+                    *target = target.replace("\n", "\n  ");
+                }
+
+                format!(
+                    "if {} {{\n  {}\n}} else {{\n  {}\n}}",
+                    inputs[0].print(printer),
+                    targets[0],
+                    targets[1]
+                )
+            }
+            ControlInstKind::SelectBranch(crate::cfg::SelectionKind::SpvInst(spv::Inst {
+                opcode,
+                ref imms,
+            })) => {
                 #[derive(Copy, Clone)]
                 struct TargetLabelId;
 

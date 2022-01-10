@@ -525,7 +525,13 @@ impl InnerInPlaceTransform for ControlInst {
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
-            ControlInstKind::SpvInst(_) => {}
+            ControlInstKind::Unreachable
+            | ControlInstKind::Return
+            | ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(_))
+            | ControlInstKind::Branch
+            | ControlInstKind::SelectBranch(
+                crate::cfg::SelectionKind::BoolCond | crate::cfg::SelectionKind::SpvInst(_),
+            ) => {}
         }
         for v in inputs {
             v.inner_transform_with(transformer).apply_to(v);

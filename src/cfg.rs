@@ -23,7 +23,37 @@ pub struct ControlInst {
     pub target_inputs: IndexMap<Region, SmallVec<[Value; 2]>>,
 }
 
-#[derive(PartialEq, Eq)]
 pub enum ControlInstKind {
+    /// Reaching this point in the control-flow is undefined behavior, e.g.:
+    /// * a `SelectBranch` case that's known to be impossible
+    /// * after a function call, where the function never returns
+    ///
+    /// Optimizations can take advantage of this information, to assume that any
+    /// necessary preconditions for reaching this point, are never met.
+    Unreachable,
+
+    /// Leave the current function, optionally returning a value.
+    Return,
+
+    /// Leave the current invocation, similar to returning from every function
+    /// call in the stack (up to and including the entry-point), but potentially
+    /// indicating a fatal error as well.
+    ExitInvocation(ExitInvocationKind),
+
+    /// Unconditional branch to a single target.
+    Branch,
+
+    /// Branch to one of several targets, chosen by a single value input.
+    SelectBranch(SelectionKind),
+}
+
+pub enum ExitInvocationKind {
+    SpvInst(spv::Inst),
+}
+
+pub enum SelectionKind {
+    /// Conditional branch on boolean condition, i.e. `if`-`else`.
+    BoolCond,
+
     SpvInst(spv::Inst),
 }

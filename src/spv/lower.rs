@@ -1168,11 +1168,35 @@ impl Module {
                         }
                     }
 
+                    let kind = if opcode == wk.OpUnreachable {
+                        assert!(targets.is_empty() && inputs.is_empty());
+                        ControlInstKind::Unreachable
+                    } else if [wk.OpReturn, wk.OpReturnValue].contains(&opcode) {
+                        assert!(targets.is_empty() && inputs.len() <= 1);
+                        ControlInstKind::Return
+                    } else if targets.is_empty() {
+                        ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(
+                            raw_inst.without_ids.clone(),
+                        ))
+                    } else if opcode == wk.OpBranch {
+                        assert_eq!((targets.len(), inputs.len()), (1, 0));
+                        ControlInstKind::Branch
+                    } else if opcode == wk.OpBranchConditional {
+                        assert_eq!((targets.len(), inputs.len()), (2, 1));
+                        ControlInstKind::SelectBranch(crate::cfg::SelectionKind::BoolCond)
+                    } else if opcode == wk.OpSwitch {
+                        ControlInstKind::SelectBranch(crate::cfg::SelectionKind::SpvInst(
+                            raw_inst.without_ids.clone(),
+                        ))
+                    } else {
+                        return Err(invalid("unsupported control-flow instruction"));
+                    };
+
                     func_def_body.cfg.insert(
                         current_block_region,
                         ControlInst {
                             attrs,
-                            kind: ControlInstKind::SpvInst(raw_inst.without_ids.clone()),
+                            kind,
                             inputs,
                             targets,
                             target_inputs,
