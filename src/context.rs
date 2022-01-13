@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use std::num::NonZeroU32;
 
 /// Context object with global resources for SPIR-T.
 ///
@@ -18,6 +19,9 @@ pub struct Context {
 /// Private module containing traits (and related types) used in public APIs,
 /// but which should not be usable outside of the `context` module.
 mod sealed {
+    use std::cell::Cell;
+    use std::num::NonZeroU32;
+
     pub trait Interned: Sized + 'static {
         type Def: ?Sized + Eq + std::hash::Hash;
 
@@ -59,31 +63,48 @@ mod sealed {
     pub trait Entity: Sized + Copy + Eq + std::hash::Hash + 'static {
         type Def;
 
-        fn from_u32(i: u32) -> Self;
-        fn to_u32(self) -> u32;
+        const CHUNK_SIZE: u32;
+        const CHUNK_MASK: u32 = {
+            assert!(Self::CHUNK_SIZE.is_power_of_two());
+            assert!(Self::CHUNK_SIZE as usize as u32 == Self::CHUNK_SIZE);
+            Self::CHUNK_SIZE - 1
+        };
+
+        fn from_non_zero_u32(i: NonZeroU32) -> Self;
+        fn to_non_zero_u32(self) -> NonZeroU32;
         fn cx_entity_alloc(cx: &super::Context) -> &EntityAlloc<Self>;
     }
 
-    pub struct EntityAlloc<E: Entity>(std::cell::Cell<E>);
+    pub struct EntityAlloc<E: Entity>(Cell<E>);
 
     impl<E: Entity> Default for EntityAlloc<E> {
         fn default() -> Self {
-            Self(std::cell::Cell::new(E::from_u32(0)))
+            // NOTE(eddyb) always skip chunk `0`, as a sort of "null page",
+            // to allow using `NonZeroU32` instead of merely `u32`.
+            Self(Cell::new(E::from_non_zero_u32(
+                NonZeroU32::new(E::CHUNK_SIZE).unwrap(),
+            )))
         }
     }
 
     impl<E: Entity> EntityAlloc<E> {
         #[track_caller]
-        pub(super) fn alloc(&self) -> E {
-            let entity = self.0.get();
-            let next_entity = E::from_u32(
-                entity
-                    .to_u32()
-                    .checked_add(1)
-                    .expect("entity index overflowed u32"),
+        pub(super) fn alloc_chunk(&self) -> E {
+            let chunk_start = self.0.get();
+            let next_chunk_start = E::from_non_zero_u32(
+                // FIXME(eddyb) use `NonZeroU32::checked_add`
+                // when that gets stabilized.
+                NonZeroU32::new(
+                    chunk_start
+                        .to_non_zero_u32()
+                        .get()
+                        .checked_add(E::CHUNK_SIZE)
+                        .expect("entity index overflowed u32"),
+                )
+                .unwrap(),
             );
-            self.0.set(next_entity);
-            entity
+            self.0.set(next_chunk_start);
+            chunk_start
         }
     }
 }
@@ -118,17 +139,38 @@ impl<I: sealed::Interned> std::ops::Index<I> for Context {
 ///
 /// By design there is no way to iterate the contents of an `EntityDefs`, or
 /// generate entity indices without defining the entity in an `EntityDefs`.
+//
+// FIXME(eddyb) add an "entity-keyed map" that has similar restrictions, and
+// some optimizations; will likely need both "dense" and "sparse" versions,
+// where the sparse one is probably just a `FxHashMap` wrapper?
 pub struct EntityDefs<E: sealed::Entity> {
-    // FIXME(eddyb) use more efficient storage by optimizing for compact ranges,
-    // allowing the use of `Vec` (plus the base index) for the fast path, and
-    // keeping the map as a fallback.
-    map: FxHashMap<E, E::Def>,
+    /// Entities are grouped into chunks, with per-entity-type chunk sizes
+    /// (powers of 2) specified via `entities!` below.
+    /// This allows different `EntityDefs`s to independently define more
+    /// entities, without losing compactness (until a whole chunk is filled).
+    //
+    // FIXME(eddyb) consider using `u32` instead of `usize` for the "flattened base".
+    complete_chunk_start_to_flattened_base: FxHashMap<E, usize>,
+
+    /// Similar to a single entry in `complete_chunk_start_to_flattened_base`,
+    /// but kept outside of the map for efficiency. Also, this is the only
+    /// chunk that doesn't have its full size already (and therefore allows
+    /// defining more entities into it, without allocating new chunks).
+    incomplete_chunk_start_and_flattened_base: Option<(E, usize)>,
+
+    /// All chunks' definitions are flattened into one contiguous `Vec`, where
+    /// the start of each chunk's definitions in `flattened` is indicated by
+    /// either `complete_chunk_start_to_flattened_base` (for completed chunks)
+    /// or `incomplete_chunk_start_and_flattened_base`.
+    flattened: Vec<E::Def>,
 }
 
 impl<E: sealed::Entity> Default for EntityDefs<E> {
     fn default() -> Self {
         Self {
-            map: FxHashMap::default(),
+            complete_chunk_start_to_flattened_base: FxHashMap::default(),
+            incomplete_chunk_start_and_flattened_base: None,
+            flattened: vec![],
         }
     }
 }
@@ -140,9 +182,51 @@ impl<E: sealed::Entity> EntityDefs<E> {
 
     #[track_caller]
     pub fn define(&mut self, cx: &Context, def: E::Def) -> E {
-        let entity = E::cx_entity_alloc(cx).alloc();
-        assert!(self.map.insert(entity, def).is_none());
+        let entity = match self.incomplete_chunk_start_and_flattened_base {
+            Some((chunk_start, flattened_base)) => {
+                let chunk_len = self.flattened.len() - flattened_base;
+                if chunk_len == (E::CHUNK_SIZE - 1) as usize {
+                    self.complete_chunk_start_to_flattened_base
+                        .extend(self.incomplete_chunk_start_and_flattened_base.take());
+                    panic!();
+                }
+                E::from_non_zero_u32(
+                    NonZeroU32::new(chunk_start.to_non_zero_u32().get() + chunk_len as u32)
+                        .unwrap(),
+                )
+            }
+            None => {
+                let chunk_start = E::cx_entity_alloc(cx).alloc_chunk();
+
+                self.incomplete_chunk_start_and_flattened_base =
+                    Some((chunk_start, self.flattened.len()));
+
+                chunk_start
+            }
+        };
+        self.flattened.push(def);
         entity
+    }
+
+    fn entity_to_flattened(&self, entity: E) -> Option<usize> {
+        let (chunk_start, intra_chunk_idx) = {
+            let e_u32 = entity.to_non_zero_u32().get();
+            (
+                E::from_non_zero_u32(NonZeroU32::new(e_u32 & !E::CHUNK_MASK).unwrap()),
+                e_u32 & E::CHUNK_MASK,
+            )
+        };
+        let flattened_base = match self.incomplete_chunk_start_and_flattened_base {
+            Some((incomplete_chunk_start, incomplete_flattened_base))
+                if chunk_start == incomplete_chunk_start =>
+            {
+                incomplete_flattened_base
+            }
+            _ => *self
+                .complete_chunk_start_to_flattened_base
+                .get(&chunk_start)?,
+        };
+        Some(flattened_base + intra_chunk_idx as usize)
     }
 }
 
@@ -150,13 +234,17 @@ impl<E: sealed::Entity> std::ops::Index<E> for EntityDefs<E> {
     type Output = E::Def;
 
     fn index(&self, entity: E) -> &Self::Output {
-        &self.map[&entity]
+        self.entity_to_flattened(entity)
+            .and_then(|i| self.flattened.get(i))
+            .unwrap()
     }
 }
 
 impl<E: sealed::Entity> std::ops::IndexMut<E> for EntityDefs<E> {
     fn index_mut(&mut self, entity: E) -> &mut Self::Output {
-        self.map.get_mut(&entity).unwrap()
+        self.entity_to_flattened(entity)
+            .and_then(|i| self.flattened.get_mut(i))
+            .unwrap()
     }
 }
 
@@ -258,7 +346,7 @@ impl InternInCx<InternedStr> for String {
 
 macro_rules! entities {
     (
-        $($name:ident => $def:ty),+ $(,)?
+        $($name:ident => chunk_size($chunk_size:literal) $def:ty),+ $(,)?
     ) => {
         #[allow(non_snake_case)]
         #[derive(Default)]
@@ -270,21 +358,19 @@ macro_rules! entities {
             // NOTE(eddyb) never derive `PartialOrd, Ord` for these types, as
             // observing the entity index allocation order shouldn't be allowed.
             #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-            pub struct $name(
-                // FIXME(eddyb) figure out how to sneak niches into these types, to
-                // allow e.g. `Option` around them to not increase the size.
-                u32,
-            );
+            pub struct $name(NonZeroU32);
 
             impl sealed::Entity for $name {
                 type Def = $def;
 
+                const CHUNK_SIZE: u32 = $chunk_size;
+
                 #[inline(always)]
-                fn from_u32(i: u32) -> Self {
+                fn from_non_zero_u32(i: NonZeroU32) -> Self {
                     Self(i)
                 }
                 #[inline(always)]
-                fn to_u32(self) -> u32 {
+                fn to_non_zero_u32(self) -> NonZeroU32 {
                     self.0
                 }
                 #[inline(always)]
@@ -297,8 +383,8 @@ macro_rules! entities {
 }
 
 entities! {
-    GlobalVar => crate::GlobalVarDecl,
-    Func => crate::FuncDecl,
-    Region => crate::RegionDef,
-    DataInst => crate::DataInstDef,
+    GlobalVar => chunk_size(0x1_0000) crate::GlobalVarDecl,
+    Func => chunk_size(0x1_0000) crate::FuncDecl,
+    Region => chunk_size(0x1000) crate::RegionDef,
+    DataInst => chunk_size(0x1000) crate::DataInstDef,
 }
