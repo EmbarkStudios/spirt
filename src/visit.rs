@@ -16,7 +16,7 @@ pub trait Visitor<'a>: Sized {
     fn visit_type_use(&mut self, ty: Type);
     fn visit_const_use(&mut self, ct: Const);
 
-    // Module-stored (but context-allocated indices) leaves (no default provided).
+    // Module-stored entity leaves (no default provided).
     fn visit_global_var_use(&mut self, gv: GlobalVar);
     fn visit_func_use(&mut self, func: Func);
 

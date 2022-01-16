@@ -34,8 +34,8 @@ mod sealed {
         pub dialect: ModuleDialect,
         pub debug_info: ModuleDebugInfo,
 
-        pub global_vars: context::UniqIdxMap<GlobalVar, GlobalVarDecl>,
-        pub funcs: context::UniqIdxMap<Func, FuncDecl>,
+        pub global_vars: context::EntityDefs<GlobalVar, GlobalVarDecl>,
+        pub funcs: context::EntityDefs<Func, FuncDecl>,
 
         pub exports: IndexMap<ExportKey, Exportee>,
     }
@@ -245,8 +245,8 @@ pub struct FuncParam {
 pub struct FuncDefBody {
     // FIXME(eddyb) this might not be the most efficient storage,
     // but it prevents misuse.
-    pub data_insts: context::UniqIdxMap<DataInst, DataInstDef>,
-    pub regions: context::UniqIdxMap<Region, RegionDef>,
+    pub data_insts: context::EntityDefs<DataInst, DataInstDef>,
+    pub regions: context::EntityDefs<Region, RegionDef>,
 
     /// The control-flow graph of the function, represented as per-region
     /// control-flow instructions that execute "after" the region itself.

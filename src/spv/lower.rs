@@ -671,7 +671,7 @@ impl Module {
                     None => DeclDef::Present(GlobalVarDefBody { initializer }),
                 };
 
-                let global_var = module.global_vars.insert(
+                let global_var = module.global_vars.define(
                     &cx,
                     GlobalVarDecl {
                         attrs: mem::take(&mut attrs),
@@ -756,7 +756,7 @@ impl Module {
                     }),
                 };
 
-                let func = module.funcs.insert(
+                let func = module.funcs.define(
                     &cx,
                     FuncDecl {
                         attrs: mem::take(&mut attrs),
@@ -894,10 +894,9 @@ impl Module {
                             };
 
                             if opcode == wk.OpLabel {
-                                // HACK(eddyb) can't generate the `Region` unique
-                                // index without inserting the (empty) `RegionDef`
-                                // first.
-                                let block = func_def_body.regions.insert(
+                                // HACK(eddyb) can't get a `Region` without
+                                // defining it as an (empty) `RegionDef` first.
+                                let block = func_def_body.regions.define(
                                     &cx,
                                     RegionDef {
                                         inputs: SmallVec::new(),
@@ -944,9 +943,9 @@ impl Module {
                                     input_idx,
                                 })
                             } else {
-                                // HACK(eddyb) can't generate the `DataInst` unique
-                                // index without inserting (a dummy) first.
-                                let inst = func_def_body.data_insts.insert(
+                                // HACK(eddyb) can't get a `DataInst` without
+                                // defining it (as a dummy) first.
+                                let inst = func_def_body.data_insts.define(
                                     &cx,
                                     DataInstDef {
                                         attrs: AttrSet::default(),
@@ -1056,7 +1055,7 @@ impl Module {
                         return Err(invalid("block lacks terminator instruction"));
                     }
 
-                    // An empty `RegionKind::Block` region was inserted earlier,
+                    // An empty `RegionKind::Block` region was defined earlier,
                     // to be able to have an entry in `local_id_defs`.
                     let region = match local_id_defs[&result_id.unwrap()] {
                         LocalIdDef::BlockLabel(region) => region,
@@ -1318,7 +1317,7 @@ impl Module {
                     let inst = match result_id {
                         Some(id) => match local_id_defs[&id] {
                             LocalIdDef::Value(Value::DataInstOutput(inst)) => {
-                                // A dummy was inserted earlier, to be able to
+                                // A dummy was defined earlier, to be able to
                                 // have an entry in `local_id_defs`.
                                 func_def_body.data_insts[inst] = data_inst_def;
 
@@ -1326,7 +1325,7 @@ impl Module {
                             }
                             _ => unreachable!(),
                         },
-                        None => func_def_body.data_insts.insert(&cx, data_inst_def),
+                        None => func_def_body.data_insts.define(&cx, data_inst_def),
                     };
                     current_block_insts.push(inst);
                 }

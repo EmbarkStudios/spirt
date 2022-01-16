@@ -8,10 +8,14 @@ use std::hash::Hash;
 ///
 /// Those resources currently are:
 /// * interners, for anything without an identity, and which can be deduplicated
-/// * unique index allocators, for everything else (i.e. with an identity)
+/// * "entity" allocators, for everything else - i.e. anything with an identity
+///   that needs to remain unique across an entire `Context`
+///   * the *definition* of an entity isn't kept in the `Context`, but rather in
+///     some `EntityDefs` collection somewhere in a `Module` (or further nested),
+///     with only the entity *indices* being allocated by the `Context`
 pub struct Context {
     interners: Interners,
-    uniq_idx_allocs: UniqIdxAllocs,
+    entity_allocs: EntityAllocs,
 }
 
 /// Dispatch helper, to allow implementing interning logic on
@@ -26,7 +30,7 @@ impl Context {
     pub fn new() -> Self {
         Context {
             interners: Interners::default(),
-            uniq_idx_allocs: UniqIdxAllocs::default(),
+            entity_allocs: EntityAllocs::default(),
         }
     }
 
@@ -35,19 +39,21 @@ impl Context {
     }
 }
 
-/// Map keyed by unique indices allocated from a `Context`.
+/// Collection holding the actual definitions for `Context`-allocated entities.
 ///
-/// Only a small number of index and value type combinations are supported, and
-/// by design there is no way to iterate the map, or generate unique indices
-/// without inserting into the map.
-pub struct UniqIdxMap<I, V> {
+/// The only `E` (entity) and `D` (entity definition) type combinations allowed
+/// are the ones declared by the `entities!` macro below.
+///
+/// By design there is no way to iterate the contents of an `EntityDefs`, or
+/// generate entity indices without defining the entity in an `EntityDefs`.
+pub struct EntityDefs<E, D> {
     // FIXME(eddyb) use more efficient storage by optimizing for compact ranges,
     // allowing the use of `Vec` (plus the base index) for the fast path, and
     // keeping the map as a fallback.
-    map: FxHashMap<I, V>,
+    map: FxHashMap<E, D>,
 }
 
-impl<I, V> Default for UniqIdxMap<I, V> {
+impl<E, D> Default for EntityDefs<E, D> {
     fn default() -> Self {
         Self {
             map: FxHashMap::default(),
@@ -55,12 +61,12 @@ impl<I, V> Default for UniqIdxMap<I, V> {
     }
 }
 
-impl<I, V> UniqIdxMap<I, V> {
+impl<E, D> EntityDefs<E, D> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    // NOTE(eddyb) `insert`/`index` is defined by the `uniq_indices!` macro below.
+    // NOTE(eddyb) `define`/`index` is defined by the `entities!` macro below.
 }
 
 struct Interner<T: ?Sized>(FrozenIndexSet<Box<T>>);
@@ -203,16 +209,16 @@ impl InternInCx for crate::ConstDef {
     }
 }
 
-macro_rules! uniq_indices {
+macro_rules! entities {
     (
-        $($name:ident => $ty:ty),+ $(,)?
+        $($name:ident => $def:ty),+ $(,)?
     ) => {
         #[allow(non_snake_case)]
-        struct UniqIdxAllocs {
+        struct EntityAllocs {
             $($name: Cell<u32>),*
         }
 
-        impl Default for UniqIdxAllocs {
+        impl Default for EntityAllocs {
             fn default() -> Self {
                 Self {
                     $($name: Default::default()),*
@@ -222,7 +228,7 @@ macro_rules! uniq_indices {
 
         $(
             // NOTE(eddyb) never derive `PartialOrd, Ord` for these types, as
-            // observing the unique index allocation order shouldn't be allowed.
+            // observing the entity index allocation order shouldn't be allowed.
             #[derive(Copy, Clone, PartialEq, Eq, Hash)]
             pub struct $name(
                 // FIXME(eddyb) figure out how to sneak niches into these types, to
@@ -230,27 +236,27 @@ macro_rules! uniq_indices {
                 u32,
             );
 
-            impl UniqIdxMap<$name, $ty> {
-                pub fn insert(&mut self, cx: &Context, value: $ty) -> $name {
-                    let idx = $name(cx.uniq_idx_allocs.$name.get());
-                    let next_idx = idx.0.checked_add(1).expect("unique index overflowed u32");
-                    cx.uniq_idx_allocs.$name.set(next_idx);
+            impl EntityDefs<$name, $def> {
+                pub fn define(&mut self, cx: &Context, def: $def) -> $name {
+                    let idx = $name(cx.entity_allocs.$name.get());
+                    let next_idx = idx.0.checked_add(1).expect("entity index overflowed u32");
+                    cx.entity_allocs.$name.set(next_idx);
 
-                    assert!(self.map.insert(idx, value).is_none());
+                    assert!(self.map.insert(idx, def).is_none());
 
                     idx
                 }
             }
 
-            impl std::ops::Index<$name> for UniqIdxMap<$name, $ty> {
-                type Output = $ty;
+            impl std::ops::Index<$name> for EntityDefs<$name, $def> {
+                type Output = $def;
 
                 fn index(&self, idx: $name) -> &Self::Output {
                     &self.map[&idx]
                 }
             }
 
-            impl std::ops::IndexMut<$name> for UniqIdxMap<$name, $ty> {
+            impl std::ops::IndexMut<$name> for EntityDefs<$name, $def> {
                 fn index_mut(&mut self, idx: $name) -> &mut Self::Output {
                     self.map.get_mut(&idx).unwrap()
                 }
@@ -259,7 +265,7 @@ macro_rules! uniq_indices {
     };
 }
 
-uniq_indices! {
+entities! {
     GlobalVar => crate::GlobalVarDecl,
     Func => crate::FuncDecl,
     Region => crate::RegionDef,

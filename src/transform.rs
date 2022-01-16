@@ -135,7 +135,7 @@ pub trait Transformer: Sized {
         Transformed::Unchanged
     }
 
-    // Module-stored (but context-allocated indices) leaves (noop default behavior).
+    // Module-stored entity leaves (noop default behavior).
     fn transform_global_var_use(&mut self, _gv: GlobalVar) -> Transformed<GlobalVar> {
         Transformed::Unchanged
     }
