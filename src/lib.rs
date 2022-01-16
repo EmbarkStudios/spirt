@@ -3,7 +3,9 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 mod context;
-pub use context::{AttrSet, Const, Context, DataInst, Func, GlobalVar, InternedStr, Region, Type};
+pub use context::{
+    AttrSet, Const, Context, DataInst, EntityDefs, Func, GlobalVar, InternedStr, Region, Type,
+};
 
 pub mod cfg;
 pub mod print;
@@ -34,8 +36,8 @@ mod sealed {
         pub dialect: ModuleDialect,
         pub debug_info: ModuleDebugInfo,
 
-        pub global_vars: context::EntityDefs<GlobalVar, GlobalVarDecl>,
-        pub funcs: context::EntityDefs<Func, FuncDecl>,
+        pub global_vars: EntityDefs<GlobalVar>,
+        pub funcs: EntityDefs<Func>,
 
         pub exports: IndexMap<ExportKey, Exportee>,
     }
@@ -243,10 +245,8 @@ pub struct FuncParam {
 }
 
 pub struct FuncDefBody {
-    // FIXME(eddyb) this might not be the most efficient storage,
-    // but it prevents misuse.
-    pub data_insts: context::EntityDefs<DataInst, DataInstDef>,
-    pub regions: context::EntityDefs<Region, RegionDef>,
+    pub data_insts: EntityDefs<DataInst>,
+    pub regions: EntityDefs<Region>,
 
     /// The control-flow graph of the function, represented as per-region
     /// control-flow instructions that execute "after" the region itself.

@@ -1,8 +1,4 @@
-use elsa::FrozenIndexSet;
 use rustc_hash::FxHashMap;
-use std::cell::Cell;
-use std::convert::TryInto;
-use std::hash::Hash;
 
 /// Context object with global resources for SPIR-T.
 ///
@@ -13,47 +9,123 @@ use std::hash::Hash;
 ///   * the *definition* of an entity isn't kept in the `Context`, but rather in
 ///     some `EntityDefs` collection somewhere in a `Module` (or further nested),
 ///     with only the entity *indices* being allocated by the `Context`
+#[derive(Default)]
 pub struct Context {
     interners: Interners,
     entity_allocs: EntityAllocs,
 }
 
+/// Private module containing traits (and related types) used in public APIs,
+/// but which should not be usable outside of the `context` module.
+mod sealed {
+    pub trait Interned: Sized + 'static {
+        type Def: ?Sized + Eq + std::hash::Hash;
+
+        fn preintern(_interner: &Interner<Self>) {}
+        fn from_u32(i: u32) -> Self;
+        fn to_u32(self) -> u32;
+        fn cx_interner(cx: &super::Context) -> &Interner<Self>;
+    }
+
+    pub struct Interner<I: Interned>(elsa::FrozenIndexSet<Box<I::Def>>);
+
+    impl<I: Interned> Default for Interner<I> {
+        fn default() -> Self {
+            let interner = Self(Default::default());
+            I::preintern(&interner);
+            interner
+        }
+    }
+
+    impl<I: Interned> Interner<I> {
+        #[track_caller]
+        pub(super) fn intern(&self, value: impl AsRef<I::Def> + Into<Box<I::Def>>) -> I {
+            if let Some((i, _)) = self.0.get_full(value.as_ref()) {
+                return I::from_u32(i as u32);
+            }
+            let (i, _) = self.0.insert_full(value.into());
+            I::from_u32(i.try_into().expect("interner overflowed u32"))
+        }
+    }
+
+    impl<I: Interned> std::ops::Index<I> for Interner<I> {
+        type Output = I::Def;
+
+        fn index(&self, interned: I) -> &Self::Output {
+            &self.0[interned.to_u32() as usize]
+        }
+    }
+
+    pub trait Entity: Sized + Copy + Eq + std::hash::Hash + 'static {
+        type Def;
+
+        fn from_u32(i: u32) -> Self;
+        fn to_u32(self) -> u32;
+        fn cx_entity_alloc(cx: &super::Context) -> &EntityAlloc<Self>;
+    }
+
+    pub struct EntityAlloc<E: Entity>(std::cell::Cell<E>);
+
+    impl<E: Entity> Default for EntityAlloc<E> {
+        fn default() -> Self {
+            Self(std::cell::Cell::new(E::from_u32(0)))
+        }
+    }
+
+    impl<E: Entity> EntityAlloc<E> {
+        #[track_caller]
+        pub(super) fn alloc(&self) -> E {
+            let entity = self.0.get();
+            let next_entity = E::from_u32(
+                entity
+                    .to_u32()
+                    .checked_add(1)
+                    .expect("entity index overflowed u32"),
+            );
+            self.0.set(next_entity);
+            entity
+        }
+    }
+}
+
 /// Dispatch helper, to allow implementing interning logic on
 /// the type passed to `cx.intern(...)`.
-pub trait InternInCx {
-    type Interned;
-
-    fn intern_in_cx(self, cx: &Context) -> Self::Interned;
+pub trait InternInCx<I> {
+    #[track_caller]
+    fn intern_in_cx(self, cx: &Context) -> I;
 }
 
 impl Context {
     pub fn new() -> Self {
-        Context {
-            interners: Interners::default(),
-            entity_allocs: EntityAllocs::default(),
-        }
+        Self::default()
     }
 
-    pub fn intern<T: InternInCx>(&self, x: T) -> T::Interned {
+    #[track_caller]
+    pub fn intern<T: InternInCx<I>, I>(&self, x: T) -> I {
         x.intern_in_cx(self)
+    }
+}
+
+impl<I: sealed::Interned> std::ops::Index<I> for Context {
+    type Output = I::Def;
+
+    fn index(&self, interned: I) -> &Self::Output {
+        &I::cx_interner(self)[interned]
     }
 }
 
 /// Collection holding the actual definitions for `Context`-allocated entities.
 ///
-/// The only `E` (entity) and `D` (entity definition) type combinations allowed
-/// are the ones declared by the `entities!` macro below.
-///
 /// By design there is no way to iterate the contents of an `EntityDefs`, or
 /// generate entity indices without defining the entity in an `EntityDefs`.
-pub struct EntityDefs<E, D> {
+pub struct EntityDefs<E: sealed::Entity> {
     // FIXME(eddyb) use more efficient storage by optimizing for compact ranges,
     // allowing the use of `Vec` (plus the base index) for the fast path, and
     // keeping the map as a fallback.
-    map: FxHashMap<E, D>,
+    map: FxHashMap<E, E::Def>,
 }
 
-impl<E, D> Default for EntityDefs<E, D> {
+impl<E: sealed::Entity> Default for EntityDefs<E> {
     fn default() -> Self {
         Self {
             map: FxHashMap::default(),
@@ -61,38 +133,37 @@ impl<E, D> Default for EntityDefs<E, D> {
     }
 }
 
-impl<E, D> EntityDefs<E, D> {
+impl<E: sealed::Entity> EntityDefs<E> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    // NOTE(eddyb) `define`/`index` is defined by the `entities!` macro below.
-}
-
-struct Interner<T: ?Sized>(FrozenIndexSet<Box<T>>);
-
-impl<T: ?Sized + Eq + Hash> Default for Interner<T> {
-    fn default() -> Self {
-        Self(FrozenIndexSet::new())
+    #[track_caller]
+    pub fn define(&mut self, cx: &Context, def: E::Def) -> E {
+        let entity = E::cx_entity_alloc(cx).alloc();
+        assert!(self.map.insert(entity, def).is_none());
+        entity
     }
 }
 
-impl<T: ?Sized + Eq + Hash> Interner<T> {
-    #[track_caller]
-    fn intern(&self, value: impl AsRef<T> + Into<Box<T>>) -> u32 {
-        if let Some((i, _)) = self.0.get_full(value.as_ref()) {
-            return i as u32;
-        }
-        let (i, _) = self.0.insert_full(value.into());
-        i.try_into().expect("interner overflowed u32")
+impl<E: sealed::Entity> std::ops::Index<E> for EntityDefs<E> {
+    type Output = E::Def;
+
+    fn index(&self, entity: E) -> &Self::Output {
+        &self.map[&entity]
+    }
+}
+
+impl<E: sealed::Entity> std::ops::IndexMut<E> for EntityDefs<E> {
+    fn index_mut(&mut self, entity: E) -> &mut Self::Output {
+        self.map.get_mut(&entity).unwrap()
     }
 }
 
 macro_rules! interners {
     (
         needs_as_ref { $($needs_as_ref_ty:ty),* $(,)? }
-        needs_default { $($needs_default_name:ident => $needs_default_ty:ty),* $(,)? }
-        $($name:ident => $ty:ty),+ $(,)?
+        $($name:ident $(default($default:expr))? => $ty:ty),+ $(,)?
     ) => {
         $(impl AsRef<Self> for $needs_as_ref_ty {
             fn as_ref(&self) -> &Self {
@@ -100,31 +171,10 @@ macro_rules! interners {
             }
         })*
 
-        $(impl Default for $needs_default_name {
-            fn default() -> Self {
-                Self(0)
-            }
-        })*
-
         #[allow(non_snake_case)]
+        #[derive(Default)]
         struct Interners {
-            $($name: Interner<$ty>),*
-        }
-
-        impl Default for Interners {
-            fn default() -> Self {
-                let interners = Self {
-                    $($name: Default::default()),*
-                };
-
-                // Pre-intern every `$needs_default_{name,ty}`.
-                $(assert_eq!(
-                    interners.$needs_default_name.intern(<$needs_default_ty>::default()),
-                    0
-                );)*
-
-                interners
-            }
+            $($name: sealed::Interner<$name>),*
         }
 
         $(
@@ -137,11 +187,33 @@ macro_rules! interners {
                 u32,
             );
 
-            impl std::ops::Index<$name> for Context {
-                type Output = $ty;
+            $(impl Default for $name {
+                fn default() -> Self {
+                    // HACK(eddyb) have to mention `$default` in this `$(...)?`
+                    // to gate its presence on `$default`'s presence.
+                    if false { let _ = $default; }
 
-                fn index(&self, interned: $name) -> &Self::Output {
-                    &self.interners.$name.0[interned.0 as usize]
+                    Self(0)
+                }
+            })?
+
+            impl sealed::Interned for $name {
+                type Def = $ty;
+
+                $(fn preintern(interner: &sealed::Interner<Self>) {
+                    interner.intern($default);
+                })?
+                #[inline(always)]
+                fn from_u32(i: u32) -> Self {
+                    Self(i)
+                }
+                #[inline(always)]
+                fn to_u32(self) -> u32 {
+                    self.0
+                }
+                #[inline(always)]
+                fn cx_interner(cx: &Context) -> &sealed::Interner<Self> {
+                    &cx.interners.$name
                 }
             }
         )*
@@ -154,58 +226,33 @@ interners! {
         crate::TypeDef,
         crate::ConstDef,
     }
-    needs_default {
-        AttrSet => crate::AttrSetDef,
-    }
 
     // FIXME(eddyb) consider a more uniform naming scheme than the combination
     // of `InternedFoo => Foo` and `Foo => FooDef`.
     InternedStr => str,
-    AttrSet => crate::AttrSetDef,
+    AttrSet default(crate::AttrSetDef::default()) => crate::AttrSetDef,
     Type => crate::TypeDef,
     Const => crate::ConstDef,
 }
 
-impl InternInCx for &'_ str {
-    type Interned = InternedStr;
+impl<I: sealed::Interned> InternInCx<I> for I::Def
+where
+    I::Def: Sized + AsRef<I::Def>,
+{
+    fn intern_in_cx(self, cx: &Context) -> I {
+        I::cx_interner(cx).intern(self)
+    }
+}
 
+impl InternInCx<InternedStr> for &'_ str {
     fn intern_in_cx(self, cx: &Context) -> InternedStr {
-        InternedStr(cx.interners.InternedStr.intern(self))
+        cx.interners.InternedStr.intern(self)
     }
 }
 
-impl InternInCx for String {
-    type Interned = InternedStr;
-
+impl InternInCx<InternedStr> for String {
     fn intern_in_cx(self, cx: &Context) -> InternedStr {
-        InternedStr(cx.interners.InternedStr.intern(self))
-    }
-}
-
-// FIXME(eddyb) automate the common form of this away.
-impl InternInCx for crate::AttrSetDef {
-    type Interned = AttrSet;
-
-    fn intern_in_cx(self, cx: &Context) -> Self::Interned {
-        AttrSet(cx.interners.AttrSet.intern(self))
-    }
-}
-
-// FIXME(eddyb) automate the common form of this away.
-impl InternInCx for crate::TypeDef {
-    type Interned = Type;
-
-    fn intern_in_cx(self, cx: &Context) -> Self::Interned {
-        Type(cx.interners.Type.intern(self))
-    }
-}
-
-// FIXME(eddyb) automate the common form of this away.
-impl InternInCx for crate::ConstDef {
-    type Interned = Const;
-
-    fn intern_in_cx(self, cx: &Context) -> Self::Interned {
-        Const(cx.interners.Const.intern(self))
+        cx.interners.InternedStr.intern(self)
     }
 }
 
@@ -214,16 +261,9 @@ macro_rules! entities {
         $($name:ident => $def:ty),+ $(,)?
     ) => {
         #[allow(non_snake_case)]
+        #[derive(Default)]
         struct EntityAllocs {
-            $($name: Cell<u32>),*
-        }
-
-        impl Default for EntityAllocs {
-            fn default() -> Self {
-                Self {
-                    $($name: Default::default()),*
-                }
-            }
+            $($name: sealed::EntityAlloc<$name>),*
         }
 
         $(
@@ -236,29 +276,20 @@ macro_rules! entities {
                 u32,
             );
 
-            impl EntityDefs<$name, $def> {
-                pub fn define(&mut self, cx: &Context, def: $def) -> $name {
-                    let idx = $name(cx.entity_allocs.$name.get());
-                    let next_idx = idx.0.checked_add(1).expect("entity index overflowed u32");
-                    cx.entity_allocs.$name.set(next_idx);
+            impl sealed::Entity for $name {
+                type Def = $def;
 
-                    assert!(self.map.insert(idx, def).is_none());
-
-                    idx
+                #[inline(always)]
+                fn from_u32(i: u32) -> Self {
+                    Self(i)
                 }
-            }
-
-            impl std::ops::Index<$name> for EntityDefs<$name, $def> {
-                type Output = $def;
-
-                fn index(&self, idx: $name) -> &Self::Output {
-                    &self.map[&idx]
+                #[inline(always)]
+                fn to_u32(self) -> u32 {
+                    self.0
                 }
-            }
-
-            impl std::ops::IndexMut<$name> for EntityDefs<$name, $def> {
-                fn index_mut(&mut self, idx: $name) -> &mut Self::Output {
-                    self.map.get_mut(&idx).unwrap()
+                #[inline(always)]
+                fn cx_entity_alloc(cx: &Context) -> &sealed::EntityAlloc<Self> {
+                    &cx.entity_allocs.$name
                 }
             }
         )*
