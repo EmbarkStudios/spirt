@@ -278,7 +278,7 @@ impl InnerVisit for FuncDefBody {
             cfg,
         } = self;
 
-        for (&region, control_inst) in cfg {
+        for &region in &cfg.original_order {
             let RegionDef { inputs, kind } = &regions[region];
 
             for input in inputs {
@@ -292,7 +292,7 @@ impl InnerVisit for FuncDefBody {
                 }
             }
 
-            visitor.visit_control_inst(control_inst);
+            visitor.visit_control_inst(&cfg.terminators[region]);
         }
     }
 }

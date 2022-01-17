@@ -458,7 +458,7 @@ impl InnerInPlaceTransform for FuncDefBody {
             cfg,
         } = self;
 
-        for (&region, control_inst) in cfg {
+        for &region in &cfg.original_order {
             let RegionDef { inputs, kind } = &mut regions[region];
 
             for input in inputs {
@@ -471,7 +471,7 @@ impl InnerInPlaceTransform for FuncDefBody {
                     }
                 }
             }
-            transformer.in_place_transform_control_inst(control_inst);
+            transformer.in_place_transform_control_inst(&mut cfg.terminators[region]);
         }
     }
 }

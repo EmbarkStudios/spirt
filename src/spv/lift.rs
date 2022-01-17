@@ -243,14 +243,19 @@ impl<'a> NeedsIdsCollector<'a> {
                         DeclDef::Present(def) => Some(def),
                     };
 
-                    let cfg = func_def_body
-                        .into_iter()
-                        .flat_map(|func_def_body| &func_def_body.cfg);
+                    let cfg = func_def_body.into_iter().flat_map(|func_def_body| {
+                        func_def_body
+                            .cfg
+                            .original_order
+                            .iter()
+                            .map(|&region| (region, &func_def_body.cfg.terminators[region]))
+                    });
                     let all_insts_with_output =
                         func_def_body.into_iter().flat_map(|func_def_body| {
                             func_def_body
                                 .cfg
-                                .keys()
+                                .original_order
+                                .iter()
                                 .flat_map(|&region| match &func_def_body.regions[region].kind {
                                     RegionKind::Block { insts, .. } => insts.iter().copied(),
                                 })
@@ -261,7 +266,7 @@ impl<'a> NeedsIdsCollector<'a> {
 
                     let mut blocks: FxHashMap<_, _> = cfg
                         .clone()
-                        .map(|(&region, _)| {
+                        .map(|(region, _)| {
                             Ok((
                                 region,
                                 BlockIds {
@@ -282,7 +287,7 @@ impl<'a> NeedsIdsCollector<'a> {
                         .collect::<Result<_, _>>()?;
 
                     // Collect phis from other blocks' edges into each block.
-                    for (&source_region, control_inst) in cfg {
+                    for (source_region, control_inst) in cfg {
                         let source_label_id = blocks[&source_region].label_id;
 
                         for (&target_block, block_inputs) in &control_inst.target_inputs {
@@ -739,7 +744,7 @@ impl Module {
                             cfg,
                         } = func_def_body;
 
-                        cfg.iter().flat_map(move |(&block, control_inst)| {
+                        cfg.original_order.iter().flat_map(move |&block| {
                             let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
                             let RegionDef { inputs, kind } = &regions[block];
 
@@ -765,7 +770,7 @@ impl Module {
                                 })
                                 .chain([LazyInst::ControlInst {
                                     parent_func_ids: func_ids,
-                                    control_inst,
+                                    control_inst: &cfg.terminators[block],
                                 }])
                         })
                     }))

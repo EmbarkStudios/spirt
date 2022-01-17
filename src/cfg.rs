@@ -1,11 +1,17 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
-use crate::{spv, AttrSet, FxIndexMap, Region, Value};
+use crate::{spv, AttrSet, EntityKeyedDenseMap, FxIndexMap, Region, Value};
 use smallvec::SmallVec;
 
 /// The control-flow graph of a function, represented as per-region
 /// control-flow instructions that execute "after" the region itself.
-pub type ControlFlowGraph = FxIndexMap<Region, ControlInst>;
+#[derive(Default)]
+pub struct ControlFlowGraph {
+    pub terminators: EntityKeyedDenseMap<Region, ControlInst>,
+
+    // HACK(eddyb) this only exists to avoid on-the-fly RPO iteration.
+    pub original_order: Vec<Region>,
+}
 
 pub struct ControlInst {
     pub attrs: AttrSet,
