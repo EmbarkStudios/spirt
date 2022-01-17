@@ -1,4 +1,6 @@
 use rustc_hash::FxHashMap;
+use std::hash::Hash;
+use std::mem;
 use std::num::NonZeroU32;
 
 /// Context object with global resources for SPIR-T.
@@ -75,6 +77,15 @@ mod sealed {
         fn from_non_zero_u32(i: NonZeroU32) -> Self;
         fn to_non_zero_u32(self) -> NonZeroU32;
         fn cx_entity_alloc(cx: &super::Context) -> &EntityAlloc<Self>;
+
+        #[inline(always)]
+        fn to_chunk_start_and_intra_chunk_idx(self) -> (Self, usize) {
+            let self_u32 = self.to_non_zero_u32().get();
+            (
+                Self::from_non_zero_u32(NonZeroU32::new(self_u32 & !Self::CHUNK_MASK).unwrap()),
+                (self_u32 & Self::CHUNK_MASK) as usize,
+            )
+        }
     }
 
     pub struct EntityAlloc<E: Entity>(Cell<E>);
@@ -141,10 +152,6 @@ impl<I: sealed::Interned> std::ops::Index<I> for Context {
 ///
 /// By design there is no way to iterate the contents of an `EntityDefs`, or
 /// generate entity indices without defining the entity in an `EntityDefs`.
-//
-// FIXME(eddyb) add an "entity-keyed map" that has similar restrictions, and
-// some optimizations; will likely need both "dense" and "sparse" versions,
-// where the sparse one is probably just a `FxHashMap` wrapper?
 pub struct EntityDefs<E: sealed::Entity> {
     /// Entities are grouped into chunks, with per-entity-type chunk sizes
     /// (powers of 2) specified via `entities!` below.
@@ -211,13 +218,7 @@ impl<E: sealed::Entity> EntityDefs<E> {
     }
 
     fn entity_to_flattened(&self, entity: E) -> Option<usize> {
-        let (chunk_start, intra_chunk_idx) = {
-            let e_u32 = entity.to_non_zero_u32().get();
-            (
-                E::from_non_zero_u32(NonZeroU32::new(e_u32 & !E::CHUNK_MASK).unwrap()),
-                e_u32 & E::CHUNK_MASK,
-            )
-        };
+        let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
         let flattened_base = match self.incomplete_chunk_start_and_flattened_base {
             Some((incomplete_chunk_start, incomplete_flattened_base))
                 if chunk_start == incomplete_chunk_start =>
@@ -228,7 +229,7 @@ impl<E: sealed::Entity> EntityDefs<E> {
                 .complete_chunk_start_to_flattened_base
                 .get(&chunk_start)?,
         };
-        Some(flattened_base + intra_chunk_idx as usize)
+        Some(flattened_base + intra_chunk_idx)
     }
 }
 
@@ -247,6 +248,142 @@ impl<E: sealed::Entity> std::ops::IndexMut<E> for EntityDefs<E> {
         self.entity_to_flattened(entity)
             .and_then(|i| self.flattened.get_mut(i))
             .unwrap()
+    }
+}
+
+/// Map with `E` (entity) keys and `V` values, that is "dense" in the sense of
+/// few (or no) missing entries, relative to the corresponding `EntityDefs`.
+///
+/// By design there is no way to iterate the entries in an `EntityKeyedDenseMap`.
+//
+// FIXME(eddyb) implement a "sparse" version as well, and maybe some bitsets?
+pub struct EntityKeyedDenseMap<E: sealed::Entity, V> {
+    /// Like in `EntityDefs`, entities are grouped into chunks, but there is no
+    /// flattening, since arbitrary insertion orders have to be supported.
+    chunk_start_to_values: SmallFxHashMap<E, Vec<Option<V>>>,
+}
+
+// FIXME(eddyb) find a better "small map" design and/or fine-tune this - though,
+// since the ideal state is one chunk per map, the slow case might never be hit,
+// unless one `EntityKeyedDenseMap` is used with more than one `EntityDefs`,
+// which could still maybe be implemented more efficiently than `FxHashMap`.
+enum SmallFxHashMap<K, V> {
+    Empty,
+    One(K, V),
+    More(FxHashMap<K, V>),
+}
+
+impl<K, V> Default for SmallFxHashMap<K, V> {
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
+impl<K: Copy + Eq + Hash, V: Default> SmallFxHashMap<K, V> {
+    fn get_mut_or_insert_default(&mut self, k: K) -> &mut V {
+        // HACK(eddyb) to avoid borrowing issues, this is done in two stages:
+        // 1. ensure `self` is `One(k, _) | More`, i.e. `One` implies same key
+        match *self {
+            Self::Empty => {
+                *self = Self::One(k, V::default());
+            }
+            Self::One(old_k, _) => {
+                if old_k != k {
+                    let old = mem::replace(self, Self::More(Default::default()));
+                    match (old, &mut *self) {
+                        (Self::One(_, old_v), Self::More(map)) => {
+                            map.insert(old_k, old_v);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            Self::More(_) => {}
+        }
+
+        // 2. get the value from `One` or potentially insert one into `More`
+        match self {
+            Self::Empty => unreachable!(),
+            Self::One(_, v) => v,
+            Self::More(map) => map.entry(k).or_default(),
+        }
+    }
+
+    fn get(&self, k: K) -> Option<&V> {
+        match self {
+            Self::Empty => None,
+            Self::One(old_k, old_v) if *old_k == k => Some(old_v),
+            Self::One(..) => None,
+            Self::More(map) => map.get(&k),
+        }
+    }
+
+    fn get_mut(&mut self, k: K) -> Option<&mut V> {
+        match self {
+            Self::Empty => None,
+            Self::One(old_k, old_v) if *old_k == k => Some(old_v),
+            Self::One(..) => None,
+            Self::More(map) => map.get_mut(&k),
+        }
+    }
+}
+
+impl<E: sealed::Entity, V> Default for EntityKeyedDenseMap<E, V> {
+    fn default() -> Self {
+        Self {
+            chunk_start_to_values: Default::default(),
+        }
+    }
+}
+
+impl<E: sealed::Entity, V> EntityKeyedDenseMap<E, V> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, entity: E, value: V) {
+        let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
+        let chunk_values = self
+            .chunk_start_to_values
+            .get_mut_or_insert_default(chunk_start);
+
+        // Ensure there are enough slots for the new entry.
+        let needed_len = intra_chunk_idx + 1;
+        if chunk_values.len() < needed_len {
+            chunk_values.resize_with(needed_len, || None);
+        }
+
+        chunk_values[intra_chunk_idx] = Some(value);
+    }
+
+    pub fn get(&self, entity: E) -> Option<&V> {
+        let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
+        self.chunk_start_to_values
+            .get(chunk_start)?
+            .get(intra_chunk_idx)?
+            .as_ref()
+    }
+
+    pub fn get_mut(&mut self, entity: E) -> Option<&mut V> {
+        let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
+        self.chunk_start_to_values
+            .get_mut(chunk_start)?
+            .get_mut(intra_chunk_idx)?
+            .as_mut()
+    }
+}
+
+impl<E: sealed::Entity, V> std::ops::Index<E> for EntityKeyedDenseMap<E, V> {
+    type Output = V;
+
+    fn index(&self, entity: E) -> &V {
+        self.get(entity).expect("no entry found for key")
+    }
+}
+
+impl<E: sealed::Entity, V> std::ops::IndexMut<E> for EntityKeyedDenseMap<E, V> {
+    fn index_mut(&mut self, entity: E) -> &mut V {
+        self.get_mut(entity).expect("no entry found for key")
     }
 }
 
