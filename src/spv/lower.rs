@@ -2,13 +2,13 @@
 
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
-use crate::FxIndexMap;
 use crate::{
     cfg::ControlInst, cfg::ControlInstKind, print, AddrSpace, Attr, AttrSet, Const, ConstCtor,
     ConstDef, Context, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region,
     RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
+use crate::{EntityDefs, FxIndexMap};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -749,11 +749,24 @@ impl Module {
 
                 let def = match pending_imports.remove(&func_id) {
                     Some(import) => DeclDef::Imported(import),
-                    None => DeclDef::Present(FuncDefBody {
-                        data_insts: Default::default(),
-                        regions: Default::default(),
-                        cfg: Default::default(),
-                    }),
+                    None => {
+                        let mut regions = EntityDefs::default();
+                        // HACK(eddyb) can't get a `Region` without
+                        // defining it as an (empty) `RegionDef` first.
+                        let entry = regions.define(
+                            &cx,
+                            RegionDef {
+                                inputs: SmallVec::new(),
+                                kind: RegionKind::Block { insts: vec![] },
+                            },
+                        );
+                        DeclDef::Present(FuncDefBody {
+                            data_insts: Default::default(),
+                            regions,
+                            entry,
+                            cfg: Default::default(),
+                        })
+                    }
                 };
 
                 let func = module.funcs.define(
@@ -885,6 +898,7 @@ impl Module {
                             next_param_idx = idx.checked_add(1).unwrap();
                             LocalIdDef::Value(Value::FuncParam { idx })
                         } else {
+                            let is_entry_block = !has_blocks;
                             has_blocks = true;
 
                             let func_def_body = match &mut func_decl.def {
@@ -894,15 +908,21 @@ impl Module {
                             };
 
                             if opcode == wk.OpLabel {
-                                // HACK(eddyb) can't get a `Region` without
-                                // defining it as an (empty) `RegionDef` first.
-                                let block = func_def_body.regions.define(
-                                    &cx,
-                                    RegionDef {
-                                        inputs: SmallVec::new(),
-                                        kind: RegionKind::Block { insts: vec![] },
-                                    },
-                                );
+                                let block = if is_entry_block {
+                                    // An empty `RegionKind::Block` region was defined
+                                    // earlier, to be able to create the `FuncDefBody`.
+                                    func_def_body.entry
+                                } else {
+                                    // HACK(eddyb) can't get a `Region` without
+                                    // defining it as an (empty) `RegionDef` first.
+                                    func_def_body.regions.define(
+                                        &cx,
+                                        RegionDef {
+                                            inputs: SmallVec::new(),
+                                            kind: RegionKind::Block { insts: vec![] },
+                                        },
+                                    )
+                                };
                                 block_details.insert(
                                     block,
                                     BlockDetails {
@@ -972,10 +992,7 @@ impl Module {
                             func_id, &cx[*name]
                         )));
                     }
-                    DeclDef::Present(def) => {
-                        assert!(def.cfg.original_order.is_empty());
-                        Some(def)
-                    }
+                    DeclDef::Present(def) => Some(def),
                 }
             } else {
                 match func_decl.def {
@@ -1041,13 +1058,11 @@ impl Module {
                     };
 
                 if opcode == wk.OpFunctionParameter {
-                    if let Some(func_def_body) = &func_def_body {
-                        if !func_def_body.cfg.original_order.is_empty() {
-                            return Err(invalid(
-                                "out of order: `OpFunctionParameter`s should come \
-                                 before the function's blocks",
-                            ));
-                        }
+                    if current_block_region_and_details.is_some() {
+                        return Err(invalid(
+                            "out of order: `OpFunctionParameter`s should come \
+                             before the function's blocks",
+                        ));
                     }
 
                     assert!(imms.is_empty() && ids.is_empty());
@@ -1214,7 +1229,6 @@ impl Module {
                             target_inputs,
                         },
                     );
-                    func_def_body.cfg.original_order.push(current_block_region);
                 } else if opcode == wk.OpPhi {
                     if !current_block_insts.is_empty() {
                         return Err(invalid(
@@ -1401,8 +1415,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                let &entry_block = func_def_body.cfg.original_order.first().unwrap();
-                if !func_def_body.regions[entry_block].inputs.is_empty() {
+                if !func_def_body.regions[func_def_body.entry].inputs.is_empty() {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(

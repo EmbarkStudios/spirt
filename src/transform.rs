@@ -455,10 +455,11 @@ impl InnerInPlaceTransform for FuncDefBody {
         let Self {
             data_insts,
             regions,
+            entry,
             cfg,
         } = self;
 
-        for &region in &cfg.original_order {
+        for region in cfg.rev_post_order(*entry) {
             let RegionDef { inputs, kind } = &mut regions[region];
 
             for input in inputs {

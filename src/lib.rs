@@ -253,6 +253,12 @@ pub struct FuncDefBody {
     pub data_insts: EntityDefs<DataInst>,
     pub regions: EntityDefs<Region>,
 
+    /// The `Region` representing the whole body of the function.
+    // FIXME(eddyb) "entry" is CFG-oriented (maybe "top" would be better?),
+    // and also this is not that useful without `cfg` right now, which is needed
+    // to reach other `Region`s (through CFG edges).
+    pub entry: Region,
+
     /// The control-flow graph of the function, represented as per-region
     /// control-flow instructions that execute "after" the region itself.
     // FIXME(eddyb) replace this CFG setup with stricter structural regions.

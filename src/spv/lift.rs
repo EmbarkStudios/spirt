@@ -246,17 +246,15 @@ impl<'a> NeedsIdsCollector<'a> {
                     let cfg = func_def_body.into_iter().flat_map(|func_def_body| {
                         func_def_body
                             .cfg
-                            .original_order
-                            .iter()
-                            .map(|&region| (region, &func_def_body.cfg.terminators[region]))
+                            .rev_post_order(func_def_body.entry)
+                            .map(|region| (region, &func_def_body.cfg.terminators[region]))
                     });
                     let all_insts_with_output =
                         func_def_body.into_iter().flat_map(|func_def_body| {
                             func_def_body
                                 .cfg
-                                .original_order
-                                .iter()
-                                .flat_map(|&region| match &func_def_body.regions[region].kind {
+                                .rev_post_order(func_def_body.entry)
+                                .flat_map(|region| match &func_def_body.regions[region].kind {
                                     RegionKind::Block { insts, .. } => insts.iter().copied(),
                                 })
                                 .filter(|&inst| {
@@ -741,10 +739,11 @@ impl Module {
                         let FuncDefBody {
                             data_insts,
                             regions,
+                            entry,
                             cfg,
                         } = func_def_body;
 
-                        cfg.original_order.iter().flat_map(move |&block| {
+                        cfg.rev_post_order(*entry).flat_map(move |block| {
                             let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
                             let RegionDef { inputs, kind } = &regions[block];
 

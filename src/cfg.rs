@@ -2,15 +2,57 @@
 
 use crate::{spv, AttrSet, EntityKeyedDenseMap, FxIndexMap, Region, Value};
 use smallvec::SmallVec;
+use std::rc::Rc;
 
 /// The control-flow graph of a function, represented as per-region
 /// control-flow instructions that execute "after" the region itself.
 #[derive(Default)]
 pub struct ControlFlowGraph {
     pub terminators: EntityKeyedDenseMap<Region, ControlInst>,
+}
 
-    // HACK(eddyb) this only exists to avoid on-the-fly RPO iteration.
-    pub original_order: Vec<Region>,
+impl ControlFlowGraph {
+    /// Iterate over all `Region`s reachable through the CFG, starting at `entry`,
+    /// in RPO ("reverse post-order").
+    ///
+    /// RPO ("reverse post-order") over a CFG provides certain guarantees, most
+    /// importantly that SSA definitions are visited before any of their uses.
+    pub fn rev_post_order(&self, entry: Region) -> impl DoubleEndedIterator<Item = Region> + Clone {
+        self.post_order(entry).rev()
+    }
+
+    /// Iterate over all `Region`s reachable through the CFG, starting at `entry`,
+    /// in post-order.
+    pub fn post_order(&self, entry: Region) -> impl DoubleEndedIterator<Item = Region> + Clone {
+        let mut post_order = SmallVec::<[Region; 4]>::new();
+        {
+            let mut visited = EntityKeyedDenseMap::new();
+            self.post_order_step(entry, &mut visited, &mut post_order);
+        }
+
+        // HACK(eddyb) this gets a cheaply-clonable iterator by `Rc`-ing the `Vec`.
+        // FIXME(eddyb) change the callsites instead to do something like this themselves.
+        let post_order = Rc::new(post_order);
+        (0..post_order.len()).map(move |i| post_order[i])
+    }
+
+    fn post_order_step(
+        &self,
+        region: Region,
+        // FIXME(eddyb) use a dense entity-keyed bitset here instead.
+        visited: &mut EntityKeyedDenseMap<Region, ()>,
+        post_order: &mut SmallVec<[Region; 4]>,
+    ) {
+        let already_visited = visited.insert(region, ()).is_some();
+        if already_visited {
+            return;
+        }
+
+        for &target in &self.terminators[region].targets {
+            self.post_order_step(target, visited, post_order);
+        }
+        post_order.push(region);
+    }
 }
 
 pub struct ControlInst {

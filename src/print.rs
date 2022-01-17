@@ -461,7 +461,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                 let mut region_counter = 0;
                 let mut value_counter = 0;
 
-                for &region in &func_def_body.cfg.original_order {
+                for region in func_def_body.cfg.rev_post_order(func_def_body.entry) {
                     let RegionDef { inputs, kind } = &func_def_body.regions[region];
 
                     // FIXME(eddyb) only insert here if the region is actually "used".
@@ -1481,10 +1481,11 @@ impl Print for FuncDecl {
             DeclDef::Present(FuncDefBody {
                 data_insts,
                 regions,
+                entry,
                 cfg,
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for &region in &cfg.original_order {
+                for region in cfg.rev_post_order(*entry) {
                     let RegionDef { inputs, kind } = &regions[region];
 
                     let mut header = Use::Region(region).print(printer);

@@ -341,7 +341,7 @@ impl<E: sealed::Entity, V> EntityKeyedDenseMap<E, V> {
         Self::default()
     }
 
-    pub fn insert(&mut self, entity: E, value: V) {
+    pub fn insert(&mut self, entity: E, value: V) -> Option<V> {
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
         let chunk_values = self
             .chunk_start_to_values
@@ -353,7 +353,7 @@ impl<E: sealed::Entity, V> EntityKeyedDenseMap<E, V> {
             chunk_values.resize_with(needed_len, || None);
         }
 
-        chunk_values[intra_chunk_idx] = Some(value);
+        chunk_values[intra_chunk_idx].replace(value)
     }
 
     pub fn get(&self, entity: E) -> Option<&V> {
