@@ -1,9 +1,9 @@
 use crate::transform::{InnerTransform, Transformed, Transformer};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AttrSet, Const, Context, DeclDef, ExportKey, Exportee, Func, GlobalVar, Import, Module, Type,
+    AttrSet, Const, Context, DeclDef, ExportKey, Exportee, Func, FxIndexSet, GlobalVar, Import,
+    Module, Type,
 };
-use indexmap::IndexSet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
@@ -29,7 +29,7 @@ pub fn minimize_exports(module: &mut Module, is_root: impl Fn(&ExportKey) -> boo
         cx: module.cx_ref(),
         module,
 
-        live_exports: IndexSet::new(),
+        live_exports: FxIndexSet::default(),
 
         seen_types: FxHashSet::default(),
         seen_consts: FxHashSet::default(),
@@ -57,7 +57,7 @@ struct LiveExportCollector<'a> {
     cx: &'a Context,
     module: &'a Module,
 
-    live_exports: IndexSet<ExportKey>,
+    live_exports: FxIndexSet<ExportKey>,
 
     // FIXME(eddyb) build some automation to avoid ever repeating these.
     seen_types: FxHashSet<Type>,

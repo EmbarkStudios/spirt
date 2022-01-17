@@ -1,6 +1,10 @@
-use indexmap::IndexMap;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
+
+// HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
+type FxIndexMap<K, V> =
+    indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 mod context;
 pub use context::{
@@ -39,7 +43,7 @@ mod sealed {
         pub global_vars: EntityDefs<GlobalVar>,
         pub funcs: EntityDefs<Func>,
 
-        pub exports: IndexMap<ExportKey, Exportee>,
+        pub exports: FxIndexMap<ExportKey, Exportee>,
     }
 
     impl Module {

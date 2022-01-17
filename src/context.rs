@@ -31,7 +31,9 @@ mod sealed {
         fn cx_interner(cx: &super::Context) -> &Interner<Self>;
     }
 
-    pub struct Interner<I: Interned>(elsa::FrozenIndexSet<Box<I::Def>>);
+    pub struct Interner<I: Interned>(
+        elsa::FrozenIndexSet<Box<I::Def>, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>,
+    );
 
     impl<I: Interned> Default for Interner<I> {
         fn default() -> Self {

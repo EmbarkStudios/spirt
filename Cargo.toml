@@ -7,7 +7,7 @@ description = "Shader-focused IR to target, transform and translate from."
 
 [dependencies]
 arrayvec = "0.7.1"
-elsa = { version = "1.4.0", features = ["indexmap"] }
+elsa = { version = "1.6.0", features = ["indexmap"] }
 format = "0.2.4"
 indexmap = "1.7.0"
 lazy_static = "1.4.0"

@@ -1,4 +1,5 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
+use crate::FxIndexMap;
 use crate::{
     cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
     ConstCtor, ConstDef, Context, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey,
@@ -7,7 +8,6 @@ use crate::{
     Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
-use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::{fmt, iter};
@@ -34,7 +34,7 @@ pub struct Plan<'a> {
     func_decl_cache: FxHashMap<Func, &'a FuncDecl>,
 
     nodes: Vec<Node<'a>>,
-    use_counts: IndexMap<Use, usize>,
+    use_counts: FxIndexMap<Use, usize>,
 }
 
 /// Helper for printing a mismatch error between two nodes (e.g. types), while
@@ -116,7 +116,7 @@ impl<'a> Plan<'a> {
             global_var_decl_cache: FxHashMap::default(),
             func_decl_cache: FxHashMap::default(),
             nodes: vec![],
-            use_counts: IndexMap::new(),
+            use_counts: FxIndexMap::default(),
         }
     }
 
@@ -128,7 +128,7 @@ impl<'a> Plan<'a> {
             global_var_decl_cache: FxHashMap::default(),
             func_decl_cache: FxHashMap::default(),
             nodes: vec![],
-            use_counts: IndexMap::new(),
+            use_counts: FxIndexMap::default(),
         }
     }
 

@@ -1,5 +1,4 @@
-use crate::InternedStr;
-use indexmap::IndexMap;
+use crate::{FxIndexMap, InternedStr};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
@@ -40,7 +39,7 @@ pub struct DebugSourceLang {
 
 #[derive(Default)]
 pub struct DebugSources {
-    pub file_contents: IndexMap<InternedStr, String>,
+    pub file_contents: FxIndexMap<InternedStr, String>,
 }
 
 /// A SPIR-V instruction, in its minimal form (opcode and immediate operands).

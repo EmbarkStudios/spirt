@@ -9,7 +9,7 @@ use crate::{
     ModuleDialect, Region, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg,
     TypeDef, Value,
 };
-use indexmap::{IndexMap, IndexSet};
+use crate::{FxIndexMap, FxIndexSet};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -99,9 +99,9 @@ struct NeedsIdsCollector<'a> {
     ext_inst_imports: BTreeSet<&'a str>,
     debug_strings: BTreeSet<&'a str>,
 
-    globals: IndexSet<Global>,
-    global_vars_seen: IndexSet<GlobalVar>,
-    funcs: IndexSet<Func>,
+    globals: FxIndexSet<Global>,
+    global_vars_seen: FxIndexSet<GlobalVar>,
+    funcs: FxIndexSet<Func>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -184,8 +184,8 @@ struct AllocatedIds<'a> {
     ext_inst_imports: BTreeMap<&'a str, spv::Id>,
     debug_strings: BTreeMap<&'a str, spv::Id>,
 
-    globals: IndexMap<Global, spv::Id>,
-    funcs: IndexMap<Func, FuncIds>,
+    globals: FxIndexMap<Global, spv::Id>,
+    funcs: FxIndexMap<Func, FuncIds>,
 }
 
 // FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
@@ -665,9 +665,9 @@ impl Module {
             module: self,
             ext_inst_imports: BTreeSet::new(),
             debug_strings: BTreeSet::new(),
-            globals: IndexSet::new(),
-            global_vars_seen: IndexSet::new(),
-            funcs: IndexSet::new(),
+            globals: FxIndexSet::default(),
+            global_vars_seen: FxIndexSet::default(),
+            funcs: FxIndexSet::default(),
         };
         needs_ids_collector.visit_module(self);
 

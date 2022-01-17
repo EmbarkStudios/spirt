@@ -1,12 +1,11 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
-use crate::{spv, AttrSet, Region, Value};
-use indexmap::IndexMap;
+use crate::{spv, AttrSet, FxIndexMap, Region, Value};
 use smallvec::SmallVec;
 
 /// The control-flow graph of a function, represented as per-region
 /// control-flow instructions that execute "after" the region itself.
-pub type ControlFlowGraph = IndexMap<Region, ControlInst>;
+pub type ControlFlowGraph = FxIndexMap<Region, ControlInst>;
 
 pub struct ControlInst {
     pub attrs: AttrSet,
@@ -20,7 +19,7 @@ pub struct ControlInst {
 
     // FIXME(eddyb) this is clunky because it models φ nodes (`OpPhi` in SPIR-V),
     // replace the CFG setup with stricter structural regions.
-    pub target_inputs: IndexMap<Region, SmallVec<[Value; 2]>>,
+    pub target_inputs: FxIndexMap<Region, SmallVec<[Value; 2]>>,
 }
 
 pub enum ControlInstKind {

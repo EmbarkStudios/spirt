@@ -2,13 +2,13 @@
 
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
+use crate::FxIndexMap;
 use crate::{
     cfg::ControlInst, cfg::ControlInstKind, print, AddrSpace, Attr, AttrSet, Const, ConstCtor,
     ConstDef, Context, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region,
     RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
-use indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -865,10 +865,10 @@ impl Module {
             }
 
             // Index IDs declared within the function, first.
-            let mut local_id_defs = IndexMap::new();
+            let mut local_id_defs = FxIndexMap::default();
             // `OpPhi`s are also collected here, to assign them per-edge.
-            let mut phi_to_values = IndexMap::<PhiKey, SmallVec<[spv::Id; 1]>>::new();
-            let mut block_details = IndexMap::<Region, BlockDetails>::new();
+            let mut phi_to_values = FxIndexMap::<PhiKey, SmallVec<[spv::Id; 1]>>::default();
+            let mut block_details = FxIndexMap::<Region, BlockDetails>::default();
             let mut has_blocks = false;
             {
                 let mut next_param_idx = 0u32;
@@ -1085,7 +1085,7 @@ impl Module {
                         ));
                     }
 
-                    let mut target_inputs = IndexMap::new();
+                    let mut target_inputs = FxIndexMap::default();
                     let descr_phi_case = |phi_key: &PhiKey| {
                         format!(
                             "`OpPhi` (#{} in %{})'s case for source block %{}",
