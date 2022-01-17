@@ -978,6 +978,19 @@ impl Module {
                     }
                 }
             } else {
+                match func_decl.def {
+                    DeclDef::Imported(Import::LinkName(_)) => {}
+                    DeclDef::Present(_) => {
+                        // FIXME(remove) embed IDs in errors by moving them to the
+                        // `let invalid = |...| ...;` closure that wraps insts.
+                        return Err(invalid(&format!(
+                            "function %{} lacks any blocks, \
+                             but isn't an import either",
+                            func_id
+                        )));
+                    }
+                }
+
                 None
             };
 
@@ -1388,16 +1401,6 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if func_def_body.cfg.original_order.is_empty() {
-                    // FIXME(remove) embed IDs in errors by moving them to the
-                    // `let invalid = |...| ...;` closure that wraps insts.
-                    return Err(invalid(&format!(
-                        "function %{} lacks any blocks, \
-                         but isn't an import either",
-                        func_id
-                    )));
-                }
-
                 let &entry_block = func_def_body.cfg.original_order.first().unwrap();
                 if !func_def_body.regions[entry_block].inputs.is_empty() {
                     // FIXME(remove) embed IDs in errors by moving them to the
