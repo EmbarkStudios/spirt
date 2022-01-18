@@ -5,11 +5,10 @@ use crate::visit::{InnerVisit, Visitor};
 use crate::{
     cfg::ControlInst, cfg::ControlInstKind, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef,
     Context, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, Region, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    FuncDefBody, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionKind, RegionOutputDecl, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
-use crate::{FxIndexMap, FxIndexSet};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
@@ -255,8 +254,10 @@ impl<'a> NeedsIdsCollector<'a> {
                                 .cfg
                                 .rev_post_order(func_def_body.entry)
                                 .flat_map(|region| match &func_def_body.regions[region].kind {
-                                    RegionKind::Block { insts, .. } => insts.iter().copied(),
+                                    RegionKind::UnstructuredMerge => &[][..],
+                                    RegionKind::Block { insts, .. } => insts,
                                 })
+                                .copied()
                                 .filter(|&inst| {
                                     func_def_body.data_insts[inst].output_type.is_some()
                                 })
@@ -265,20 +266,30 @@ impl<'a> NeedsIdsCollector<'a> {
                     let mut blocks: FxHashMap<_, _> = cfg
                         .clone()
                         .map(|(region, _)| {
+                            let region_def = &func_def_body.unwrap().regions[region];
+                            let phis = if let RegionKind::UnstructuredMerge = region_def.kind {
+                                // FIXME(eddyb) this works but ends up creating
+                                // merge blocks that only exist to hold `OpPhi`s,
+                                // consider trying to fuse that into an unique
+                                // successor block (when one exists).
+                                region_def
+                                    .outputs
+                                    .iter()
+                                    .map(|_| {
+                                        Ok(Phi {
+                                            result_id: alloc_id()?,
+                                            cases: SmallVec::new(),
+                                        })
+                                    })
+                                    .collect::<Result<_, _>>()?
+                            } else {
+                                SmallVec::new()
+                            };
                             Ok((
                                 region,
                                 BlockIds {
                                     label_id: alloc_id()?,
-                                    phis: func_def_body.unwrap().regions[region]
-                                        .inputs
-                                        .iter()
-                                        .map(|_| {
-                                            Ok(Phi {
-                                                result_id: alloc_id()?,
-                                                cases: SmallVec::new(),
-                                            })
-                                        })
-                                        .collect::<Result<_, _>>()?,
+                                    phis,
                                 },
                             ))
                         })
@@ -288,11 +299,9 @@ impl<'a> NeedsIdsCollector<'a> {
                     for (source_region, control_inst) in cfg {
                         let source_label_id = blocks[&source_region].label_id;
 
-                        for (&target_block, block_inputs) in &control_inst.target_inputs {
+                        for (&target_block, outputs) in &control_inst.target_merge_outputs {
                             let target_block_ids = blocks.get_mut(&target_block).unwrap();
-                            for (target_phi, &v) in
-                                target_block_ids.phis.iter_mut().zip(block_inputs)
-                            {
+                            for (target_phi, &v) in target_block_ids.phis.iter_mut().zip(outputs) {
                                 target_phi.cases.push((v, source_label_id));
                             }
                         }
@@ -336,7 +345,7 @@ enum LazyInst<'a> {
     },
     OpPhi {
         parent_func_ids: &'a FuncIds,
-        input_decl: &'a RegionInputDecl,
+        output_decl: &'a RegionOutputDecl,
         phi: &'a Phi,
     },
     DataInst {
@@ -391,9 +400,9 @@ impl LazyInst<'_> {
             Self::OpLabel { label_id } => (Some(label_id), AttrSet::default(), None),
             Self::OpPhi {
                 parent_func_ids: _,
-                input_decl,
+                output_decl,
                 phi,
-            } => (Some(phi.result_id), input_decl.attrs, None),
+            } => (Some(phi.result_id), output_decl.attrs, None),
             Self::DataInst {
                 parent_func_ids: _,
                 result_id,
@@ -414,8 +423,8 @@ impl LazyInst<'_> {
         let value_to_id = |parent_func_ids: &FuncIds, v| match v {
             Value::Const(ct) => ids.globals[&Global::Const(ct)],
             Value::FuncParam { idx } => parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
-            Value::RegionInput { region, input_idx } => {
-                parent_func_ids.blocks[&region].phis[usize::try_from(input_idx).unwrap()].result_id
+            Value::RegionOutput { region, output_idx } => {
+                parent_func_ids.blocks[&region].phis[usize::try_from(output_idx).unwrap()].result_id
             }
             Value::DataInstOutput(inst) => parent_func_ids.data_inst_output_ids[&inst],
         };
@@ -532,11 +541,11 @@ impl LazyInst<'_> {
             },
             Self::OpPhi {
                 parent_func_ids,
-                input_decl,
+                output_decl,
                 phi,
             } => spv::InstWithIds {
                 without_ids: wk.OpPhi.into(),
-                result_type_id: Some(ids.globals[&Global::Type(input_decl.ty)]),
+                result_type_id: Some(ids.globals[&Global::Type(output_decl.ty)]),
                 result_id: Some(phi.result_id),
                 ids: phi
                     .cases
@@ -745,28 +754,41 @@ impl Module {
 
                         cfg.rev_post_order(*entry).flat_map(move |block| {
                             let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
-                            let RegionDef { inputs, kind } = &regions[block];
+                            let RegionDef { kind, outputs } = &regions[block];
 
-                            iter::once(LazyInst::OpLabel { label_id })
-                                .chain(inputs.iter().zip(phis).map(|(input_decl, phi)| {
+                            let phi_lazy_insts = if let RegionKind::UnstructuredMerge = kind {
+                                // FIXME(eddyb) this works but ends up creating
+                                // merge blocks that only exist to hold `OpPhi`s,
+                                // consider trying to fuse that into an unique
+                                // successor block (when one exists).
+                                Some(outputs.iter().zip(phis).map(|(output_decl, phi)| {
                                     LazyInst::OpPhi {
                                         parent_func_ids: func_ids,
-                                        input_decl,
+                                        output_decl,
                                         phi,
                                     }
                                 }))
-                                .chain(match kind {
-                                    RegionKind::Block { insts } => insts.iter().map(move |&inst| {
-                                        let data_inst_def = &data_insts[inst];
-                                        LazyInst::DataInst {
-                                            parent_func_ids: func_ids,
-                                            result_id: data_inst_def
-                                                .output_type
-                                                .map(|_| func_ids.data_inst_output_ids[&inst]),
-                                            data_inst_def,
-                                        }
-                                    }),
-                                })
+                            } else {
+                                None
+                            };
+
+                            let block_insts = match kind {
+                                RegionKind::UnstructuredMerge => &[][..],
+                                RegionKind::Block { insts } => insts,
+                            };
+
+                            iter::once(LazyInst::OpLabel { label_id })
+                                .chain(phi_lazy_insts.into_iter().flatten())
+                                .chain(block_insts.iter().map(move |&inst| {
+                                    let data_inst_def = &data_insts[inst];
+                                    LazyInst::DataInst {
+                                        parent_func_ids: func_ids,
+                                        result_id: data_inst_def
+                                            .output_type
+                                            .map(|_| func_ids.data_inst_output_ids[&inst]),
+                                        data_inst_def,
+                                    }
+                                }))
                                 .chain([LazyInst::ControlInst {
                                     parent_func_ids: func_ids,
                                     control_inst: &cfg.terminators[block],

@@ -266,18 +266,25 @@ pub struct FuncDefBody {
 }
 
 pub struct RegionDef {
-    pub inputs: SmallVec<[RegionInputDecl; 2]>,
     pub kind: RegionKind,
+    pub outputs: SmallVec<[RegionOutputDecl; 2]>,
 }
 
-pub struct RegionInputDecl {
+pub struct RegionOutputDecl {
     pub attrs: AttrSet,
 
     pub ty: Type,
 }
 
 pub enum RegionKind {
-    Block { insts: Vec<DataInst> },
+    /// Helper `Region` used for conversions between a CFG and structured regions,
+    /// potentially having `RegionOutputDecl`s with values provided externally.
+    // FIXME(eddyb) is there a better way to do this?
+    UnstructuredMerge,
+
+    Block {
+        insts: Vec<DataInst>,
+    },
 }
 
 pub struct DataInstDef {
@@ -304,9 +311,8 @@ pub enum DataInstKind {
 #[derive(Copy, Clone)]
 pub enum Value {
     Const(Const),
-    // FIXME(eddyb) consider replacing this with inputs of the entry region.
     FuncParam { idx: u32 },
     // FIXME(eddyb) this variant alone increases the size of the `enum`.
-    RegionInput { region: Region, input_idx: u32 },
+    RegionOutput { region: Region, output_idx: u32 },
     DataInstOutput(DataInst),
 }

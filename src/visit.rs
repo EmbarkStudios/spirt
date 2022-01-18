@@ -2,7 +2,7 @@ use crate::{
     cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
     ConstCtor, ConstDef, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor,
+    ModuleDebugInfo, ModuleDialect, RegionDef, RegionKind, RegionOutputDecl, Type, TypeCtor,
     TypeCtorArg, TypeDef, Value,
 };
 
@@ -280,17 +280,18 @@ impl InnerVisit for FuncDefBody {
         } = self;
 
         for region in cfg.rev_post_order(*entry) {
-            let RegionDef { inputs, kind } = &regions[region];
+            let RegionDef { kind, outputs } = &regions[region];
 
-            for input in inputs {
-                input.inner_visit_with(visitor);
-            }
             match kind {
+                RegionKind::UnstructuredMerge => {}
                 RegionKind::Block { insts } => {
                     for &inst in insts {
                         visitor.visit_data_inst_def(&data_insts[inst]);
                     }
                 }
+            }
+            for output in outputs {
+                output.inner_visit_with(visitor);
             }
 
             visitor.visit_control_inst(&cfg.terminators[region]);
@@ -298,7 +299,7 @@ impl InnerVisit for FuncDefBody {
     }
 }
 
-impl InnerVisit for RegionInputDecl {
+impl InnerVisit for RegionOutputDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self { attrs, ty } = *self;
 
@@ -337,7 +338,7 @@ impl InnerVisit for ControlInst {
             kind,
             inputs,
             targets: _,
-            target_inputs,
+            target_merge_outputs,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
@@ -353,8 +354,8 @@ impl InnerVisit for ControlInst {
         for v in inputs {
             visitor.visit_value_use(v);
         }
-        for target_inputs in target_inputs.values() {
-            for v in target_inputs {
+        for outputs in target_merge_outputs.values() {
+            for v in outputs {
                 visitor.visit_value_use(v);
             }
         }
@@ -366,9 +367,9 @@ impl InnerVisit for Value {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
             Self::FuncParam { idx: _ }
-            | Self::RegionInput {
+            | Self::RegionOutput {
                 region: _,
-                input_idx: _,
+                output_idx: _,
             }
             | Self::DataInstOutput(_) => {}
         }

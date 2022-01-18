@@ -65,9 +65,10 @@ pub struct ControlInst {
     // FIXME(eddyb) change the inline size of this to fit most instructions.
     pub targets: SmallVec<[Region; 4]>,
 
-    // FIXME(eddyb) this is clunky because it models φ nodes (`OpPhi` in SPIR-V),
-    // replace the CFG setup with stricter structural regions.
-    pub target_inputs: FxIndexMap<Region, SmallVec<[Value; 2]>>,
+    /// The `Value` in `target_merge_outputs[region][output_idx]` is the one
+    /// that `Value::RegionOutput { region, output_idx }` will take on exiting
+    /// `region` (which must be a `RegionKind::UnstructuredMerge`).
+    pub target_merge_outputs: FxIndexMap<Region, SmallVec<[Value; 2]>>,
 }
 
 pub enum ControlInstKind {

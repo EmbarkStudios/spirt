@@ -2,7 +2,7 @@ use crate::{
     cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
     ConstCtor, ConstDef, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor,
+    ModuleDebugInfo, ModuleDialect, RegionDef, RegionKind, RegionOutputDecl, Type, TypeCtor,
     TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
@@ -460,24 +460,26 @@ impl InnerInPlaceTransform for FuncDefBody {
         } = self;
 
         for region in cfg.rev_post_order(*entry) {
-            let RegionDef { inputs, kind } = &mut regions[region];
+            let RegionDef { kind, outputs } = &mut regions[region];
 
-            for input in inputs {
-                input.inner_transform_with(transformer).apply_to(input);
-            }
             match kind {
+                RegionKind::UnstructuredMerge => {}
                 RegionKind::Block { insts } => {
                     for inst in insts {
                         transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
                     }
                 }
             }
+            for output in outputs {
+                output.inner_transform_with(transformer).apply_to(output);
+            }
+
             transformer.in_place_transform_control_inst(&mut cfg.terminators[region]);
         }
     }
 }
 
-impl InnerTransform for RegionInputDecl {
+impl InnerTransform for RegionOutputDecl {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         let Self { attrs, ty } = self;
 
@@ -521,7 +523,7 @@ impl InnerInPlaceTransform for ControlInst {
             kind,
             inputs,
             targets: _,
-            target_inputs,
+            target_merge_outputs,
         } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
@@ -537,8 +539,8 @@ impl InnerInPlaceTransform for ControlInst {
         for v in inputs {
             v.inner_transform_with(transformer).apply_to(v);
         }
-        for target_inputs in target_inputs.values_mut() {
-            for v in target_inputs {
+        for outputs in target_merge_outputs.values_mut() {
+            for v in outputs {
                 v.inner_transform_with(transformer).apply_to(v);
             }
         }
@@ -553,9 +555,9 @@ impl InnerTransform for Value {
             } => Self::Const(ct)),
 
             Self::FuncParam { idx: _ }
-            | Self::RegionInput {
+            | Self::RegionOutput {
                 region: _,
-                input_idx: _,
+                output_idx: _,
             }
             | Self::DataInstOutput(_) => Transformed::Unchanged,
         }

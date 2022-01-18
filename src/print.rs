@@ -1,11 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
-use crate::FxIndexMap;
 use crate::{
     cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
     ConstCtor, ConstDef, Context, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionInputDecl, RegionKind,
-    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Region, RegionDef,
+    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use rustc_hash::FxHashMap;
@@ -92,7 +91,7 @@ enum Use {
     Func(Func),
 
     Region(Region),
-    RegionInput { region: Region, input_idx: u32 },
+    RegionOutput { region: Region, output_idx: u32 },
     DataInstOutput(DataInst),
 }
 
@@ -103,7 +102,7 @@ impl Use {
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
             Self::Region(_) => "region",
-            Self::RegionInput { .. } | Self::DataInstOutput(_) => "v",
+            Self::RegionOutput { .. } | Self::DataInstOutput(_) => "v",
         }
     }
 }
@@ -279,10 +278,10 @@ impl<'a> Visitor<'a> for Plan<'a> {
         match *v {
             Value::Const(_) | Value::FuncParam { .. } => {}
 
-            Value::RegionInput { region, input_idx } => {
+            Value::RegionOutput { region, output_idx } => {
                 *self
                     .use_counts
-                    .entry(Use::RegionInput { region, input_idx })
+                    .entry(Use::RegionOutput { region, output_idx })
                     .or_default() += 1;
             }
             Value::DataInstOutput(inst) => {
@@ -375,7 +374,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::Region(_) | Use::RegionInput { .. } | Use::DataInstOutput(_) = use_kind
+                if let Use::Region(_) | Use::RegionOutput { .. } | Use::DataInstOutput(_) = use_kind
                 {
                     return (use_kind, UseStyle::Inline);
                 }
@@ -430,7 +429,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                             }
                     }
                     Use::GlobalVar(_) | Use::Func(_) => false,
-                    Use::Region(_) | Use::RegionInput { .. } | Use::DataInstOutput(_) => {
+                    Use::Region(_) | Use::RegionOutput { .. } | Use::DataInstOutput(_) => {
                         unreachable!()
                     }
                 };
@@ -444,7 +443,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::Region(_) | Use::RegionInput { .. } | Use::DataInstOutput(_) => {
+                        Use::Region(_) | Use::RegionOutput { .. } | Use::DataInstOutput(_) => {
                             unreachable!()
                         }
                     };
@@ -462,7 +461,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                 let mut value_counter = 0;
 
                 for region in func_def_body.cfg.rev_post_order(func_def_body.entry) {
-                    let RegionDef { inputs, kind } = &func_def_body.regions[region];
+                    let RegionDef { kind, outputs } = &func_def_body.regions[region];
 
                     // FIXME(eddyb) only insert here if the region is actually "used".
                     {
@@ -471,22 +470,20 @@ impl<'a, 'b> Printer<'a, 'b> {
                         use_styles.insert(Use::Region(region), UseStyle::Anon { idx });
                     }
 
-                    let defined_values = inputs
+                    let block_insts = match kind {
+                        RegionKind::UnstructuredMerge => &[][..],
+                        RegionKind::Block { insts } => insts,
+                    };
+
+                    let defined_values = block_insts
                         .iter()
-                        .enumerate()
-                        .map(|(i, _)| Use::RegionInput {
+                        .copied()
+                        .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some())
+                        .map(Use::DataInstOutput)
+                        .chain(outputs.iter().enumerate().map(|(i, _)| Use::RegionOutput {
                             region,
-                            input_idx: i.try_into().unwrap(),
-                        })
-                        .chain(match kind {
-                            RegionKind::Block { insts } => insts
-                                .iter()
-                                .copied()
-                                .filter(|&inst| {
-                                    func_def_body.data_insts[inst].output_type.is_some()
-                                })
-                                .map(Use::DataInstOutput),
-                        });
+                            output_idx: i.try_into().unwrap(),
+                        }));
                     for use_kind in defined_values {
                         if let Some(use_style) = use_styles.get_mut(&use_kind) {
                             let idx = value_counter;
@@ -821,7 +818,7 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::Region(_) | Self::RegionInput { .. } | Self::DataInstOutput(_) => {
+                Self::Region(_) | Self::RegionOutput { .. } | Self::DataInstOutput(_) => {
                     "_".to_string()
                 }
             },
@@ -1486,28 +1483,32 @@ impl Print for FuncDecl {
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
                 for region in cfg.rev_post_order(*entry) {
-                    let RegionDef { inputs, kind } = &regions[region];
+                    let RegionDef { kind, outputs } = &regions[region];
 
                     let mut header = Use::Region(region).print(printer);
-                    if !inputs.is_empty() {
-                        header = printer.pretty_join_comma_sep(
-                            &(header + "("),
-                            inputs.iter().enumerate().map(|(input_idx, input)| {
-                                let AttrsAndDef { attrs, def } = input.print(printer);
-                                attrs
-                                    + &Value::RegionInput {
-                                        region,
-                                        input_idx: input_idx.try_into().unwrap(),
-                                    }
-                                    .print(printer)
-                                    + &def
-                            }),
-                            ",",
-                            ")",
-                        );
+                    if !outputs.is_empty() {
+                        let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
+                            let AttrsAndDef { attrs, def } = output.print(printer);
+                            attrs
+                                + &Value::RegionOutput {
+                                    region,
+                                    output_idx: output_idx.try_into().unwrap(),
+                                }
+                                .print(printer)
+                                + &def
+                        });
+                        let outputs_lhs = if outputs.len() == 1 {
+                            outputs.next().unwrap()
+                        } else {
+                            printer.pretty_join_comma_sep("(", outputs, ",", ")")
+                        };
+                        header = outputs_lhs + " = " + &header;
                     }
-                    writeln!(f, "  {} {{", header)?;
+                    writeln!(f, "  {} {{", header.replace("\n", "\n    "))?;
                     match kind {
+                        RegionKind::UnstructuredMerge => {
+                            writeln!(f, "    /* unstructured merge */")?;
+                        }
                         RegionKind::Block { insts } => {
                             for &inst in insts {
                                 let data_inst_def = &data_insts[inst];
@@ -1566,7 +1567,7 @@ impl Print for FuncParam {
     }
 }
 
-impl Print for RegionInputDecl {
+impl Print for RegionOutputDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self { attrs, ty } = *self;
@@ -1631,7 +1632,7 @@ impl Print for ControlInst {
             kind,
             inputs,
             targets,
-            target_inputs,
+            target_merge_outputs,
         } = self;
 
         let attrs = attrs.print(printer);
@@ -1640,10 +1641,18 @@ impl Print for ControlInst {
             .iter()
             .map(|&region| {
                 let header = format!("=> {}", Use::Region(region).print(printer));
-                match target_inputs.get(&region) {
-                    Some(target_inputs) => printer.pretty_join_comma_sep(
+                match target_merge_outputs.get(&region) {
+                    Some(outputs) => printer.pretty_join_comma_sep(
                         &(header + "("),
-                        target_inputs.iter().map(|v| v.print(printer)),
+                        outputs.iter().enumerate().map(|(output_idx, v)| {
+                            Value::RegionOutput {
+                                region,
+                                output_idx: output_idx.try_into().unwrap(),
+                            }
+                            .print(printer)
+                                + " <- "
+                                + &v.print(printer)
+                        }),
                         ",",
                         ")",
                     ),
@@ -1737,8 +1746,8 @@ impl Print for Value {
         match *self {
             Self::Const(ct) => ct.print(printer),
             Self::FuncParam { idx } => format!("param{}", idx),
-            Self::RegionInput { region, input_idx } => {
-                Use::RegionInput { region, input_idx }.print(printer)
+            Self::RegionOutput { region, output_idx } => {
+                Use::RegionOutput { region, output_idx }.print(printer)
             }
             Self::DataInstOutput(inst) => Use::DataInstOutput(inst).print(printer),
         }

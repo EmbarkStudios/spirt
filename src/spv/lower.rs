@@ -4,18 +4,18 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     cfg::ControlInst, cfg::ControlInstKind, print, AddrSpace, Attr, AttrSet, Const, ConstCtor,
-    ConstDef, Context, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region,
-    RegionDef, RegionInputDecl, RegionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ConstDef, Context, DataInstDef, DataInstKind, DeclDef, EntityDefs, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
+    InternedStr, Module, Region, RegionDef, RegionKind, RegionOutputDecl, Type, TypeCtor,
+    TypeCtorArg, TypeDef, Value,
 };
-use crate::{EntityDefs, FxIndexMap};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
-use std::{io, mem};
+use std::{io, iter, mem};
 
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
@@ -756,8 +756,8 @@ impl Module {
                         let entry = regions.define(
                             &cx,
                             RegionDef {
-                                inputs: SmallVec::new(),
                                 kind: RegionKind::Block { insts: vec![] },
+                                outputs: SmallVec::new(),
                             },
                         );
                         DeclDef::Present(FuncDefBody {
@@ -869,12 +869,22 @@ impl Module {
             struct PhiKey {
                 source_block_id: spv::Id,
                 target_block_id: spv::Id,
-                target_input_idx: u32,
+                target_phi_idx: u32,
             }
 
             struct BlockDetails {
                 label_id: spv::Id,
-                input_count: u32,
+
+                /// For blocks with `OpPhi`s, an additional `Region` is defined
+                /// (a `RegionKind::UnstructuredMerge`), and used as the target
+                /// of incoming CFG edges, in order to have a separate merge point,
+                /// for which `OpPhi`s can be "outputs" instead of "inputs".
+                ///
+                /// In the CFG, this always branches directly to block `Region`.
+                phi_merge_target: Option<Region>,
+
+                // FIXME(eddyb) should this be in the `phi_merge_target` `Option`?
+                phi_count: u32,
             }
 
             // Index IDs declared within the function, first.
@@ -918,8 +928,8 @@ impl Module {
                                     func_def_body.regions.define(
                                         &cx,
                                         RegionDef {
-                                            inputs: SmallVec::new(),
                                             kind: RegionKind::Block { insts: vec![] },
+                                            outputs: SmallVec::new(),
                                         },
                                     )
                                 };
@@ -927,7 +937,8 @@ impl Module {
                                     block,
                                     BlockDetails {
                                         label_id: id,
-                                        input_count: 0,
+                                        phi_merge_target: None,
+                                        phi_count: 0,
                                     },
                                 );
                                 LocalIdDef::BlockLabel(block)
@@ -939,28 +950,54 @@ impl Module {
                                     None => continue,
                                 };
 
-                                let input_idx = block_details.input_count;
-                                block_details.input_count = input_idx.checked_add(1).unwrap();
+                                // If necessary, create the intermediary `Region`
+                                // to serve as a merge point, and add the CFG edge
+                                // from it to the `Region` for the block itself
+                                // (see also doc comment on `phi_merge_target`).
+                                let phi_merge_target =
+                                    *block_details.phi_merge_target.get_or_insert_with(|| {
+                                        let phi_merge_target = func_def_body.regions.define(
+                                            &cx,
+                                            RegionDef {
+                                                kind: RegionKind::UnstructuredMerge,
+                                                outputs: SmallVec::new(),
+                                            },
+                                        );
+                                        func_def_body.cfg.terminators.insert(
+                                            phi_merge_target,
+                                            ControlInst {
+                                                attrs: AttrSet::default(),
+                                                kind: ControlInstKind::Branch,
+                                                inputs: SmallVec::new(),
+                                                targets: iter::once(current_block).collect(),
+                                                target_merge_outputs: FxIndexMap::default(),
+                                            },
+                                        );
+                                        phi_merge_target
+                                    });
+
+                                let phi_idx = block_details.phi_count;
+                                block_details.phi_count = phi_idx.checked_add(1).unwrap();
 
                                 assert!(imms.is_empty());
                                 // FIXME(eddyb) use `array_chunks` when that's stable.
-                                for input_and_source_block_id in raw_inst.ids.chunks(2) {
+                                for value_and_source_block_id in raw_inst.ids.chunks(2) {
                                     let &[value_id, source_block_id]: &[_; 2] =
-                                        input_and_source_block_id.try_into().unwrap();
+                                        value_and_source_block_id.try_into().unwrap();
 
                                     phi_to_values
                                         .entry(PhiKey {
                                             source_block_id,
                                             target_block_id: block_details.label_id,
-                                            target_input_idx: input_idx,
+                                            target_phi_idx: phi_idx,
                                         })
                                         .or_default()
                                         .push(value_id);
                                 }
 
-                                LocalIdDef::Value(Value::RegionInput {
-                                    region: current_block,
-                                    input_idx,
+                                LocalIdDef::Value(Value::RegionOutput {
+                                    region: phi_merge_target,
+                                    output_idx: phi_idx,
                                 })
                             } else {
                                 // HACK(eddyb) can't get a `DataInst` without
@@ -1100,6 +1137,7 @@ impl Module {
                     })?;
                 let current_region_def = &mut func_def_body.regions[current_block_region];
                 let current_block_insts = match &mut current_region_def.kind {
+                    RegionKind::UnstructuredMerge => unreachable!(),
                     RegionKind::Block { insts } => insts,
                 };
 
@@ -1113,11 +1151,11 @@ impl Module {
                         ));
                     }
 
-                    let mut target_inputs = FxIndexMap::default();
+                    let mut target_merge_outputs = FxIndexMap::default();
                     let descr_phi_case = |phi_key: &PhiKey| {
                         format!(
                             "`OpPhi` (#{} in %{})'s case for source block %{}",
-                            phi_key.target_input_idx,
+                            phi_key.target_phi_idx,
                             phi_key.target_block_id,
                             phi_key.source_block_id,
                         )
@@ -1125,32 +1163,41 @@ impl Module {
                     let phi_value_id_to_value = |phi_key: &PhiKey, id| {
                         match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
                             LocalIdDef::Value(v) => Ok(v),
-                            LocalIdDef::BlockLabel(_) => Err(invalid(&format!(
+                            LocalIdDef::BlockLabel { .. } => Err(invalid(&format!(
                                 "unsupported use of block label as the value for {}",
                                 descr_phi_case(phi_key)
                             ))),
                         }
                     };
-                    let mut process_phis_for_edge_to = |target_block| -> io::Result<_> {
+                    let mut process_cfg_edge = |target_block| -> io::Result<_> {
                         use indexmap::map::Entry;
 
                         let target_block_details = &block_details[&target_block];
-                        if target_block_details.input_count == 0 {
-                            return Ok(());
+
+                        // The actual CFG edge might not point to `target_block`,
+                        // but an intermediary created as a merge point for
+                        // `OpPhi`s (see also doc comment on `phi_merge_target`).
+                        let cfg_edge_target = target_block_details
+                            .phi_merge_target
+                            .unwrap_or(target_block);
+
+                        if target_block_details.phi_count == 0 {
+                            return Ok(cfg_edge_target);
                         }
 
-                        let target_inputs_entry = match target_inputs.entry(target_block) {
-                            // Only resolve `OpPhi`s exactly once.
-                            Entry::Occupied(_) => return Ok(()),
-                            Entry::Vacant(entry) => entry,
-                        };
+                        let target_merge_outputs_entry =
+                            match target_merge_outputs.entry(cfg_edge_target) {
+                                // Only resolve `OpPhi`s exactly once.
+                                Entry::Occupied(_) => return Ok(cfg_edge_target),
+                                Entry::Vacant(entry) => entry,
+                            };
 
-                        let target_inputs = (0..target_block_details.input_count)
-                            .map(|target_input_idx| {
+                        let target_merge_outputs = (0..target_block_details.phi_count)
+                            .map(|target_phi_idx| {
                                 let phi_key = PhiKey {
                                     source_block_id: current_block_details.label_id,
                                     target_block_id: target_block_details.label_id,
-                                    target_input_idx,
+                                    target_phi_idx: target_phi_idx,
                                 };
                                 let phi_value_ids =
                                     phi_to_values.remove(&phi_key).unwrap_or_default();
@@ -1169,8 +1216,8 @@ impl Module {
                             })
                             .collect::<Result<_, _>>()?;
 
-                        target_inputs_entry.insert(target_inputs);
-                        Ok(())
+                        target_merge_outputs_entry.insert(target_merge_outputs);
+                        Ok(cfg_edge_target)
                     };
 
                     // Split the operands into value inputs (e.g. a branch's
@@ -1188,9 +1235,9 @@ impl Module {
                                 }
                                 inputs.push(v);
                             }
-                            LocalIdDef::BlockLabel(block) => {
-                                process_phis_for_edge_to(block)?;
-                                targets.push(block);
+                            LocalIdDef::BlockLabel(target) => {
+                                let cfg_edge_target = process_cfg_edge(target)?;
+                                targets.push(cfg_edge_target);
                             }
                         }
                     }
@@ -1226,7 +1273,7 @@ impl Module {
                             kind,
                             inputs,
                             targets,
-                            target_inputs,
+                            target_merge_outputs,
                         },
                     );
                 } else if opcode == wk.OpPhi {
@@ -1236,7 +1283,9 @@ impl Module {
                              the rest of the block's instructions",
                         ));
                     }
-                    current_region_def.inputs.push(RegionInputDecl {
+                    let phi_merge_region_def =
+                        &mut func_def_body.regions[current_block_details.phi_merge_target.unwrap()];
+                    phi_merge_region_def.outputs.push(RegionOutputDecl {
                         attrs,
                         ty: result_type.unwrap(),
                     });
@@ -1334,7 +1383,7 @@ impl Module {
                                 match lookup_global_or_local_id_for_data_or_control_inst_input(id)?
                                 {
                                     LocalIdDef::Value(v) => Ok(v),
-                                    LocalIdDef::BlockLabel(_) => Err(invalid(
+                                    LocalIdDef::BlockLabel { .. } => Err(invalid(
                                         "unsupported use of block label as a value, \
                                          in non-terminator instruction",
                                     )),
@@ -1415,7 +1464,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if !func_def_body.regions[func_def_body.entry].inputs.is_empty() {
+                if block_details[&func_def_body.entry].phi_count > 0 {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(
@@ -1423,9 +1472,6 @@ impl Module {
                         func_id
                     )));
                 }
-
-                // FIXME(eddyb) consider whether to move the whole function's
-                // parameters to the entry block's inputs.
             }
         }
 
