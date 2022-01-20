@@ -3,11 +3,10 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg::ControlInst, cfg::ControlInstKind, print, AddrSpace, Attr, AttrSet, Const, ConstCtor,
-    ConstDef, Context, DataInstDef, DataInstKind, DeclDef, EntityDefs, ExportKey, Exportee, Func,
-    FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
-    InternedStr, Module, Region, RegionDef, RegionKind, RegionOutputDecl, Type, TypeCtor,
-    TypeCtorArg, TypeDef, Value,
+    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, DataInstDef,
+    DataInstKind, DeclDef, EntityDefs, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
+    FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region, RegionDef,
+    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -963,14 +962,20 @@ impl Module {
                                                 outputs: SmallVec::new(),
                                             },
                                         );
-                                        func_def_body.cfg.terminators.insert(
+                                        func_def_body.cfg.control_insts.insert(
                                             phi_merge_target,
-                                            ControlInst {
-                                                attrs: AttrSet::default(),
-                                                kind: ControlInstKind::Branch,
-                                                inputs: SmallVec::new(),
-                                                targets: iter::once(current_block).collect(),
-                                                target_merge_outputs: FxIndexMap::default(),
+                                            cfg::PerEntryAndExit {
+                                                entry: None,
+                                                exit: Some(cfg::ControlInst {
+                                                    attrs: AttrSet::default(),
+                                                    kind: cfg::ControlInstKind::Branch,
+                                                    inputs: SmallVec::new(),
+                                                    targets: iter::once(cfg::ControlPoint::Entry(
+                                                        current_block,
+                                                    ))
+                                                    .collect(),
+                                                    target_merge_outputs: FxIndexMap::default(),
+                                                }),
                                             },
                                         );
                                         phi_merge_target
@@ -1174,50 +1179,54 @@ impl Module {
 
                         let target_block_details = &block_details[&target_block];
 
+                        // NOTE(eddyb) this iterator is only used when actually
+                        // inserting into `target_merge_outputs`, but is defined
+                        // early to avoid nesting all of it further in.
+                        let outputs = (0..target_block_details.phi_count).map(|target_phi_idx| {
+                            let phi_key = PhiKey {
+                                source_block_id: current_block_details.label_id,
+                                target_block_id: target_block_details.label_id,
+                                target_phi_idx: target_phi_idx,
+                            };
+                            let phi_value_ids = phi_to_values.remove(&phi_key).unwrap_or_default();
+
+                            match phi_value_ids[..] {
+                                [] => Err(invalid(&format!(
+                                    "{} is missing",
+                                    descr_phi_case(&phi_key)
+                                ))),
+                                [id] => phi_value_id_to_value(&phi_key, id),
+                                [..] => Err(invalid(&format!(
+                                    "{} is duplicated",
+                                    descr_phi_case(&phi_key)
+                                ))),
+                            }
+                        });
+
                         // The actual CFG edge might not point to `target_block`,
                         // but an intermediary created as a merge point for
                         // `OpPhi`s (see also doc comment on `phi_merge_target`).
-                        let cfg_edge_target = target_block_details
-                            .phi_merge_target
-                            .unwrap_or(target_block);
+                        match target_block_details.phi_merge_target {
+                            Some(phi_merge_target) => {
+                                assert_ne!(target_block_details.phi_count, 0);
 
-                        if target_block_details.phi_count == 0 {
-                            return Ok(cfg_edge_target);
-                        }
-
-                        let target_merge_outputs_entry =
-                            match target_merge_outputs.entry(cfg_edge_target) {
-                                // Only resolve `OpPhi`s exactly once.
-                                Entry::Occupied(_) => return Ok(cfg_edge_target),
-                                Entry::Vacant(entry) => entry,
-                            };
-
-                        let target_merge_outputs = (0..target_block_details.phi_count)
-                            .map(|target_phi_idx| {
-                                let phi_key = PhiKey {
-                                    source_block_id: current_block_details.label_id,
-                                    target_block_id: target_block_details.label_id,
-                                    target_phi_idx: target_phi_idx,
-                                };
-                                let phi_value_ids =
-                                    phi_to_values.remove(&phi_key).unwrap_or_default();
-
-                                match phi_value_ids[..] {
-                                    [] => Err(invalid(&format!(
-                                        "{} is missing",
-                                        descr_phi_case(&phi_key)
-                                    ))),
-                                    [id] => phi_value_id_to_value(&phi_key, id),
-                                    [..] => Err(invalid(&format!(
-                                        "{} is duplicated",
-                                        descr_phi_case(&phi_key)
-                                    ))),
+                                match target_merge_outputs.entry(phi_merge_target) {
+                                    // Only resolve `OpPhi`s exactly once.
+                                    Entry::Occupied(_) => {}
+                                    Entry::Vacant(entry) => {
+                                        entry.insert(outputs.collect::<Result<_, _>>()?);
+                                    }
                                 }
-                            })
-                            .collect::<Result<_, _>>()?;
 
-                        target_merge_outputs_entry.insert(target_merge_outputs);
-                        Ok(cfg_edge_target)
+                                // `RegionKind::UnstructuredMerge` only has an `Exit`
+                                // (see also `cfg::ControlPoint`'s doc comment).
+                                Ok(cfg::ControlPoint::Exit(phi_merge_target))
+                            }
+                            None => {
+                                assert_eq!(target_block_details.phi_count, 0);
+                                Ok(cfg::ControlPoint::Entry(target_block))
+                            }
+                        }
                     };
 
                     // Split the operands into value inputs (e.g. a branch's
@@ -1236,44 +1245,46 @@ impl Module {
                                 inputs.push(v);
                             }
                             LocalIdDef::BlockLabel(target) => {
-                                let cfg_edge_target = process_cfg_edge(target)?;
-                                targets.push(cfg_edge_target);
+                                targets.push(process_cfg_edge(target)?);
                             }
                         }
                     }
 
                     let kind = if opcode == wk.OpUnreachable {
                         assert!(targets.is_empty() && inputs.is_empty());
-                        ControlInstKind::Unreachable
+                        cfg::ControlInstKind::Unreachable
                     } else if [wk.OpReturn, wk.OpReturnValue].contains(&opcode) {
                         assert!(targets.is_empty() && inputs.len() <= 1);
-                        ControlInstKind::Return
+                        cfg::ControlInstKind::Return
                     } else if targets.is_empty() {
-                        ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(
+                        cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(
                             raw_inst.without_ids.clone(),
                         ))
                     } else if opcode == wk.OpBranch {
                         assert_eq!((targets.len(), inputs.len()), (1, 0));
-                        ControlInstKind::Branch
+                        cfg::ControlInstKind::Branch
                     } else if opcode == wk.OpBranchConditional {
                         assert_eq!((targets.len(), inputs.len()), (2, 1));
-                        ControlInstKind::SelectBranch(crate::cfg::SelectionKind::BoolCond)
+                        cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond)
                     } else if opcode == wk.OpSwitch {
-                        ControlInstKind::SelectBranch(crate::cfg::SelectionKind::SpvInst(
+                        cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(
                             raw_inst.without_ids.clone(),
                         ))
                     } else {
                         return Err(invalid("unsupported control-flow instruction"));
                     };
 
-                    func_def_body.cfg.terminators.insert(
+                    func_def_body.cfg.control_insts.insert(
                         current_block_region,
-                        ControlInst {
-                            attrs,
-                            kind,
-                            inputs,
-                            targets,
-                            target_merge_outputs,
+                        cfg::PerEntryAndExit {
+                            entry: None,
+                            exit: Some(cfg::ControlInst {
+                                attrs,
+                                kind,
+                                inputs,
+                                targets,
+                                target_merge_outputs,
+                            }),
                         },
                     );
                 } else if opcode == wk.OpPhi {

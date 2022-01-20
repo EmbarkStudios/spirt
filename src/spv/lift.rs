@@ -3,18 +3,17 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    cfg::ControlInst, cfg::ControlInstKind, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef,
-    Context, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionKind, RegionOutputDecl, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, DataInst, DataInstDef,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet,
+    GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, RegionKind,
+    RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::{io, iter};
+use std::{io, iter, mem};
 
 impl spv::Dialect {
     fn capability_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
@@ -183,26 +182,35 @@ struct AllocatedIds<'a> {
     ext_inst_imports: BTreeMap<&'a str, spv::Id>,
     debug_strings: BTreeMap<&'a str, spv::Id>,
 
+    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
     globals: FxIndexMap<Global, spv::Id>,
-    funcs: FxIndexMap<Func, FuncIds>,
+    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    funcs: FxIndexMap<Func, FuncLifting<'a>>,
 }
 
 // FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
-struct FuncIds {
+struct FuncLifting<'a> {
     func_id: spv::Id,
     param_ids: SmallVec<[spv::Id; 4]>,
-    blocks: FxHashMap<Region, BlockIds>,
+    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
     data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
+    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    label_ids: FxHashMap<cfg::ControlPoint, spv::Id>,
+    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    blocks: FxIndexMap<cfg::ControlPoint, BlockLifting<'a>>,
 }
 
-struct BlockIds {
-    label_id: spv::Id,
+struct BlockLifting<'a> {
     phis: SmallVec<[Phi; 2]>,
+    insts: SmallVec<[&'a [DataInst]; 1]>,
+    terminator: &'a cfg::ControlInst,
 }
 
 struct Phi {
+    output_decl: RegionOutputDecl,
+
     result_id: spv::Id,
-    cases: SmallVec<[(Value, spv::Id); 2]>,
+    cases: SmallVec<[(Value, cfg::ControlPoint); 2]>,
 }
 
 impl<'a> NeedsIdsCollector<'a> {
@@ -236,92 +244,212 @@ impl<'a> NeedsIdsCollector<'a> {
             funcs: funcs
                 .into_iter()
                 .map(|func| {
-                    let func_decl = &module.funcs[func];
-                    let func_def_body = match &func_decl.def {
-                        DeclDef::Imported(_) => None,
-                        DeclDef::Present(def) => Some(def),
-                    };
-
-                    let cfg = func_def_body.into_iter().flat_map(|func_def_body| {
-                        func_def_body
-                            .cfg
-                            .rev_post_order(func_def_body.entry)
-                            .map(|region| (region, &func_def_body.cfg.terminators[region]))
-                    });
-                    let all_insts_with_output =
-                        func_def_body.into_iter().flat_map(|func_def_body| {
-                            func_def_body
-                                .cfg
-                                .rev_post_order(func_def_body.entry)
-                                .flat_map(|region| match &func_def_body.regions[region].kind {
-                                    RegionKind::UnstructuredMerge => &[][..],
-                                    RegionKind::Block { insts, .. } => insts,
-                                })
-                                .copied()
-                                .filter(|&inst| {
-                                    func_def_body.data_insts[inst].output_type.is_some()
-                                })
-                        });
-
-                    let mut blocks: FxHashMap<_, _> = cfg
-                        .clone()
-                        .map(|(region, _)| {
-                            let region_def = &func_def_body.unwrap().regions[region];
-                            let phis = if let RegionKind::UnstructuredMerge = region_def.kind {
-                                // FIXME(eddyb) this works but ends up creating
-                                // merge blocks that only exist to hold `OpPhi`s,
-                                // consider trying to fuse that into an unique
-                                // successor block (when one exists).
-                                region_def
-                                    .outputs
-                                    .iter()
-                                    .map(|_| {
-                                        Ok(Phi {
-                                            result_id: alloc_id()?,
-                                            cases: SmallVec::new(),
-                                        })
-                                    })
-                                    .collect::<Result<_, _>>()?
-                            } else {
-                                SmallVec::new()
-                            };
-                            Ok((
-                                region,
-                                BlockIds {
-                                    label_id: alloc_id()?,
-                                    phis,
-                                },
-                            ))
-                        })
-                        .collect::<Result<_, _>>()?;
-
-                    // Collect phis from other blocks' edges into each block.
-                    for (source_region, control_inst) in cfg {
-                        let source_label_id = blocks[&source_region].label_id;
-
-                        for (&target_block, outputs) in &control_inst.target_merge_outputs {
-                            let target_block_ids = blocks.get_mut(&target_block).unwrap();
-                            for (target_phi, &v) in target_block_ids.phis.iter_mut().zip(outputs) {
-                                target_phi.cases.push((v, source_label_id));
-                            }
-                        }
-                    }
-
-                    let func_ids = FuncIds {
-                        func_id: alloc_id()?,
-                        param_ids: func_decl
-                            .params
-                            .iter()
-                            .map(|_| alloc_id())
-                            .collect::<Result<_, _>>()?,
-                        blocks,
-                        data_inst_output_ids: all_insts_with_output
-                            .map(|inst| Ok((inst, alloc_id()?)))
-                            .collect::<Result<_, _>>()?,
-                    };
-                    Ok((func, func_ids))
+                    Ok((
+                        func,
+                        FuncLifting::from_func_decl(&module.funcs[func], || alloc_id())?,
+                    ))
                 })
                 .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl<'a> FuncLifting<'a> {
+    fn from_func_decl<E>(
+        func_decl: &'a FuncDecl,
+        mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
+    ) -> Result<Self, E> {
+        let func_def_body = match &func_decl.def {
+            DeclDef::Imported(_) => None,
+            DeclDef::Present(def) => Some(def),
+        };
+
+        // Create a SPIR-V block for every CFG point needing one.
+        let mut blocks: FxIndexMap<_, _> = func_def_body
+            .into_iter()
+            .flat_map(|func_def_body| {
+                func_def_body
+                    .cfg
+                    .rev_post_order(cfg::ControlPoint::Entry(func_def_body.entry))
+            })
+            .filter(
+                |point| match func_def_body.unwrap().regions[point.region()].kind {
+                    // Only create a block for the `Entry` point of a
+                    // `RegionKind::Block`, not also its `Exit`.
+                    RegionKind::Block { .. } => {
+                        matches!(point, cfg::ControlPoint::Entry(_))
+                    }
+                    _ => true,
+                },
+            )
+            .map(|point| {
+                let func_def_body = func_def_body.unwrap();
+                let region_def = &func_def_body.regions[point.region()];
+                let phis = if let cfg::ControlPoint::Exit(_) = point {
+                    region_def
+                        .outputs
+                        .iter()
+                        .map(|&output_decl| {
+                            Ok(Phi {
+                                result_id: alloc_id()?,
+                                cases: SmallVec::new(),
+                                output_decl,
+                            })
+                        })
+                        .collect::<Result<_, _>>()?
+                } else {
+                    SmallVec::new()
+                };
+                let (insts, terminator) = match &region_def.kind {
+                    RegionKind::Block { insts } => {
+                        // The terminator of a `RegionKind::Block` is attached
+                        // to its `Exit` point, but as per the `filter` above,
+                        // the block itself is attached to the `Entry` point.
+                        let terminator = func_def_body
+                            .cfg
+                            .control_inst_at(cfg::ControlPoint::Exit(point.region()))
+                            .expect("missing terminator for `RegionKind::Block`");
+
+                        (iter::once(&insts[..]).collect(), terminator)
+                    }
+                    _ => (
+                        SmallVec::new(),
+                        func_def_body
+                            .cfg
+                            .control_inst_at(point)
+                            .expect("missing terminator"),
+                    ),
+                };
+                Ok((
+                    point,
+                    BlockLifting {
+                        phis,
+                        insts,
+                        terminator,
+                    },
+                ))
+            })
+            .collect::<Result<_, _>>()?;
+
+        // Count the number of "uses" of each block (each incoming edge, plus
+        // `1` for the entry block), to help determine which blocks are part
+        // of a linear branch chain (and potentially fusable), later on.
+        //
+        // FIXME(eddyb) also count uses in selection/loop merges, when that
+        // information starts being emitted.
+        // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+        let mut use_counts = FxHashMap::default();
+        use_counts.reserve(blocks.len());
+        if let Some((&entry_point, _)) = blocks.first() {
+            use_counts.insert(entry_point, 1usize);
+        }
+        for block in blocks.values() {
+            for &target in &block.terminator.targets {
+                *use_counts.entry(target).or_default() += 1;
+            }
+        }
+
+        // Fuse chains of linear branches, when there is no information being
+        // lost by the fusion. This is done in reverse order, so that in e.g.
+        // `a -> b -> c`, `b -> c` is fused first, then when the iteration
+        // reaches `a`, it sees `a -> bc` and can further fuse that into one
+        // `abc` block, without knowing about `b` and `c` themselves
+        // (this is possible because RPO will always output `[a, b, c]`, when
+        // `b` and `c` only have one predecessor each).
+        //
+        // HACK(eddyb) this takes advantage of `blocks` being an `IndexMap`,
+        // to iterate at the same time as mutating other entries.
+        for block_idx in (0..blocks.len()).rev() {
+            let BlockLifting {
+                terminator: original_terminator,
+                ..
+            } = blocks[block_idx];
+
+            let is_trivial_branch = {
+                let cfg::ControlInst {
+                    attrs,
+                    kind,
+                    inputs,
+                    targets,
+                    target_merge_outputs,
+                } = original_terminator;
+
+                *attrs == AttrSet::default()
+                    && matches!(kind, cfg::ControlInstKind::Branch)
+                    && inputs.is_empty()
+                    && targets.len() == 1
+                    && target_merge_outputs.is_empty()
+            };
+
+            if is_trivial_branch {
+                let target = original_terminator.targets[0];
+                let target_use_count = use_counts.get_mut(&target).unwrap();
+
+                if *target_use_count == 1 {
+                    let BlockLifting {
+                        phis: ref target_phis,
+                        insts: ref mut extra_insts,
+                        terminator: new_terminator,
+                    } = blocks[&target];
+
+                    // FIXME(eddyb) check for block-level attributes, once/if
+                    // they start being tracked.
+                    if target_phis.is_empty() {
+                        let extra_insts = mem::take(extra_insts);
+                        *target_use_count = 0;
+
+                        let combined_block = &mut blocks[block_idx];
+                        combined_block.insts.extend(extra_insts);
+                        combined_block.terminator = new_terminator;
+                    }
+                }
+            }
+        }
+
+        // Remove now-unused blocks.
+        blocks.retain(|point, _| use_counts[&point] > 0);
+
+        // Collect `OpPhi`s from other blocks' edges into each block.
+        //
+        // HACK(eddyb) this takes advantage of `blocks` being an `IndexMap`,
+        // to iterate at the same time as mutating other entries.
+        for block_idx in 0..blocks.len() {
+            let (&source_point, &BlockLifting { terminator, .. }) =
+                blocks.get_index(block_idx).unwrap();
+
+            for (&target, outputs) in &terminator.target_merge_outputs {
+                let target_block = blocks.get_mut(&cfg::ControlPoint::Exit(target)).unwrap();
+                for (target_phi, &v) in target_block.phis.iter_mut().zip(outputs) {
+                    target_phi.cases.push((v, source_point));
+                }
+            }
+        }
+
+        let all_insts_with_output = blocks
+            .values()
+            .flat_map(|block| block.insts.iter().copied().flatten())
+            .copied()
+            .filter(|&inst| {
+                func_def_body.unwrap().data_insts[inst]
+                    .output_type
+                    .is_some()
+            });
+
+        Ok(Self {
+            func_id: alloc_id()?,
+            param_ids: func_decl
+                .params
+                .iter()
+                .map(|_| alloc_id())
+                .collect::<Result<_, _>>()?,
+            data_inst_output_ids: all_insts_with_output
+                .map(|inst| Ok((inst, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
+            label_ids: blocks
+                .keys()
+                .map(|&point| Ok((point, alloc_id()?)))
+                .collect::<Result<_, _>>()?,
+            blocks: blocks,
         })
     }
 }
@@ -330,7 +458,7 @@ impl<'a> NeedsIdsCollector<'a> {
 /// decorations from attributes, and the instruction itself, without eagerly
 /// allocating all the instructions.
 #[derive(Copy, Clone)]
-enum LazyInst<'a> {
+enum LazyInst<'a, 'b> {
     Global(Global),
     OpFunction {
         func_id: spv::Id,
@@ -344,23 +472,22 @@ enum LazyInst<'a> {
         label_id: spv::Id,
     },
     OpPhi {
-        parent_func_ids: &'a FuncIds,
-        output_decl: &'a RegionOutputDecl,
-        phi: &'a Phi,
+        parent_func: &'b FuncLifting<'a>,
+        phi: &'b Phi,
     },
     DataInst {
-        parent_func_ids: &'a FuncIds,
+        parent_func: &'b FuncLifting<'a>,
         result_id: Option<spv::Id>,
         data_inst_def: &'a DataInstDef,
     },
     ControlInst {
-        parent_func_ids: &'a FuncIds,
-        control_inst: &'a ControlInst,
+        parent_func: &'b FuncLifting<'a>,
+        control_inst: &'a cfg::ControlInst,
     },
     OpFunctionEnd,
 }
 
-impl LazyInst<'_> {
+impl LazyInst<'_, '_> {
     fn result_id_attrs_and_import(
         self,
         module: &Module,
@@ -399,17 +526,16 @@ impl LazyInst<'_> {
             Self::OpFunctionParameter { param_id, param } => (Some(param_id), param.attrs, None),
             Self::OpLabel { label_id } => (Some(label_id), AttrSet::default(), None),
             Self::OpPhi {
-                parent_func_ids: _,
-                output_decl,
+                parent_func: _,
                 phi,
-            } => (Some(phi.result_id), output_decl.attrs, None),
+            } => (Some(phi.result_id), phi.output_decl.attrs, None),
             Self::DataInst {
-                parent_func_ids: _,
+                parent_func: _,
                 result_id,
                 data_inst_def,
             } => (result_id, data_inst_def.attrs, None),
             Self::ControlInst {
-                parent_func_ids: _,
+                parent_func: _,
                 control_inst,
             } => (None, control_inst.attrs, None),
             Self::OpFunctionEnd => (None, AttrSet::default(), None),
@@ -420,13 +546,15 @@ impl LazyInst<'_> {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
 
-        let value_to_id = |parent_func_ids: &FuncIds, v| match v {
+        let value_to_id = |parent_func: &FuncLifting, v| match v {
             Value::Const(ct) => ids.globals[&Global::Const(ct)],
-            Value::FuncParam { idx } => parent_func_ids.param_ids[usize::try_from(idx).unwrap()],
+            Value::FuncParam { idx } => parent_func.param_ids[usize::try_from(idx).unwrap()],
             Value::RegionOutput { region, output_idx } => {
-                parent_func_ids.blocks[&region].phis[usize::try_from(output_idx).unwrap()].result_id
+                parent_func.blocks[&cfg::ControlPoint::Exit(region)].phis
+                    [usize::try_from(output_idx).unwrap()]
+                .result_id
             }
-            Value::DataInstOutput(inst) => parent_func_ids.data_inst_output_ids[&inst],
+            Value::DataInstOutput(inst) => parent_func.data_inst_output_ids[&inst],
         };
 
         let (result_id, attrs, _) = self.result_id_attrs_and_import(module, ids);
@@ -539,24 +667,23 @@ impl LazyInst<'_> {
                 result_id,
                 ids: [].into_iter().collect(),
             },
-            Self::OpPhi {
-                parent_func_ids,
-                output_decl,
-                phi,
-            } => spv::InstWithIds {
+            Self::OpPhi { parent_func, phi } => spv::InstWithIds {
                 without_ids: wk.OpPhi.into(),
-                result_type_id: Some(ids.globals[&Global::Type(output_decl.ty)]),
+                result_type_id: Some(ids.globals[&Global::Type(phi.output_decl.ty)]),
                 result_id: Some(phi.result_id),
                 ids: phi
                     .cases
                     .iter()
-                    .flat_map(|&(v, source_block_id)| {
-                        [value_to_id(parent_func_ids, v), source_block_id]
+                    .flat_map(|&(v, source_point)| {
+                        [
+                            value_to_id(parent_func, v),
+                            parent_func.label_ids[&source_point],
+                        ]
                     })
                     .collect(),
             },
             Self::DataInst {
-                parent_func_ids,
+                parent_func,
                 result_id: _,
                 data_inst_def,
             } => {
@@ -586,34 +713,34 @@ impl LazyInst<'_> {
                             data_inst_def
                                 .inputs
                                 .iter()
-                                .map(|&v| value_to_id(parent_func_ids, v)),
+                                .map(|&v| value_to_id(parent_func, v)),
                         )
                         .collect(),
                 }
             }
             Self::ControlInst {
-                parent_func_ids,
+                parent_func,
                 control_inst,
             } => {
                 let inst = match &control_inst.kind {
-                    ControlInstKind::Unreachable => wk.OpUnreachable.into(),
-                    ControlInstKind::Return => {
+                    cfg::ControlInstKind::Unreachable => wk.OpUnreachable.into(),
+                    cfg::ControlInstKind::Return => {
                         if control_inst.inputs.is_empty() {
                             wk.OpReturn.into()
                         } else {
                             wk.OpReturnValue.into()
                         }
                     }
-                    ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(
+                    cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(
                         inst,
                     )) => inst.clone(),
 
-                    ControlInstKind::Branch => wk.OpBranch.into(),
+                    cfg::ControlInstKind::Branch => wk.OpBranch.into(),
 
-                    ControlInstKind::SelectBranch(crate::cfg::SelectionKind::BoolCond) => {
+                    cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond) => {
                         wk.OpBranchConditional.into()
                     }
-                    ControlInstKind::SelectBranch(crate::cfg::SelectionKind::SpvInst(inst)) => {
+                    cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(inst)) => {
                         inst.clone()
                     }
                 };
@@ -624,12 +751,12 @@ impl LazyInst<'_> {
                     ids: control_inst
                         .inputs
                         .iter()
-                        .map(|&v| value_to_id(parent_func_ids, v))
+                        .map(|&v| value_to_id(parent_func, v))
                         .chain(
                             control_inst
                                 .targets
                                 .iter()
-                                .map(|&region| parent_func_ids.blocks[&region].label_id),
+                                .map(|&target| parent_func.label_ids[&target]),
                         )
                         .collect(),
                 }
@@ -730,7 +857,7 @@ impl Module {
                 .keys()
                 .copied()
                 .map(LazyInst::Global)
-                .chain(ids.funcs.iter().flat_map(|(&func, func_ids)| {
+                .chain(ids.funcs.iter().flat_map(|(&func, func_lifting)| {
                     let func_decl = &self.funcs[func];
                     let func_def_body = match &func_decl.def {
                         DeclDef::Imported(_) => None,
@@ -738,62 +865,41 @@ impl Module {
                     };
 
                     iter::once(LazyInst::OpFunction {
-                        func_id: func_ids.func_id,
+                        func_id: func_lifting.func_id,
                         func_decl,
                     })
-                    .chain(func_ids.param_ids.iter().zip(&func_decl.params).map(
+                    .chain(func_lifting.param_ids.iter().zip(&func_decl.params).map(
                         |(&param_id, param)| LazyInst::OpFunctionParameter { param_id, param },
                     ))
-                    .chain(func_def_body.into_iter().flat_map(move |func_def_body| {
-                        let FuncDefBody {
-                            data_insts,
-                            regions,
-                            entry,
-                            cfg,
-                        } = func_def_body;
+                    .chain(func_lifting.blocks.iter().flat_map(move |(point, block)| {
+                        let BlockLifting {
+                            phis,
+                            insts,
+                            terminator,
+                        } = block;
 
-                        cfg.rev_post_order(*entry).flat_map(move |block| {
-                            let &BlockIds { label_id, ref phis } = &func_ids.blocks[&block];
-                            let RegionDef { kind, outputs } = &regions[block];
-
-                            let phi_lazy_insts = if let RegionKind::UnstructuredMerge = kind {
-                                // FIXME(eddyb) this works but ends up creating
-                                // merge blocks that only exist to hold `OpPhi`s,
-                                // consider trying to fuse that into an unique
-                                // successor block (when one exists).
-                                Some(outputs.iter().zip(phis).map(|(output_decl, phi)| {
-                                    LazyInst::OpPhi {
-                                        parent_func_ids: func_ids,
-                                        output_decl,
-                                        phi,
-                                    }
-                                }))
-                            } else {
-                                None
-                            };
-
-                            let block_insts = match kind {
-                                RegionKind::UnstructuredMerge => &[][..],
-                                RegionKind::Block { insts } => insts,
-                            };
-
-                            iter::once(LazyInst::OpLabel { label_id })
-                                .chain(phi_lazy_insts.into_iter().flatten())
-                                .chain(block_insts.iter().map(move |&inst| {
-                                    let data_inst_def = &data_insts[inst];
-                                    LazyInst::DataInst {
-                                        parent_func_ids: func_ids,
-                                        result_id: data_inst_def
-                                            .output_type
-                                            .map(|_| func_ids.data_inst_output_ids[&inst]),
-                                        data_inst_def,
-                                    }
-                                }))
-                                .chain([LazyInst::ControlInst {
-                                    parent_func_ids: func_ids,
-                                    control_inst: &cfg.terminators[block],
-                                }])
+                        let func_def_body = func_def_body.unwrap();
+                        iter::once(LazyInst::OpLabel {
+                            label_id: func_lifting.label_ids[&point],
                         })
+                        .chain(phis.iter().map(|phi| LazyInst::OpPhi {
+                            parent_func: func_lifting,
+                            phi,
+                        }))
+                        .chain(insts.iter().copied().flatten().map(move |&inst| {
+                            let data_inst_def = &func_def_body.data_insts[inst];
+                            LazyInst::DataInst {
+                                parent_func: func_lifting,
+                                result_id: data_inst_def
+                                    .output_type
+                                    .map(|_| func_lifting.data_inst_output_ids[&inst]),
+                                data_inst_def,
+                            }
+                        }))
+                        .chain([LazyInst::ControlInst {
+                            parent_func: func_lifting,
+                            control_inst: terminator,
+                        }])
                     }))
                     .chain([LazyInst::OpFunctionEnd])
                 }));

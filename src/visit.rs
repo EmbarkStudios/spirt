@@ -1,9 +1,8 @@
 use crate::{
-    cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
-    ConstCtor, ConstDef, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, RegionDef, RegionKind, RegionOutputDecl, Type, TypeCtor,
-    TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, DataInstDef,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
+    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, RegionDef,
+    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -53,9 +52,6 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_data_inst_def(&mut self, data_inst_def: &'a DataInstDef) {
         data_inst_def.inner_visit_with(self);
-    }
-    fn visit_control_inst(&mut self, control_inst: &'a ControlInst) {
-        control_inst.inner_visit_with(self);
     }
     fn visit_value_use(&mut self, v: &'a Value) {
         v.inner_visit_with(self);
@@ -279,22 +275,30 @@ impl InnerVisit for FuncDefBody {
             cfg,
         } = self;
 
-        for region in cfg.rev_post_order(*entry) {
-            let RegionDef { kind, outputs } = &regions[region];
+        for point in cfg.rev_post_order(cfg::ControlPoint::Entry(*entry)) {
+            let RegionDef { kind, outputs } = &regions[point.region()];
 
-            match kind {
-                RegionKind::UnstructuredMerge => {}
-                RegionKind::Block { insts } => {
-                    for &inst in insts {
-                        visitor.visit_data_inst_def(&data_insts[inst]);
+            // HACK(eddyb) handle most of the region on `Entry`, but the outputs
+            // on `Exit` instead, to account for `RegionKind::UnstructuredMerge`.
+            match point {
+                cfg::ControlPoint::Entry(_) => match kind {
+                    RegionKind::UnstructuredMerge => unreachable!(),
+                    RegionKind::Block { insts } => {
+                        for &inst in insts {
+                            visitor.visit_data_inst_def(&data_insts[inst]);
+                        }
+                    }
+                },
+                cfg::ControlPoint::Exit(_) => {
+                    for output in outputs {
+                        output.inner_visit_with(visitor);
                     }
                 }
             }
-            for output in outputs {
-                output.inner_visit_with(visitor);
-            }
 
-            visitor.visit_control_inst(&cfg.terminators[region]);
+            if let Some(control_inst) = cfg.control_inst_at(point) {
+                control_inst.inner_visit_with(visitor);
+            }
         }
     }
 }
@@ -331,7 +335,7 @@ impl InnerVisit for DataInstDef {
     }
 }
 
-impl InnerVisit for ControlInst {
+impl InnerVisit for cfg::ControlInst {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             attrs,
@@ -343,12 +347,12 @@ impl InnerVisit for ControlInst {
 
         visitor.visit_attr_set_use(*attrs);
         match kind {
-            ControlInstKind::Unreachable
-            | ControlInstKind::Return
-            | ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(_))
-            | ControlInstKind::Branch
-            | ControlInstKind::SelectBranch(
-                crate::cfg::SelectionKind::BoolCond | crate::cfg::SelectionKind::SpvInst(_),
+            cfg::ControlInstKind::Unreachable
+            | cfg::ControlInstKind::Return
+            | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
+            | cfg::ControlInstKind::Branch
+            | cfg::ControlInstKind::SelectBranch(
+                cfg::SelectionKind::BoolCond | cfg::SelectionKind::SpvInst(_),
             ) => {}
         }
         for v in inputs {

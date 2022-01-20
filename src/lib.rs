@@ -265,11 +265,32 @@ pub struct FuncDefBody {
     pub cfg: cfg::ControlFlowGraph,
 }
 
+/// A control-flow "region" is a self-contained single-entry single-exit (SESE)
+/// subgraph of the control-flow graph (CFG) of a function, with child regions
+/// only appearing exactly once, and no mechanism for leaving the region and
+/// continuing to execute the parent function (or any other on the call stack),
+/// without going through its single exit (or "merge") point.
+///
+/// When the entire body of a function is effectively a whole such "region",
+/// that function is said to have (entirely) "structured control-flow".
+///
+/// Note that this may differ from other "structured control-flow" definitions,
+/// in particular SPIR-V uses a laxer definition, that corresponds more to the
+/// constraints of the GLSL language, and is single-entry multiple-exit (SEME)
+/// with "alternate exits" consisting of `break`s out of `switch`es and loops,
+/// and `return`s (making it non-trivial to inline one function into another).
+///
+/// In SPIR-T, unstructured control-flow is represented with a separate CFG
+/// (i.e. a `cfg::ControlFlowGraph`) connecting regions together, and primarily
+/// exists as an intermediary state during lowering to structured regions.
+//
+// FIXME(eddyb) fully implement CFG structurization.
 pub struct RegionDef {
     pub kind: RegionKind,
     pub outputs: SmallVec<[RegionOutputDecl; 2]>,
 }
 
+#[derive(Copy, Clone)]
 pub struct RegionOutputDecl {
     pub attrs: AttrSet,
 

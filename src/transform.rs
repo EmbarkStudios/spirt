@@ -1,9 +1,8 @@
 use crate::{
-    cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
-    ConstCtor, ConstDef, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, RegionDef, RegionKind, RegionOutputDecl, Type, TypeCtor,
-    TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, DataInstDef,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
+    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, RegionDef,
+    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -183,9 +182,6 @@ pub trait Transformer: Sized {
     }
     fn in_place_transform_data_inst_def(&mut self, data_inst_def: &mut DataInstDef) {
         data_inst_def.inner_in_place_transform_with(self);
-    }
-    fn in_place_transform_control_inst(&mut self, control_inst: &mut ControlInst) {
-        control_inst.inner_in_place_transform_with(self);
     }
 }
 
@@ -459,22 +455,30 @@ impl InnerInPlaceTransform for FuncDefBody {
             cfg,
         } = self;
 
-        for region in cfg.rev_post_order(*entry) {
-            let RegionDef { kind, outputs } = &mut regions[region];
+        for point in cfg.rev_post_order(cfg::ControlPoint::Entry(*entry)) {
+            let RegionDef { kind, outputs } = &mut regions[point.region()];
 
-            match kind {
-                RegionKind::UnstructuredMerge => {}
-                RegionKind::Block { insts } => {
-                    for inst in insts {
-                        transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
+            // HACK(eddyb) handle most of the region on `Entry`, but the outputs
+            // on `Exit` instead, to account for `RegionKind::UnstructuredMerge`.
+            match point {
+                cfg::ControlPoint::Entry(_) => match kind {
+                    RegionKind::UnstructuredMerge => {}
+                    RegionKind::Block { insts } => {
+                        for inst in insts {
+                            transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
+                        }
+                    }
+                },
+                cfg::ControlPoint::Exit(_) => {
+                    for output in outputs {
+                        output.inner_transform_with(transformer).apply_to(output);
                     }
                 }
             }
-            for output in outputs {
-                output.inner_transform_with(transformer).apply_to(output);
-            }
 
-            transformer.in_place_transform_control_inst(&mut cfg.terminators[region]);
+            if let Some(control_inst) = cfg.control_inst_mut_at(point) {
+                control_inst.inner_in_place_transform_with(transformer);
+            }
         }
     }
 }
@@ -516,7 +520,7 @@ impl InnerInPlaceTransform for DataInstDef {
     }
 }
 
-impl InnerInPlaceTransform for ControlInst {
+impl InnerInPlaceTransform for cfg::ControlInst {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         let Self {
             attrs,
@@ -528,12 +532,12 @@ impl InnerInPlaceTransform for ControlInst {
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
-            ControlInstKind::Unreachable
-            | ControlInstKind::Return
-            | ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(_))
-            | ControlInstKind::Branch
-            | ControlInstKind::SelectBranch(
-                crate::cfg::SelectionKind::BoolCond | crate::cfg::SelectionKind::SpvInst(_),
+            cfg::ControlInstKind::Unreachable
+            | cfg::ControlInstKind::Return
+            | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
+            | cfg::ControlInstKind::Branch
+            | cfg::ControlInstKind::SelectBranch(
+                cfg::SelectionKind::BoolCond | cfg::SelectionKind::SpvInst(_),
             ) => {}
         }
         for v in inputs {

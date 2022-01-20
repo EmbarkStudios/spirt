@@ -1,10 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    cfg::ControlInst, cfg::ControlInstKind, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const,
-    ConstCtor, ConstDef, Context, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Region, RegionDef,
-    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, DataInst,
+    DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
+    FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionKind, RegionOutputDecl, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use rustc_hash::FxHashMap;
@@ -460,10 +460,24 @@ impl<'a, 'b> Printer<'a, 'b> {
                 let mut region_counter = 0;
                 let mut value_counter = 0;
 
-                for region in func_def_body.cfg.rev_post_order(func_def_body.entry) {
+                for point in func_def_body
+                    .cfg
+                    .rev_post_order(cfg::ControlPoint::Entry(func_def_body.entry))
+                {
+                    let region = point.region();
                     let RegionDef { kind, outputs } = &func_def_body.regions[region];
 
-                    // FIXME(eddyb) only insert here if the region is actually "used".
+                    // Only handle each `Region` once.
+                    if let cfg::ControlPoint::Exit(_) = point {
+                        match kind {
+                            // `RegionKind::UnstructuredMerge` only has an `Exit`
+                            // (see also `cfg::ControlPoint`'s doc comment).
+                            RegionKind::UnstructuredMerge => {}
+
+                            _ => continue,
+                        }
+                    }
+
                     {
                         let idx = region_counter;
                         region_counter += 1;
@@ -1482,8 +1496,20 @@ impl Print for FuncDecl {
                 cfg,
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for region in cfg.rev_post_order(*entry) {
+                for point in cfg.rev_post_order(cfg::ControlPoint::Entry(*entry)) {
+                    let region = point.region();
                     let RegionDef { kind, outputs } = &regions[region];
+
+                    // Only handle each `Region` once.
+                    if let cfg::ControlPoint::Exit(_) = point {
+                        match kind {
+                            // `RegionKind::UnstructuredMerge` only has an `Exit`
+                            // (see also `cfg::ControlPoint`'s doc comment).
+                            RegionKind::UnstructuredMerge => {}
+
+                            _ => continue,
+                        }
+                    }
 
                     let mut header = Use::Region(region).print(printer);
                     if !outputs.is_empty() {
@@ -1534,13 +1560,14 @@ impl Print for FuncDecl {
                             }
                         }
                     }
-                    writeln!(
-                        f,
-                        "    {}",
-                        cfg.terminators[region]
-                            .print(printer)
-                            .replace("\n", "\n    ")
-                    )?;
+                    if let Some(control_inst) = cfg.control_inst_at(cfg::ControlPoint::Exit(region))
+                    {
+                        writeln!(
+                            f,
+                            "    {}",
+                            control_inst.print(printer).replace("\n", "\n    ")
+                        )?;
+                    }
                     writeln!(f, "  }}")?;
                 }
                 write!(f, "}}")
@@ -1624,7 +1651,7 @@ impl Print for DataInstDef {
     }
 }
 
-impl Print for ControlInst {
+impl Print for cfg::ControlInst {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         let Self {
@@ -1639,34 +1666,37 @@ impl Print for ControlInst {
 
         let mut targets: SmallVec<[_; 4]> = targets
             .iter()
-            .map(|&region| {
-                let header = format!("=> {}", Use::Region(region).print(printer));
-                match target_merge_outputs.get(&region) {
-                    Some(outputs) => printer.pretty_join_comma_sep(
-                        &(header + "("),
-                        outputs.iter().enumerate().map(|(output_idx, v)| {
-                            Value::RegionOutput {
-                                region,
-                                output_idx: output_idx.try_into().unwrap(),
-                            }
-                            .print(printer)
-                                + " <- "
-                                + &v.print(printer)
-                        }),
-                        ",",
-                        ")",
-                    ),
-                    None => header,
+            .map(|&point| {
+                let mut target = format!("=> {}", Use::Region(point.region()).print(printer));
+                if let cfg::ControlPoint::Exit(region) = point {
+                    target += ".exit";
+                    if let Some(outputs) = target_merge_outputs.get(&region) {
+                        target = printer.pretty_join_comma_sep(
+                            &(target + "("),
+                            outputs.iter().enumerate().map(|(output_idx, v)| {
+                                Value::RegionOutput {
+                                    region,
+                                    output_idx: output_idx.try_into().unwrap(),
+                                }
+                                .print(printer)
+                                    + " <- "
+                                    + &v.print(printer)
+                            }),
+                            ",",
+                            ")",
+                        );
+                    }
                 }
+                target
             })
             .collect();
 
         let def = match *kind {
-            ControlInstKind::Unreachable => {
+            cfg::ControlInstKind::Unreachable => {
                 assert!(targets.is_empty() && inputs.is_empty());
                 "unreachable".to_string()
             }
-            ControlInstKind::Return => {
+            cfg::ControlInstKind::Return => {
                 assert!(targets.is_empty());
                 match inputs[..] {
                     [] => "return".to_string(),
@@ -1674,19 +1704,20 @@ impl Print for ControlInst {
                     _ => unreachable!(),
                 }
             }
-            ControlInstKind::ExitInvocation(crate::cfg::ExitInvocationKind::SpvInst(
-                spv::Inst { opcode, ref imms },
-            )) => {
+            cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(spv::Inst {
+                opcode,
+                ref imms,
+            })) => {
                 assert!(targets.is_empty());
                 printer.pretty_spv_inst(opcode, imms, inputs, Print::print, None)
             }
 
-            ControlInstKind::Branch => {
+            cfg::ControlInstKind::Branch => {
                 assert_eq!((targets.len(), inputs.len()), (1, 0));
                 format!("branch {}", targets[0])
             }
 
-            ControlInstKind::SelectBranch(crate::cfg::SelectionKind::BoolCond) => {
+            cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond) => {
                 assert_eq!((targets.len(), inputs.len()), (2, 1));
 
                 // FIXME(eddyb) automate reindenting (and make it configurable).
@@ -1701,7 +1732,7 @@ impl Print for ControlInst {
                     targets[1]
                 )
             }
-            ControlInstKind::SelectBranch(crate::cfg::SelectionKind::SpvInst(spv::Inst {
+            cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(spv::Inst {
                 opcode,
                 ref imms,
             })) => {
