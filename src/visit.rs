@@ -296,7 +296,7 @@ impl InnerVisit for FuncDefBody {
                 }
             }
 
-            if let Some(control_inst) = cfg.control_inst_at(point) {
+            if let Some(control_inst) = cfg.control_insts.get(point) {
                 control_inst.inner_visit_with(visitor);
             }
         }

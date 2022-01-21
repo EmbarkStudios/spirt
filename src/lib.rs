@@ -8,8 +8,8 @@ type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_h
 
 mod context;
 pub use context::{
-    AttrSet, Const, Context, DataInst, EntityDefs, EntityKeyedDenseMap, Func, GlobalVar,
-    InternedStr, Region, Type,
+    AttrSet, Const, Context, DataInst, EntityDefs, EntityOrientedDenseMap, EntityOrientedMapKey,
+    Func, GlobalVar, InternedStr, Region, Type,
 };
 
 pub mod cfg;

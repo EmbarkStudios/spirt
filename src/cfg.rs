@@ -1,33 +1,18 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
-use crate::{spv, AttrSet, EntityKeyedDenseMap, FxIndexMap, Region, Value};
+use crate::{
+    spv, AttrSet, EntityOrientedDenseMap, EntityOrientedMapKey, FxIndexMap, Region, Value,
+};
 use smallvec::SmallVec;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
 /// (`ControlInst`s) attached to region-relative CFG points (`ControlPoint`s).
 #[derive(Default)]
 pub struct ControlFlowGraph {
-    /// Effectively a `Map<ControlPoint, ControlInst>`, with efficient storage.
-    pub control_insts: EntityKeyedDenseMap<Region, PerEntryAndExit<Option<ControlInst>>>,
+    pub control_insts: EntityOrientedDenseMap<ControlPoint, ControlInst>,
 }
 
 impl ControlFlowGraph {
-    pub fn control_inst_at(&self, point: ControlPoint) -> Option<&ControlInst> {
-        let both = self.control_insts.get(point.region())?;
-        match point {
-            ControlPoint::Entry(_) => both.entry.as_ref(),
-            ControlPoint::Exit(_) => both.exit.as_ref(),
-        }
-    }
-
-    pub fn control_inst_mut_at(&mut self, point: ControlPoint) -> Option<&mut ControlInst> {
-        let both = self.control_insts.get_mut(point.region())?;
-        match point {
-            ControlPoint::Entry(_) => both.entry.as_mut(),
-            ControlPoint::Exit(_) => both.exit.as_mut(),
-        }
-    }
-
     /// Iterate over all `ControlPoint`s reachable through the CFG, starting at
     /// `entry`, in reverse post-order (RPO).
     ///
@@ -45,10 +30,7 @@ impl ControlFlowGraph {
     pub fn post_order(&self, entry: ControlPoint) -> impl DoubleEndedIterator<Item = ControlPoint> {
         let mut post_order = SmallVec::<[_; 8]>::new();
         {
-            let mut visited = PerEntryAndExit {
-                entry: EntityKeyedDenseMap::new(),
-                exit: EntityKeyedDenseMap::new(),
-            };
+            let mut visited = EntityOrientedDenseMap::new();
             self.post_order_step(entry, &mut visited, &mut post_order);
         }
 
@@ -58,22 +40,16 @@ impl ControlFlowGraph {
     fn post_order_step(
         &self,
         point: ControlPoint,
-        // FIXME(eddyb) use dense entity-keyed bitsets here instead.
-        visited: &mut PerEntryAndExit<EntityKeyedDenseMap<Region, ()>>,
+        // FIXME(eddyb) use a dense entity-oriented bitset here instead.
+        visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
         post_order: &mut SmallVec<[ControlPoint; 8]>,
     ) {
-        let already_visited = {
-            let visited = match point {
-                ControlPoint::Entry(_) => &mut visited.entry,
-                ControlPoint::Exit(_) => &mut visited.exit,
-            };
-            visited.insert(point.region(), ()).is_some()
-        };
+        let already_visited = visited.insert(point, ()).is_some();
         if already_visited {
             return;
         }
 
-        if let Some(control_inst) = self.control_inst_at(point) {
+        if let Some(control_inst) = self.control_insts.get(point) {
             for &target in &control_inst.targets {
                 self.post_order_step(target, visited, post_order);
             }
@@ -117,9 +93,25 @@ impl ControlPoint {
     }
 }
 
-pub struct PerEntryAndExit<T> {
-    pub entry: T,
-    pub exit: T,
+impl<V> EntityOrientedMapKey<V> for ControlPoint {
+    type Entity = Region;
+    fn to_entity(point: Self) -> Region {
+        point.region()
+    }
+
+    type DenseValueSlots = [Option<V>; 2];
+    fn get_dense_value_slot(point: Self, [entry, exit]: &[Option<V>; 2]) -> &Option<V> {
+        match point {
+            Self::Entry(_) => entry,
+            Self::Exit(_) => exit,
+        }
+    }
+    fn get_dense_value_slot_mut(point: Self, [entry, exit]: &mut [Option<V>; 2]) -> &mut Option<V> {
+        match point {
+            Self::Entry(_) => entry,
+            Self::Exit(_) => exit,
+        }
+    }
 }
 
 pub struct ControlInst {

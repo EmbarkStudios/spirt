@@ -476,7 +476,7 @@ impl InnerInPlaceTransform for FuncDefBody {
                 }
             }
 
-            if let Some(control_inst) = cfg.control_inst_mut_at(point) {
+            if let Some(control_inst) = cfg.control_insts.get_mut(point) {
                 control_inst.inner_in_place_transform_with(transformer);
             }
         }

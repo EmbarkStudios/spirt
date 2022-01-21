@@ -182,9 +182,9 @@ struct AllocatedIds<'a> {
     ext_inst_imports: BTreeMap<&'a str, spv::Id>,
     debug_strings: BTreeMap<&'a str, spv::Id>,
 
-    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     globals: FxIndexMap<Global, spv::Id>,
-    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     funcs: FxIndexMap<Func, FuncLifting<'a>>,
 }
 
@@ -192,11 +192,11 @@ struct AllocatedIds<'a> {
 struct FuncLifting<'a> {
     func_id: spv::Id,
     param_ids: SmallVec<[spv::Id; 4]>,
-    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
-    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     label_ids: FxHashMap<cfg::ControlPoint, spv::Id>,
-    // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here (modulo iteration?).
     blocks: FxIndexMap<cfg::ControlPoint, BlockLifting<'a>>,
 }
 
@@ -307,7 +307,8 @@ impl<'a> FuncLifting<'a> {
                         // the block itself is attached to the `Entry` point.
                         let terminator = func_def_body
                             .cfg
-                            .control_inst_at(cfg::ControlPoint::Exit(point.region()))
+                            .control_insts
+                            .get(cfg::ControlPoint::Exit(point.region()))
                             .expect("missing terminator for `RegionKind::Block`");
 
                         (iter::once(&insts[..]).collect(), terminator)
@@ -316,7 +317,8 @@ impl<'a> FuncLifting<'a> {
                         SmallVec::new(),
                         func_def_body
                             .cfg
-                            .control_inst_at(point)
+                            .control_insts
+                            .get(point)
                             .expect("missing terminator"),
                     ),
                 };
@@ -337,7 +339,7 @@ impl<'a> FuncLifting<'a> {
         //
         // FIXME(eddyb) also count uses in selection/loop merges, when that
         // information starts being emitted.
-        // FIXME(eddyb) use `EntityKeyedDenseMap` here.
+        // FIXME(eddyb) use `EntityOrientedDenseMap` here.
         let mut use_counts = FxHashMap::default();
         use_counts.reserve(blocks.len());
         if let Some((&entry_point, _)) = blocks.first() {

@@ -121,6 +121,7 @@ mod sealed {
         }
     }
 }
+use sealed::Entity as _;
 
 /// Dispatch helper, to allow implementing interning logic on
 /// the type passed to `cx.intern(...)`.
@@ -251,21 +252,56 @@ impl<E: sealed::Entity> std::ops::IndexMut<E> for EntityDefs<E> {
     }
 }
 
-/// Map with `E` (entity) keys and `V` values, that is "dense" in the sense of
-/// few (or no) missing entries, relative to the corresponding `EntityDefs`.
+/// `EntityOriented*Map<Self, V>` support trait, implemented for entity types,
+/// but which can also be implemented by users for their own newtypes and other
+/// types wrapping entity types (such as finite `enum`s).
+pub trait EntityOrientedMapKey<V>: Copy {
+    /// The entity type that appears exactly once in every value of `Self`.
+    type Entity: sealed::Entity;
+    fn to_entity(key: Self) -> Self::Entity;
+
+    /// A type holding enough different `Option<V>` slots, for all possible
+    /// values of `Self`, for a given `Self::Entity` value contained inside.
+    //
+    // FIXME(eddyb) consider making this just an array length?
+    type DenseValueSlots: Default;
+    fn get_dense_value_slot(key: Self, slots: &Self::DenseValueSlots) -> &Option<V>;
+    fn get_dense_value_slot_mut(key: Self, slots: &mut Self::DenseValueSlots) -> &mut Option<V>;
+}
+
+impl<E: sealed::Entity, V> EntityOrientedMapKey<V> for E {
+    type Entity = E;
+    fn to_entity(key: E) -> E {
+        key
+    }
+
+    type DenseValueSlots = Option<V>;
+    fn get_dense_value_slot(_: Self, slot: &Option<V>) -> &Option<V> {
+        slot
+    }
+    fn get_dense_value_slot_mut(_: Self, slot: &mut Option<V>) -> &mut Option<V> {
+        slot
+    }
+}
+
+/// Map with `K` keys and `V` values, that is:
+/// * "entity-oriented" `K` keys, i.e. that are or contain exactly one entity
+///   (supported via `K: EntityOrientedMapKey<V>` for extensibility)
+/// * "dense" in the sense of few (or no) gaps in (the entities in) its keys
+///   (relative to the entities defined in the corresponding `EntityDefs`)
 ///
-/// By design there is no way to iterate the entries in an `EntityKeyedDenseMap`.
+/// By design there is no way to iterate the entries in an `EntityOrientedDenseMap`.
 //
 // FIXME(eddyb) implement a "sparse" version as well, and maybe some bitsets?
-pub struct EntityKeyedDenseMap<E: sealed::Entity, V> {
+pub struct EntityOrientedDenseMap<K: EntityOrientedMapKey<V>, V> {
     /// Like in `EntityDefs`, entities are grouped into chunks, but there is no
     /// flattening, since arbitrary insertion orders have to be supported.
-    chunk_start_to_values: SmallFxHashMap<E, Vec<Option<V>>>,
+    chunk_start_to_value_slots: SmallFxHashMap<K::Entity, Vec<K::DenseValueSlots>>,
 }
 
 // FIXME(eddyb) find a better "small map" design and/or fine-tune this - though,
 // since the ideal state is one chunk per map, the slow case might never be hit,
-// unless one `EntityKeyedDenseMap` is used with more than one `EntityDefs`,
+// unless one `EntityOrientedDenseMap` is used with more than one `EntityDefs`,
 // which could still maybe be implemented more efficiently than `FxHashMap`.
 enum SmallFxHashMap<K, V> {
     Empty,
@@ -328,62 +364,68 @@ impl<K: Copy + Eq + Hash, V: Default> SmallFxHashMap<K, V> {
     }
 }
 
-impl<E: sealed::Entity, V> Default for EntityKeyedDenseMap<E, V> {
+impl<K: EntityOrientedMapKey<V>, V> Default for EntityOrientedDenseMap<K, V> {
     fn default() -> Self {
         Self {
-            chunk_start_to_values: Default::default(),
+            chunk_start_to_value_slots: Default::default(),
         }
     }
 }
 
-impl<E: sealed::Entity, V> EntityKeyedDenseMap<E, V> {
+impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(&mut self, entity: E, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
-        let chunk_values = self
-            .chunk_start_to_values
+        let chunk_value_slots = self
+            .chunk_start_to_value_slots
             .get_mut_or_insert_default(chunk_start);
 
         // Ensure there are enough slots for the new entry.
         let needed_len = intra_chunk_idx + 1;
-        if chunk_values.len() < needed_len {
-            chunk_values.resize_with(needed_len, || None);
+        if chunk_value_slots.len() < needed_len {
+            chunk_value_slots.resize_with(needed_len, Default::default);
         }
 
-        chunk_values[intra_chunk_idx].replace(value)
+        let value_slots = &mut chunk_value_slots[intra_chunk_idx];
+        K::get_dense_value_slot_mut(key, value_slots).replace(value)
     }
 
-    pub fn get(&self, entity: E) -> Option<&V> {
+    pub fn get(&self, key: K) -> Option<&V> {
+        let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
-        self.chunk_start_to_values
+        let value_slots = self
+            .chunk_start_to_value_slots
             .get(chunk_start)?
-            .get(intra_chunk_idx)?
-            .as_ref()
+            .get(intra_chunk_idx)?;
+        K::get_dense_value_slot(key, value_slots).as_ref()
     }
 
-    pub fn get_mut(&mut self, entity: E) -> Option<&mut V> {
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
-        self.chunk_start_to_values
+        let value_slots = self
+            .chunk_start_to_value_slots
             .get_mut(chunk_start)?
-            .get_mut(intra_chunk_idx)?
-            .as_mut()
+            .get_mut(intra_chunk_idx)?;
+        K::get_dense_value_slot_mut(key, value_slots).as_mut()
     }
 }
 
-impl<E: sealed::Entity, V> std::ops::Index<E> for EntityKeyedDenseMap<E, V> {
+impl<K: EntityOrientedMapKey<V>, V> std::ops::Index<K> for EntityOrientedDenseMap<K, V> {
     type Output = V;
 
-    fn index(&self, entity: E) -> &V {
-        self.get(entity).expect("no entry found for key")
+    fn index(&self, key: K) -> &V {
+        self.get(key).expect("no entry found for key")
     }
 }
 
-impl<E: sealed::Entity, V> std::ops::IndexMut<E> for EntityKeyedDenseMap<E, V> {
-    fn index_mut(&mut self, entity: E) -> &mut V {
-        self.get_mut(entity).expect("no entry found for key")
+impl<K: EntityOrientedMapKey<V>, V> std::ops::IndexMut<K> for EntityOrientedDenseMap<K, V> {
+    fn index_mut(&mut self, key: K) -> &mut V {
+        self.get_mut(key).expect("no entry found for key")
     }
 }
 

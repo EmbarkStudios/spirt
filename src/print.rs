@@ -1560,7 +1560,8 @@ impl Print for FuncDecl {
                             }
                         }
                     }
-                    if let Some(control_inst) = cfg.control_inst_at(cfg::ControlPoint::Exit(region))
+                    if let Some(control_inst) =
+                        cfg.control_insts.get(cfg::ControlPoint::Exit(region))
                     {
                         writeln!(
                             f,

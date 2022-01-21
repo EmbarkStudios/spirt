@@ -963,19 +963,16 @@ impl Module {
                                             },
                                         );
                                         func_def_body.cfg.control_insts.insert(
-                                            phi_merge_target,
-                                            cfg::PerEntryAndExit {
-                                                entry: None,
-                                                exit: Some(cfg::ControlInst {
-                                                    attrs: AttrSet::default(),
-                                                    kind: cfg::ControlInstKind::Branch,
-                                                    inputs: SmallVec::new(),
-                                                    targets: iter::once(cfg::ControlPoint::Entry(
-                                                        current_block,
-                                                    ))
-                                                    .collect(),
-                                                    target_merge_outputs: FxIndexMap::default(),
-                                                }),
+                                            cfg::ControlPoint::Exit(phi_merge_target),
+                                            cfg::ControlInst {
+                                                attrs: AttrSet::default(),
+                                                kind: cfg::ControlInstKind::Branch,
+                                                inputs: SmallVec::new(),
+                                                targets: iter::once(cfg::ControlPoint::Entry(
+                                                    current_block,
+                                                ))
+                                                .collect(),
+                                                target_merge_outputs: FxIndexMap::default(),
                                             },
                                         );
                                         phi_merge_target
@@ -1275,16 +1272,13 @@ impl Module {
                     };
 
                     func_def_body.cfg.control_insts.insert(
-                        current_block_region,
-                        cfg::PerEntryAndExit {
-                            entry: None,
-                            exit: Some(cfg::ControlInst {
-                                attrs,
-                                kind,
-                                inputs,
-                                targets,
-                                target_merge_outputs,
-                            }),
+                        cfg::ControlPoint::Exit(current_block_region),
+                        cfg::ControlInst {
+                            attrs,
+                            kind,
+                            inputs,
+                            targets,
+                            target_merge_outputs,
                         },
                     );
                 } else if opcode == wk.OpPhi {
