@@ -267,11 +267,7 @@ impl<'a> FuncLifting<'a> {
         // Create a SPIR-V block for every CFG point needing one.
         let mut blocks: FxIndexMap<_, _> = func_def_body
             .into_iter()
-            .flat_map(|func_def_body| {
-                func_def_body
-                    .cfg
-                    .rev_post_order(cfg::ControlPoint::Entry(func_def_body.entry))
-            })
+            .flat_map(|func_def_body| func_def_body.cfg.rev_post_order(&func_def_body.body))
             .filter(
                 |point| match func_def_body.unwrap().regions[point.region()].kind {
                     // Only create a block for the `Entry` point of a

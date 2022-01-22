@@ -1,7 +1,8 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, EntityOrientedDenseMap, EntityOrientedMapKey, FxIndexMap, Region, Value,
+    spv, AttrSet, EntityOrientedDenseMap, EntityOrientedMapKey, FxIndexMap, Region, RegionGraph,
+    Value,
 };
 use smallvec::SmallVec;
 
@@ -13,21 +14,27 @@ pub struct ControlFlowGraph {
 }
 
 impl ControlFlowGraph {
-    /// Iterate over all `ControlPoint`s reachable through the CFG, starting at
-    /// `entry`, in reverse post-order (RPO).
+    /// Iterate over all `ControlPoint`s reachable through the CFG for `graph`,
+    /// in reverse post-order (RPO).
     ///
     /// RPO iteration over a CFG provides certain guarantees, most importantly
     /// that SSA definitions are visited before any of their uses.
     pub fn rev_post_order(
         &self,
-        entry: ControlPoint,
+        graph: &RegionGraph,
     ) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        self.post_order(entry).rev()
+        self.post_order(graph).rev()
     }
 
-    /// Iterate over all `ControlPoint`s reachable through the CFG, starting at
-    /// `entry`, in post-order.
-    pub fn post_order(&self, entry: ControlPoint) -> impl DoubleEndedIterator<Item = ControlPoint> {
+    /// Iterate over all `ControlPoint`s reachable through the CFG for `graph`,
+    /// in post-order.
+    pub fn post_order(&self, graph: &RegionGraph) -> impl DoubleEndedIterator<Item = ControlPoint> {
+        let entry = ControlPoint::Entry(graph.first);
+        assert!(
+            graph.last == graph.first,
+            "unimplemented structural regions",
+        );
+
         let mut post_order = SmallVec::<[_; 8]>::new();
         {
             let mut visited = EntityOrientedDenseMap::new();

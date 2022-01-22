@@ -6,7 +6,7 @@ use crate::{
     cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, DataInstDef,
     DataInstKind, DeclDef, EntityDefs, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
     FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region, RegionDef,
-    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    RegionGraph, RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -755,6 +755,8 @@ impl Module {
                         let entry = regions.define(
                             &cx,
                             RegionDef {
+                                prev_in_region_graph: None,
+                                next_in_region_graph: None,
                                 kind: RegionKind::Block { insts: vec![] },
                                 outputs: SmallVec::new(),
                             },
@@ -762,7 +764,11 @@ impl Module {
                         DeclDef::Present(FuncDefBody {
                             data_insts: Default::default(),
                             regions,
-                            entry,
+                            body: RegionGraph {
+                                first: entry,
+                                last: entry,
+                                outputs: SmallVec::new(),
+                            },
                             cfg: Default::default(),
                         })
                     }
@@ -920,13 +926,15 @@ impl Module {
                                 let block = if is_entry_block {
                                     // An empty `RegionKind::Block` region was defined
                                     // earlier, to be able to create the `FuncDefBody`.
-                                    func_def_body.entry
+                                    func_def_body.body.first
                                 } else {
                                     // HACK(eddyb) can't get a `Region` without
                                     // defining it as an (empty) `RegionDef` first.
                                     func_def_body.regions.define(
                                         &cx,
                                         RegionDef {
+                                            prev_in_region_graph: None,
+                                            next_in_region_graph: None,
                                             kind: RegionKind::Block { insts: vec![] },
                                             outputs: SmallVec::new(),
                                         },
@@ -958,6 +966,8 @@ impl Module {
                                         let phi_merge_target = func_def_body.regions.define(
                                             &cx,
                                             RegionDef {
+                                                prev_in_region_graph: None,
+                                                next_in_region_graph: None,
                                                 kind: RegionKind::UnstructuredMerge,
                                                 outputs: SmallVec::new(),
                                             },
@@ -1469,7 +1479,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if block_details[&func_def_body.entry].phi_count > 0 {
+                if block_details[&func_def_body.body.first].phi_count > 0 {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(

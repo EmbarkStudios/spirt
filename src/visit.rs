@@ -271,12 +271,17 @@ impl InnerVisit for FuncDefBody {
         let Self {
             data_insts,
             regions,
-            entry,
+            body,
             cfg,
         } = self;
 
-        for point in cfg.rev_post_order(cfg::ControlPoint::Entry(*entry)) {
-            let RegionDef { kind, outputs } = &regions[point.region()];
+        for point in cfg.rev_post_order(body) {
+            let RegionDef {
+                prev_in_region_graph: _,
+                next_in_region_graph: _,
+                kind,
+                outputs,
+            } = &regions[point.region()];
 
             // HACK(eddyb) handle most of the region on `Entry`, but the outputs
             // on `Exit` instead, to account for `RegionKind::UnstructuredMerge`.

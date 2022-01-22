@@ -460,12 +460,14 @@ impl<'a, 'b> Printer<'a, 'b> {
                 let mut region_counter = 0;
                 let mut value_counter = 0;
 
-                for point in func_def_body
-                    .cfg
-                    .rev_post_order(cfg::ControlPoint::Entry(func_def_body.entry))
-                {
+                for point in func_def_body.cfg.rev_post_order(&func_def_body.body) {
                     let region = point.region();
-                    let RegionDef { kind, outputs } = &func_def_body.regions[region];
+                    let RegionDef {
+                        prev_in_region_graph: _,
+                        next_in_region_graph: _,
+                        kind,
+                        outputs,
+                    } = &func_def_body.regions[region];
 
                     // Only handle each `Region` once.
                     if let cfg::ControlPoint::Exit(_) = point {
@@ -1492,13 +1494,18 @@ impl Print for FuncDecl {
             DeclDef::Present(FuncDefBody {
                 data_insts,
                 regions,
-                entry,
+                body,
                 cfg,
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for point in cfg.rev_post_order(cfg::ControlPoint::Entry(*entry)) {
+                for point in cfg.rev_post_order(body) {
                     let region = point.region();
-                    let RegionDef { kind, outputs } = &regions[region];
+                    let RegionDef {
+                        prev_in_region_graph: _,
+                        next_in_region_graph: _,
+                        kind,
+                        outputs,
+                    } = &regions[region];
 
                     // Only handle each `Region` once.
                     if let cfg::ControlPoint::Exit(_) = point {

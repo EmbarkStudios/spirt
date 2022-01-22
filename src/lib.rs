@@ -253,16 +253,44 @@ pub struct FuncDefBody {
     pub data_insts: EntityDefs<DataInst>,
     pub regions: EntityDefs<Region>,
 
-    /// The `Region` representing the whole body of the function.
-    // FIXME(eddyb) "entry" is CFG-oriented (maybe "top" would be better?),
-    // and also this is not that useful without `cfg` right now, which is needed
-    // to reach other `Region`s (through CFG edges).
-    pub entry: Region,
+    /// The `RegionGraph` representing the whole body of the function.
+    // FIXME(eddyb) this is not that useful without `cfg` right now, which is
+    // needed to reach other `Region`s (through CFG edges).
+    pub body: RegionGraph,
 
     /// The control-flow graph of the function, represented as per-region
     /// control-flow instructions that execute "after" the region itself.
     // FIXME(eddyb) replace this CFG setup with stricter structural regions.
     pub cfg: cfg::ControlFlowGraph,
+}
+
+/// A (sub)graph of `Region`s, asymmetrically isolated from surrounding `Region`s:
+/// * inputs inside the (sub)graph are free to use values defined outside
+/// * values defined inside the (sub)graph are hidden from outside users
+///   (propagating values to the outside can, however, be done through the
+///   `outputs` field, which can reference values defined inside)
+///
+/// For more general information on regions, see `RegionDef`'s doc comment.
+///
+/// The choice of a separate `RegionGraph` type, instead of "simply" a variant
+/// of `RegionKind`, is possibly tenuous, and may change in the future, but it:
+/// * prevents (unwanted) arbitrary nesting of `Region`s
+///   * i.e. `RegionKind` wouldn't contain child `Region`s, but `RegionGraph`s
+/// * provides direct access to `outputs` and ensures their presence
+///
+/// In RVSDG terms, `RegionGraph` is a "region" while `Region` a "structural node",
+/// so these types may be renamed in the future to realign the terminology.
+/// Also, the graph could include `DataInst`s more directly (as sipler nodes),
+/// than merely having a `Region` container for them (`RegionKind::Block`).
+///
+/// Currently the "graph" is always a linear chain (using `first` and `last`,
+/// alongside the `{prev,next}_in_region_graph` fields in each `RegionDef`, to
+/// encode a doubly-linked list of `Region`s), but this may change in the future.
+pub struct RegionGraph {
+    pub first: Region,
+    pub last: Region,
+
+    pub outputs: SmallVec<[Value; 2]>,
 }
 
 /// A control-flow "region" is a self-contained single-entry single-exit (SESE)
@@ -286,6 +314,11 @@ pub struct FuncDefBody {
 //
 // FIXME(eddyb) fully implement CFG structurization.
 pub struct RegionDef {
+    /// Backwards link in a `RegionGraph`'s doubly-link list of `Region`s.
+    pub prev_in_region_graph: Option<Region>,
+    /// Forwards link in a `RegionGraph`'s doubly-link list of `Region`s.
+    pub next_in_region_graph: Option<Region>,
+
     pub kind: RegionKind,
     pub outputs: SmallVec<[RegionOutputDecl; 2]>,
 }
