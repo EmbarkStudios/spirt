@@ -7,7 +7,7 @@
 <div align="center">
 
 <!--- FIXME: Pick an emoji and name your project! --->
-# 🌻 `opensource-template`
+# `🌻 opensource-template`
 
 <!--- FIXME: Write short catchy description/tagline of project --->
 **Template for creating new open source repositories that follow the Embark open source guidelines**
