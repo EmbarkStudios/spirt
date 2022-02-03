@@ -3,10 +3,10 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, DataInst, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet,
-    GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, RegionKind,
-    RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeKind,
+    ControlNodeOutputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
+    FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -207,7 +207,7 @@ struct BlockLifting<'a> {
 }
 
 struct Phi {
-    output_decl: RegionOutputDecl,
+    output_decl: ControlNodeOutputDecl,
 
     result_id: spv::Id,
     cases: SmallVec<[(Value, cfg::ControlPoint); 2]>,
@@ -269,10 +269,10 @@ impl<'a> FuncLifting<'a> {
             .into_iter()
             .flat_map(|func_def_body| func_def_body.cfg.rev_post_order(&func_def_body.body))
             .filter(
-                |point| match func_def_body.unwrap().regions[point.region()].kind {
+                |point| match func_def_body.unwrap().control_nodes[point.control_node()].kind {
                     // Only create a block for the `Entry` point of a
-                    // `RegionKind::Block`, not also its `Exit`.
-                    RegionKind::Block { .. } => {
+                    // `ControlNodeKind::Block`, not also its `Exit`.
+                    ControlNodeKind::Block { .. } => {
                         matches!(point, cfg::ControlPoint::Entry(_))
                     }
                     _ => true,
@@ -280,9 +280,9 @@ impl<'a> FuncLifting<'a> {
             )
             .map(|point| {
                 let func_def_body = func_def_body.unwrap();
-                let region_def = &func_def_body.regions[point.region()];
+                let control_node_def = &func_def_body.control_nodes[point.control_node()];
                 let phis = if let cfg::ControlPoint::Exit(_) = point {
-                    region_def
+                    control_node_def
                         .outputs
                         .iter()
                         .map(|&output_decl| {
@@ -296,16 +296,16 @@ impl<'a> FuncLifting<'a> {
                 } else {
                     SmallVec::new()
                 };
-                let (insts, terminator) = match &region_def.kind {
-                    RegionKind::Block { insts } => {
-                        // The terminator of a `RegionKind::Block` is attached
+                let (insts, terminator) = match &control_node_def.kind {
+                    ControlNodeKind::Block { insts } => {
+                        // The terminator of a `ControlNodeKind::Block` is attached
                         // to its `Exit` point, but as per the `filter` above,
                         // the block itself is attached to the `Entry` point.
                         let terminator = func_def_body
                             .cfg
                             .control_insts
-                            .get(cfg::ControlPoint::Exit(point.region()))
-                            .expect("missing terminator for `RegionKind::Block`");
+                            .get(cfg::ControlPoint::Exit(point.control_node()))
+                            .expect("missing terminator for `ControlNodeKind::Block`");
 
                         (iter::once(&insts[..]).collect(), terminator)
                     }
@@ -547,8 +547,11 @@ impl LazyInst<'_, '_> {
         let value_to_id = |parent_func: &FuncLifting, v| match v {
             Value::Const(ct) => ids.globals[&Global::Const(ct)],
             Value::FuncParam { idx } => parent_func.param_ids[usize::try_from(idx).unwrap()],
-            Value::RegionOutput { region, output_idx } => {
-                parent_func.blocks[&cfg::ControlPoint::Exit(region)].phis
+            Value::ControlNodeOutput {
+                control_node,
+                output_idx,
+            } => {
+                parent_func.blocks[&cfg::ControlPoint::Exit(control_node)].phis
                     [usize::try_from(output_idx).unwrap()]
                 .result_id
             }

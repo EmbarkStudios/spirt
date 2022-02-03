@@ -3,10 +3,11 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, DataInstDef,
+    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
     DataInstKind, DeclDef, EntityDefs, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Region, RegionDef,
-    RegionGraph, RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type, TypeCtor,
+    TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -749,22 +750,22 @@ impl Module {
                 let def = match pending_imports.remove(&func_id) {
                     Some(import) => DeclDef::Imported(import),
                     None => {
-                        let mut regions = EntityDefs::default();
-                        // HACK(eddyb) can't get a `Region` without
-                        // defining it as an (empty) `RegionDef` first.
-                        let entry = regions.define(
+                        let mut control_nodes = EntityDefs::default();
+                        // HACK(eddyb) can't get a `ControlNode` without
+                        // defining it as an (empty) `ControlNodeDef` first.
+                        let entry = control_nodes.define(
                             &cx,
-                            RegionDef {
-                                prev_in_region_graph: None,
-                                next_in_region_graph: None,
-                                kind: RegionKind::Block { insts: vec![] },
+                            ControlNodeDef {
+                                prev_in_control_region: None,
+                                next_in_control_region: None,
+                                kind: ControlNodeKind::Block { insts: vec![] },
                                 outputs: SmallVec::new(),
                             },
                         );
                         DeclDef::Present(FuncDefBody {
                             data_insts: Default::default(),
-                            regions,
-                            body: RegionGraph {
+                            control_nodes,
+                            body: ControlRegion {
                                 first: entry,
                                 last: entry,
                                 outputs: SmallVec::new(),
@@ -867,7 +868,7 @@ impl Module {
             #[derive(Copy, Clone)]
             enum LocalIdDef {
                 Value(Value),
-                BlockLabel(Region),
+                BlockLabel(ControlNode),
             }
 
             #[derive(PartialEq, Eq, Hash)]
@@ -880,13 +881,13 @@ impl Module {
             struct BlockDetails {
                 label_id: spv::Id,
 
-                /// For blocks with `OpPhi`s, an additional `Region` is defined
-                /// (a `RegionKind::UnstructuredMerge`), and used as the target
+                /// For blocks with `OpPhi`s, an additional `ControlNode` is defined
+                /// (a `ControlNodeKind::UnstructuredMerge`), and used as the target
                 /// of incoming CFG edges, in order to have a separate merge point,
                 /// for which `OpPhi`s can be "outputs" instead of "inputs".
                 ///
-                /// In the CFG, this always branches directly to block `Region`.
-                phi_merge_target: Option<Region>,
+                /// In the CFG, this always branches directly to block `ControlNode`.
+                phi_merge_target: Option<ControlNode>,
 
                 // FIXME(eddyb) should this be in the `phi_merge_target` `Option`?
                 phi_count: u32,
@@ -896,7 +897,7 @@ impl Module {
             let mut local_id_defs = FxIndexMap::default();
             // `OpPhi`s are also collected here, to assign them per-edge.
             let mut phi_to_values = FxIndexMap::<PhiKey, SmallVec<[spv::Id; 1]>>::default();
-            let mut block_details = FxIndexMap::<Region, BlockDetails>::default();
+            let mut block_details = FxIndexMap::<ControlNode, BlockDetails>::default();
             let mut has_blocks = false;
             {
                 let mut next_param_idx = 0u32;
@@ -924,18 +925,18 @@ impl Module {
 
                             if opcode == wk.OpLabel {
                                 let block = if is_entry_block {
-                                    // An empty `RegionKind::Block` region was defined
+                                    // An empty `ControlNodeKind::Block` node was defined
                                     // earlier, to be able to create the `FuncDefBody`.
                                     func_def_body.body.first
                                 } else {
-                                    // HACK(eddyb) can't get a `Region` without
-                                    // defining it as an (empty) `RegionDef` first.
-                                    func_def_body.regions.define(
+                                    // HACK(eddyb) can't get a `ControlNode` without
+                                    // defining it as an (empty) `ControlNodeDef` first.
+                                    func_def_body.control_nodes.define(
                                         &cx,
-                                        RegionDef {
-                                            prev_in_region_graph: None,
-                                            next_in_region_graph: None,
-                                            kind: RegionKind::Block { insts: vec![] },
+                                        ControlNodeDef {
+                                            prev_in_control_region: None,
+                                            next_in_control_region: None,
+                                            kind: ControlNodeKind::Block { insts: vec![] },
                                             outputs: SmallVec::new(),
                                         },
                                     )
@@ -957,18 +958,18 @@ impl Module {
                                     None => continue,
                                 };
 
-                                // If necessary, create the intermediary `Region`
+                                // If necessary, create the intermediary `ControlNode`
                                 // to serve as a merge point, and add the CFG edge
-                                // from it to the `Region` for the block itself
+                                // from it to the `ControlNode` for the block itself
                                 // (see also doc comment on `phi_merge_target`).
                                 let phi_merge_target =
                                     *block_details.phi_merge_target.get_or_insert_with(|| {
-                                        let phi_merge_target = func_def_body.regions.define(
+                                        let phi_merge_target = func_def_body.control_nodes.define(
                                             &cx,
-                                            RegionDef {
-                                                prev_in_region_graph: None,
-                                                next_in_region_graph: None,
-                                                kind: RegionKind::UnstructuredMerge,
+                                            ControlNodeDef {
+                                                prev_in_control_region: None,
+                                                next_in_control_region: None,
+                                                kind: ControlNodeKind::UnstructuredMerge,
                                                 outputs: SmallVec::new(),
                                             },
                                         );
@@ -1007,8 +1008,8 @@ impl Module {
                                         .push(value_id);
                                 }
 
-                                LocalIdDef::Value(Value::RegionOutput {
-                                    region: phi_merge_target,
+                                LocalIdDef::Value(Value::ControlNodeOutput {
+                                    control_node: phi_merge_target,
                                     output_idx: phi_idx,
                                 })
                             } else {
@@ -1060,7 +1061,7 @@ impl Module {
                 None
             };
 
-            let mut current_block_region_and_details = None;
+            let mut current_block_control_node_and_details = None;
             for (raw_inst_idx, raw_inst) in raw_insts.iter().enumerate() {
                 let lookahead_raw_inst = |dist| {
                     raw_inst_idx
@@ -1107,7 +1108,7 @@ impl Module {
                     };
 
                 if opcode == wk.OpFunctionParameter {
-                    if current_block_region_and_details.is_some() {
+                    if current_block_control_node_and_details.is_some() {
                         return Err(invalid(
                             "out of order: `OpFunctionParameter`s should come \
                              before the function's blocks",
@@ -1132,25 +1133,27 @@ impl Module {
                         return Err(invalid("block lacks terminator instruction"));
                     }
 
-                    // An empty `RegionKind::Block` region was defined earlier,
+                    // An empty `ControlNodeKind::Block` node was defined earlier,
                     // to be able to have an entry in `local_id_defs`.
-                    let region = match local_id_defs[&result_id.unwrap()] {
-                        LocalIdDef::BlockLabel(region) => region,
+                    let control_node = match local_id_defs[&result_id.unwrap()] {
+                        LocalIdDef::BlockLabel(control_node) => control_node,
                         _ => unreachable!(),
                     };
-                    let current_block_details = &block_details[&region];
+                    let current_block_details = &block_details[&control_node];
                     assert_eq!(current_block_details.label_id, result_id.unwrap());
-                    current_block_region_and_details = Some((region, current_block_details));
+                    current_block_control_node_and_details =
+                        Some((control_node, current_block_details));
                     continue;
                 }
-                let (current_block_region, current_block_details) =
-                    current_block_region_and_details.ok_or_else(|| {
+                let (current_block_control_node, current_block_details) =
+                    current_block_control_node_and_details.ok_or_else(|| {
                         invalid("out of order: not expected before the function's blocks")
                     })?;
-                let current_region_def = &mut func_def_body.regions[current_block_region];
-                let current_block_insts = match &mut current_region_def.kind {
-                    RegionKind::UnstructuredMerge => unreachable!(),
-                    RegionKind::Block { insts } => insts,
+                let current_control_node_def =
+                    &mut func_def_body.control_nodes[current_block_control_node];
+                let current_block_insts = match &mut current_control_node_def.kind {
+                    ControlNodeKind::UnstructuredMerge => unreachable!(),
+                    ControlNodeKind::Block { insts } => insts,
                 };
 
                 if is_last_in_block {
@@ -1225,7 +1228,7 @@ impl Module {
                                     }
                                 }
 
-                                // `RegionKind::UnstructuredMerge` only has an `Exit`
+                                // `ControlNodeKind::UnstructuredMerge` only has an `Exit`
                                 // (see also `cfg::ControlPoint`'s doc comment).
                                 Ok(cfg::ControlPoint::Exit(phi_merge_target))
                             }
@@ -1282,7 +1285,7 @@ impl Module {
                     };
 
                     func_def_body.cfg.control_insts.insert(
-                        cfg::ControlPoint::Exit(current_block_region),
+                        cfg::ControlPoint::Exit(current_block_control_node),
                         cfg::ControlInst {
                             attrs,
                             kind,
@@ -1298,12 +1301,14 @@ impl Module {
                              the rest of the block's instructions",
                         ));
                     }
-                    let phi_merge_region_def =
-                        &mut func_def_body.regions[current_block_details.phi_merge_target.unwrap()];
-                    phi_merge_region_def.outputs.push(RegionOutputDecl {
-                        attrs,
-                        ty: result_type.unwrap(),
-                    });
+                    let phi_merge_control_node_def = &mut func_def_body.control_nodes
+                        [current_block_details.phi_merge_target.unwrap()];
+                    phi_merge_control_node_def
+                        .outputs
+                        .push(ControlNodeOutputDecl {
+                            attrs,
+                            ty: result_type.unwrap(),
+                        });
                 } else if [wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode) {
                     let is_second_to_last_in_block = lookahead_raw_inst(2)
                         .map_or(true, |next_raw_inst| {

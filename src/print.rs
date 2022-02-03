@@ -1,10 +1,10 @@
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, DataInst,
-    DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
-    FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Region, RegionDef, RegionKind, RegionOutputDecl, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
+    ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInst, DataInstDef,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap,
+    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
+    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use rustc_hash::FxHashMap;
@@ -90,8 +90,11 @@ enum Use {
     GlobalVar(GlobalVar),
     Func(Func),
 
-    Region(Region),
-    RegionOutput { region: Region, output_idx: u32 },
+    ControlNode(ControlNode),
+    ControlNodeOutput {
+        control_node: ControlNode,
+        output_idx: u32,
+    },
     DataInstOutput(DataInst),
 }
 
@@ -101,8 +104,9 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            Self::Region(_) => "region",
-            Self::RegionOutput { .. } | Self::DataInstOutput(_) => "v",
+            // FIXME(eddyb) maybe generate C-style labels for non-structured CFGs?
+            Self::ControlNode(_) => "ctl",
+            Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => "v",
         }
     }
 }
@@ -278,10 +282,16 @@ impl<'a> Visitor<'a> for Plan<'a> {
         match *v {
             Value::Const(_) | Value::FuncParam { .. } => {}
 
-            Value::RegionOutput { region, output_idx } => {
+            Value::ControlNodeOutput {
+                control_node,
+                output_idx,
+            } => {
                 *self
                     .use_counts
-                    .entry(Use::RegionOutput { region, output_idx })
+                    .entry(Use::ControlNodeOutput {
+                        control_node,
+                        output_idx,
+                    })
                     .or_default() += 1;
             }
             Value::DataInstOutput(inst) => {
@@ -374,7 +384,9 @@ impl<'a, 'b> Printer<'a, 'b> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::Region(_) | Use::RegionOutput { .. } | Use::DataInstOutput(_) = use_kind
+                if let Use::ControlNode(_)
+                | Use::ControlNodeOutput { .. }
+                | Use::DataInstOutput(_) = use_kind
                 {
                     return (use_kind, UseStyle::Inline);
                 }
@@ -429,7 +441,9 @@ impl<'a, 'b> Printer<'a, 'b> {
                             }
                     }
                     Use::GlobalVar(_) | Use::Func(_) => false,
-                    Use::Region(_) | Use::RegionOutput { .. } | Use::DataInstOutput(_) => {
+                    Use::ControlNode(_)
+                    | Use::ControlNodeOutput { .. }
+                    | Use::DataInstOutput(_) => {
                         unreachable!()
                     }
                 };
@@ -443,7 +457,9 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::Region(_) | Use::RegionOutput { .. } | Use::DataInstOutput(_) => {
+                        Use::ControlNode(_)
+                        | Use::ControlNodeOutput { .. }
+                        | Use::DataInstOutput(_) => {
                             unreachable!()
                         }
                     };
@@ -457,49 +473,52 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         for (&_func, &func_decl) in &plan.func_decl_cache {
             if let DeclDef::Present(func_def_body) = &func_decl.def {
-                let mut region_counter = 0;
+                let mut control_node_counter = 0;
                 let mut value_counter = 0;
 
                 for point in func_def_body.cfg.rev_post_order(&func_def_body.body) {
-                    let region = point.region();
-                    let RegionDef {
-                        prev_in_region_graph: _,
-                        next_in_region_graph: _,
+                    let control_node = point.control_node();
+                    let ControlNodeDef {
+                        prev_in_control_region: _,
+                        next_in_control_region: _,
                         kind,
                         outputs,
-                    } = &func_def_body.regions[region];
+                    } = &func_def_body.control_nodes[control_node];
 
-                    // Only handle each `Region` once.
+                    // Only handle each `ControlNode` once.
                     if let cfg::ControlPoint::Exit(_) = point {
                         match kind {
-                            // `RegionKind::UnstructuredMerge` only has an `Exit`
+                            // `ControlNodeKind::UnstructuredMerge` only has an `Exit`
                             // (see also `cfg::ControlPoint`'s doc comment).
-                            RegionKind::UnstructuredMerge => {}
+                            ControlNodeKind::UnstructuredMerge => {}
 
                             _ => continue,
                         }
                     }
 
                     {
-                        let idx = region_counter;
-                        region_counter += 1;
-                        use_styles.insert(Use::Region(region), UseStyle::Anon { idx });
+                        let idx = control_node_counter;
+                        control_node_counter += 1;
+                        use_styles.insert(Use::ControlNode(control_node), UseStyle::Anon { idx });
                     }
 
                     let block_insts = match kind {
-                        RegionKind::UnstructuredMerge => &[][..],
-                        RegionKind::Block { insts } => insts,
+                        ControlNodeKind::UnstructuredMerge => &[][..],
+                        ControlNodeKind::Block { insts } => insts,
                     };
 
-                    let defined_values = block_insts
-                        .iter()
-                        .copied()
-                        .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some())
-                        .map(Use::DataInstOutput)
-                        .chain(outputs.iter().enumerate().map(|(i, _)| Use::RegionOutput {
-                            region,
-                            output_idx: i.try_into().unwrap(),
-                        }));
+                    let defined_values =
+                        block_insts
+                            .iter()
+                            .copied()
+                            .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some())
+                            .map(Use::DataInstOutput)
+                            .chain(outputs.iter().enumerate().map(|(i, _)| {
+                                Use::ControlNodeOutput {
+                                    control_node,
+                                    output_idx: i.try_into().unwrap(),
+                                }
+                            }));
                     for use_kind in defined_values {
                         if let Some(use_style) = use_styles.get_mut(&use_kind) {
                             let idx = value_counter;
@@ -834,7 +853,7 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::Region(_) | Self::RegionOutput { .. } | Self::DataInstOutput(_) => {
+                Self::ControlNode(_) | Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => {
                     "_".to_string()
                 }
             },
@@ -1493,38 +1512,38 @@ impl Print for FuncDecl {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
             DeclDef::Present(FuncDefBody {
                 data_insts,
-                regions,
+                control_nodes,
                 body,
                 cfg,
             }) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
                 for point in cfg.rev_post_order(body) {
-                    let region = point.region();
-                    let RegionDef {
-                        prev_in_region_graph: _,
-                        next_in_region_graph: _,
+                    let control_node = point.control_node();
+                    let ControlNodeDef {
+                        prev_in_control_region: _,
+                        next_in_control_region: _,
                         kind,
                         outputs,
-                    } = &regions[region];
+                    } = &control_nodes[control_node];
 
-                    // Only handle each `Region` once.
+                    // Only handle each `ControlNode` once.
                     if let cfg::ControlPoint::Exit(_) = point {
                         match kind {
-                            // `RegionKind::UnstructuredMerge` only has an `Exit`
+                            // `ControlNodeKind::UnstructuredMerge` only has an `Exit`
                             // (see also `cfg::ControlPoint`'s doc comment).
-                            RegionKind::UnstructuredMerge => {}
+                            ControlNodeKind::UnstructuredMerge => {}
 
                             _ => continue,
                         }
                     }
 
-                    let mut header = Use::Region(region).print(printer);
+                    let mut header = Use::ControlNode(control_node).print(printer);
                     if !outputs.is_empty() {
                         let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
                             let AttrsAndDef { attrs, def } = output.print(printer);
                             attrs
-                                + &Value::RegionOutput {
-                                    region,
+                                + &Value::ControlNodeOutput {
+                                    control_node,
                                     output_idx: output_idx.try_into().unwrap(),
                                 }
                                 .print(printer)
@@ -1539,10 +1558,10 @@ impl Print for FuncDecl {
                     }
                     writeln!(f, "  {} {{", header.replace("\n", "\n    "))?;
                     match kind {
-                        RegionKind::UnstructuredMerge => {
+                        ControlNodeKind::UnstructuredMerge => {
                             writeln!(f, "    /* unstructured merge */")?;
                         }
-                        RegionKind::Block { insts } => {
+                        ControlNodeKind::Block { insts } => {
                             for &inst in insts {
                                 let data_inst_def = &data_insts[inst];
                                 let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
@@ -1568,7 +1587,7 @@ impl Print for FuncDecl {
                         }
                     }
                     if let Some(control_inst) =
-                        cfg.control_insts.get(cfg::ControlPoint::Exit(region))
+                        cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
                     {
                         writeln!(
                             f,
@@ -1602,7 +1621,7 @@ impl Print for FuncParam {
     }
 }
 
-impl Print for RegionOutputDecl {
+impl Print for ControlNodeOutputDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self { attrs, ty } = *self;
@@ -1675,15 +1694,18 @@ impl Print for cfg::ControlInst {
         let mut targets: SmallVec<[_; 4]> = targets
             .iter()
             .map(|&point| {
-                let mut target = format!("=> {}", Use::Region(point.region()).print(printer));
-                if let cfg::ControlPoint::Exit(region) = point {
+                let mut target = format!(
+                    "=> {}",
+                    Use::ControlNode(point.control_node()).print(printer)
+                );
+                if let cfg::ControlPoint::Exit(control_node) = point {
                     target += ".exit";
-                    if let Some(outputs) = target_merge_outputs.get(&region) {
+                    if let Some(outputs) = target_merge_outputs.get(&control_node) {
                         target = printer.pretty_join_comma_sep(
                             &(target + "("),
                             outputs.iter().enumerate().map(|(output_idx, v)| {
-                                Value::RegionOutput {
-                                    region,
+                                Value::ControlNodeOutput {
+                                    control_node: control_node,
                                     output_idx: output_idx.try_into().unwrap(),
                                 }
                                 .print(printer)
@@ -1785,9 +1807,14 @@ impl Print for Value {
         match *self {
             Self::Const(ct) => ct.print(printer),
             Self::FuncParam { idx } => format!("param{}", idx),
-            Self::RegionOutput { region, output_idx } => {
-                Use::RegionOutput { region, output_idx }.print(printer)
+            Self::ControlNodeOutput {
+                control_node,
+                output_idx,
+            } => Use::ControlNodeOutput {
+                control_node,
+                output_idx,
             }
+            .print(printer),
             Self::DataInstOutput(inst) => Use::DataInstOutput(inst).print(printer),
         }
     }

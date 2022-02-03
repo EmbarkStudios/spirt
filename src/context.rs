@@ -566,6 +566,6 @@ macro_rules! entities {
 entities! {
     GlobalVar => chunk_size(0x1_0000) crate::GlobalVarDecl,
     Func => chunk_size(0x1_0000) crate::FuncDecl,
-    Region => chunk_size(0x1000) crate::RegionDef,
+    ControlNode => chunk_size(0x1000) crate::ControlNodeDef,
     DataInst => chunk_size(0x1000) crate::DataInstDef,
 }

@@ -8,8 +8,8 @@ type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_h
 
 mod context;
 pub use context::{
-    AttrSet, Const, Context, DataInst, EntityDefs, EntityOrientedDenseMap, EntityOrientedMapKey,
-    Func, GlobalVar, InternedStr, Region, Type,
+    AttrSet, Const, Context, ControlNode, DataInst, EntityDefs, EntityOrientedDenseMap,
+    EntityOrientedMapKey, Func, GlobalVar, InternedStr, Type,
 };
 
 pub mod cfg;
@@ -251,56 +251,60 @@ pub struct FuncParam {
 
 pub struct FuncDefBody {
     pub data_insts: EntityDefs<DataInst>,
-    pub regions: EntityDefs<Region>,
+    pub control_nodes: EntityDefs<ControlNode>,
 
-    /// The `RegionGraph` representing the whole body of the function.
+    /// The `ControlRegion` representing the whole body of the function.
     // FIXME(eddyb) this is not that useful without `cfg` right now, which is
-    // needed to reach other `Region`s (through CFG edges).
-    pub body: RegionGraph,
+    // needed to reach other `ControlNode`s (through CFG edges).
+    pub body: ControlRegion,
 
-    /// The control-flow graph of the function, represented as per-region
-    /// control-flow instructions that execute "after" the region itself.
-    // FIXME(eddyb) replace this CFG setup with stricter structural regions.
+    /// The (unstructured) control-flow graph of the function.
+    // FIXME(eddyb) replace this CFG setup with stricter structured regions.
     pub cfg: cfg::ControlFlowGraph,
 }
 
-/// A (sub)graph of `Region`s, asymmetrically isolated from surrounding `Region`s:
-/// * inputs inside the (sub)graph are free to use values defined outside
-/// * values defined inside the (sub)graph are hidden from outside users
-///   (propagating values to the outside can, however, be done through the
-///   `outputs` field, which can reference values defined inside)
+/// A graph of `ControlNode`s, asymmetrically isolated from surrounding `ControlNode`s:
+/// * inputs inside the region are free to use values defined outside
+/// * values defined inside the region are hidden from outside users
+///   (propagating values to the outside can, and should, be done through
+///   the `outputs` field, which can reference values defined inside)
 ///
-/// For more general information on regions, see `RegionDef`'s doc comment.
+/// For more general information on structured control-flow, and specifically
+/// how SPIR-T represents it, also see `ControlNodeDef`'s documentation.
+//
+// FIXME(eddyb) consider perhaps moving more documentation, from there, up here.
 ///
-/// The choice of a separate `RegionGraph` type, instead of "simply" a variant
-/// of `RegionKind`, is possibly tenuous, and may change in the future, but it:
-/// * prevents (unwanted) arbitrary nesting of `Region`s
-///   * i.e. `RegionKind` wouldn't contain child `Region`s, but `RegionGraph`s
+/// The choice of a separate `ControlRegion` type, instead of "simply" a variant
+/// of `ControlNodeKind`, may seem like an unnecessary distinction, but it:
+/// * prevents (unwanted) arbitrary nesting of `ControlNode`s
+///   * i.e. it prevents `ControlNodeKind` from having child `ControlNode`s,
+///     without grouping them into `ControlRegion`s first
 /// * provides direct access to `outputs` and ensures their presence
 ///
-/// In RVSDG terms, `RegionGraph` is a "region" while `Region` a "structural node",
-/// so these types may be renamed in the future to realign the terminology.
-/// Also, the graph could include `DataInst`s more directly (as sipler nodes),
-/// than merely having a `Region` container for them (`RegionKind::Block`).
+/// Currently the `ControlNode` "graph" of a `ControlRegion` is a linear chain
+/// (using `first` and `last`, alongside the `{prev,next}_in_control_region`
+/// fields in each `ControlNodeDef`, to encode a doubly-linked list made of
+/// `ControlNode`s), but this may change in the future.
 ///
-/// Currently the "graph" is always a linear chain (using `first` and `last`,
-/// alongside the `{prev,next}_in_region_graph` fields in each `RegionDef`, to
-/// encode a doubly-linked list of `Region`s), but this may change in the future.
-pub struct RegionGraph {
-    pub first: Region,
-    pub last: Region,
+/// Also, regions could include `DataInst`s more directly (as simpler nodes),
+/// than merely having a `ControlNode` container for them (`ControlNodeKind::Block`).
+pub struct ControlRegion {
+    pub first: ControlNode,
+    pub last: ControlNode,
 
     pub outputs: SmallVec<[Value; 2]>,
 }
 
-/// A control-flow "region" is a self-contained single-entry single-exit (SESE)
-/// subgraph of the control-flow graph (CFG) of a function, with child regions
-/// only appearing exactly once, and no mechanism for leaving the region and
-/// continuing to execute the parent function (or any other on the call stack),
-/// without going through its single exit (or "merge") point.
+/// A control-flow "node" is a self-contained single-entry single-exit (SESE)
+/// subgraph of the control-flow graph (CFG) of a function, with child nodes
+/// being grouped into `ControlRegion`s and only appearing exactly once, and
+/// no mechanism for leaving a `ControlNode`/`ControlRegion` and continuing to
+/// execute the parent function (or any other on the call stack), without going
+/// through its single exit (also called "merge") point.
 ///
-/// When the entire body of a function is effectively a whole such "region",
-/// that function is said to have (entirely) "structured control-flow".
+/// When the entire body of a function has its control-flow represented as a
+/// tree of `ControlRegion`s and their `ControlNode`s, that function is said
+/// to have (entirely) "structured control-flow".
 ///
 /// Note that this may differ from other "structured control-flow" definitions,
 /// in particular SPIR-V uses a laxer definition, that corresponds more to the
@@ -309,30 +313,30 @@ pub struct RegionGraph {
 /// and `return`s (making it non-trivial to inline one function into another).
 ///
 /// In SPIR-T, unstructured control-flow is represented with a separate CFG
-/// (i.e. a `cfg::ControlFlowGraph`) connecting regions together, and primarily
-/// exists as an intermediary state during lowering to structured regions.
+/// (i.e. a `cfg::ControlFlowGraph`) connecting `ControlNode`s together, and
+/// mainly exists as an intermediary state during lowering to structured regions.
 //
 // FIXME(eddyb) fully implement CFG structurization.
-pub struct RegionDef {
-    /// Backwards link in a `RegionGraph`'s doubly-link list of `Region`s.
-    pub prev_in_region_graph: Option<Region>,
-    /// Forwards link in a `RegionGraph`'s doubly-link list of `Region`s.
-    pub next_in_region_graph: Option<Region>,
+pub struct ControlNodeDef {
+    /// Backwards link in a `ControlRegion`'s doubly-link list of `ControlNode`s.
+    pub prev_in_control_region: Option<ControlNode>,
+    /// Forwards link in a `ControlRegion`'s doubly-link list of `ControlNode`s.
+    pub next_in_control_region: Option<ControlNode>,
 
-    pub kind: RegionKind,
-    pub outputs: SmallVec<[RegionOutputDecl; 2]>,
+    pub kind: ControlNodeKind,
+    pub outputs: SmallVec<[ControlNodeOutputDecl; 2]>,
 }
 
 #[derive(Copy, Clone)]
-pub struct RegionOutputDecl {
+pub struct ControlNodeOutputDecl {
     pub attrs: AttrSet,
 
     pub ty: Type,
 }
 
-pub enum RegionKind {
-    /// Helper `Region` used for conversions between a CFG and structured regions,
-    /// potentially having `RegionOutputDecl`s with values provided externally.
+pub enum ControlNodeKind {
+    /// Helper `ControlNode` used for conversions between a CFG and structured regions,
+    /// potentially having `ControlNodeOutputDecl`s with values provided externally.
     // FIXME(eddyb) is there a better way to do this?
     UnstructuredMerge,
 
@@ -365,8 +369,13 @@ pub enum DataInstKind {
 #[derive(Copy, Clone)]
 pub enum Value {
     Const(Const),
-    FuncParam { idx: u32 },
+    FuncParam {
+        idx: u32,
+    },
     // FIXME(eddyb) this variant alone increases the size of the `enum`.
-    RegionOutput { region: Region, output_idx: u32 },
+    ControlNodeOutput {
+        control_node: ControlNode,
+        output_idx: u32,
+    },
     DataInstOutput(DataInst),
 }

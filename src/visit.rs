@@ -1,8 +1,8 @@
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, RegionDef,
-    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNodeDef,
+    ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -270,25 +270,25 @@ impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
             data_insts,
-            regions,
+            control_nodes,
             body,
             cfg,
         } = self;
 
         for point in cfg.rev_post_order(body) {
-            let RegionDef {
-                prev_in_region_graph: _,
-                next_in_region_graph: _,
+            let ControlNodeDef {
+                prev_in_control_region: _,
+                next_in_control_region: _,
                 kind,
                 outputs,
-            } = &regions[point.region()];
+            } = &control_nodes[point.control_node()];
 
-            // HACK(eddyb) handle most of the region on `Entry`, but the outputs
-            // on `Exit` instead, to account for `RegionKind::UnstructuredMerge`.
+            // HACK(eddyb) handle most of the node on `Entry`, but the outputs
+            // on `Exit` instead, to account for `ControlNodeKind::UnstructuredMerge`.
             match point {
                 cfg::ControlPoint::Entry(_) => match kind {
-                    RegionKind::UnstructuredMerge => unreachable!(),
-                    RegionKind::Block { insts } => {
+                    ControlNodeKind::UnstructuredMerge => unreachable!(),
+                    ControlNodeKind::Block { insts } => {
                         for &inst in insts {
                             visitor.visit_data_inst_def(&data_insts[inst]);
                         }
@@ -308,7 +308,7 @@ impl InnerVisit for FuncDefBody {
     }
 }
 
-impl InnerVisit for RegionOutputDecl {
+impl InnerVisit for ControlNodeOutputDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self { attrs, ty } = *self;
 
@@ -376,8 +376,8 @@ impl InnerVisit for Value {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
             Self::FuncParam { idx: _ }
-            | Self::RegionOutput {
-                region: _,
+            | Self::ControlNodeOutput {
+                control_node: _,
                 output_idx: _,
             }
             | Self::DataInstOutput(_) => {}

@@ -1,8 +1,8 @@
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, RegionDef,
-    RegionKind, RegionOutputDecl, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNodeDef,
+    ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -450,25 +450,25 @@ impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         let Self {
             data_insts,
-            regions,
+            control_nodes,
             body,
             cfg,
         } = self;
 
         for point in cfg.rev_post_order(body) {
-            let RegionDef {
-                prev_in_region_graph: _,
-                next_in_region_graph: _,
+            let ControlNodeDef {
+                prev_in_control_region: _,
+                next_in_control_region: _,
                 kind,
                 outputs,
-            } = &mut regions[point.region()];
+            } = &mut control_nodes[point.control_node()];
 
-            // HACK(eddyb) handle most of the region on `Entry`, but the outputs
-            // on `Exit` instead, to account for `RegionKind::UnstructuredMerge`.
+            // HACK(eddyb) handle most of the node on `Entry`, but the outputs
+            // on `Exit` instead, to account for `ControlNodeKind::UnstructuredMerge`.
             match point {
                 cfg::ControlPoint::Entry(_) => match kind {
-                    RegionKind::UnstructuredMerge => {}
-                    RegionKind::Block { insts } => {
+                    ControlNodeKind::UnstructuredMerge => {}
+                    ControlNodeKind::Block { insts } => {
                         for inst in insts {
                             transformer.in_place_transform_data_inst_def(&mut data_insts[*inst]);
                         }
@@ -488,7 +488,7 @@ impl InnerInPlaceTransform for FuncDefBody {
     }
 }
 
-impl InnerTransform for RegionOutputDecl {
+impl InnerTransform for ControlNodeOutputDecl {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         let Self { attrs, ty } = self;
 
@@ -564,8 +564,8 @@ impl InnerTransform for Value {
             } => Self::Const(ct)),
 
             Self::FuncParam { idx: _ }
-            | Self::RegionOutput {
-                region: _,
+            | Self::ControlNodeOutput {
+                control_node: _,
                 output_idx: _,
             }
             | Self::DataInstOutput(_) => Transformed::Unchanged,
