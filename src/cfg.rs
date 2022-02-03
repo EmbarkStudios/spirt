@@ -13,66 +13,6 @@ pub struct ControlFlowGraph {
     pub control_insts: EntityOrientedDenseMap<ControlPoint, ControlInst>,
 }
 
-impl ControlFlowGraph {
-    /// Iterate over all `ControlPoint`s reachable through the CFG for `graph`,
-    /// in reverse post-order (RPO).
-    ///
-    /// RPO iteration over a CFG provides certain guarantees, most importantly
-    /// that SSA definitions are visited before any of their uses.
-    pub fn rev_post_order(
-        &self,
-        graph: &RegionGraph,
-    ) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        self.post_order(graph).rev()
-    }
-
-    /// Iterate over all `ControlPoint`s reachable through the CFG for `graph`,
-    /// in post-order.
-    pub fn post_order(&self, graph: &RegionGraph) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        let entry = ControlPoint::Entry(graph.first);
-        assert!(
-            graph.last == graph.first,
-            "unimplemented structural regions",
-        );
-
-        let mut post_order = SmallVec::<[_; 8]>::new();
-        {
-            let mut visited = EntityOrientedDenseMap::new();
-            self.post_order_step(entry, &mut visited, &mut post_order);
-        }
-
-        post_order.into_iter()
-    }
-
-    fn post_order_step(
-        &self,
-        point: ControlPoint,
-        // FIXME(eddyb) use a dense entity-oriented bitset here instead.
-        visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
-        post_order: &mut SmallVec<[ControlPoint; 8]>,
-    ) {
-        let already_visited = visited.insert(point, ()).is_some();
-        if already_visited {
-            return;
-        }
-
-        if let Some(control_inst) = self.control_insts.get(point) {
-            for &target in &control_inst.targets {
-                self.post_order_step(target, visited, post_order);
-            }
-        } else {
-            // Blocks don't have `ControlInst`s attached to their `Entry`,
-            // only to their `Exit`, but we don't have access to the `RegionDef`
-            // to confirm - however, only blocks should have this distinction.
-            if let ControlPoint::Entry(region) = point {
-                let target = ControlPoint::Exit(region);
-                self.post_order_step(target, visited, post_order);
-            }
-        }
-        post_order.push(point);
-    }
-}
-
 /// A point in the control-flow graph (CFG) of a function, relative to a `Region`.
 ///
 /// The whole CFG of the function consists of `ControlInst`s connecting all such
@@ -170,4 +110,64 @@ pub enum SelectionKind {
     BoolCond,
 
     SpvInst(spv::Inst),
+}
+
+impl ControlFlowGraph {
+    /// Iterate over all `ControlPoint`s reachable through the CFG for `graph`,
+    /// in reverse post-order (RPO).
+    ///
+    /// RPO iteration over a CFG provides certain guarantees, most importantly
+    /// that SSA definitions are visited before any of their uses.
+    pub fn rev_post_order(
+        &self,
+        graph: &RegionGraph,
+    ) -> impl DoubleEndedIterator<Item = ControlPoint> {
+        self.post_order(graph).rev()
+    }
+
+    /// Iterate over all `ControlPoint`s reachable through the CFG for `graph`,
+    /// in post-order.
+    pub fn post_order(&self, graph: &RegionGraph) -> impl DoubleEndedIterator<Item = ControlPoint> {
+        let entry = ControlPoint::Entry(graph.first);
+        assert!(
+            graph.last == graph.first,
+            "unimplemented structural regions",
+        );
+
+        let mut post_order = SmallVec::<[_; 8]>::new();
+        {
+            let mut visited = EntityOrientedDenseMap::new();
+            self.post_order_step(entry, &mut visited, &mut post_order);
+        }
+
+        post_order.into_iter()
+    }
+
+    fn post_order_step(
+        &self,
+        point: ControlPoint,
+        // FIXME(eddyb) use a dense entity-oriented bitset here instead.
+        visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
+        post_order: &mut SmallVec<[ControlPoint; 8]>,
+    ) {
+        let already_visited = visited.insert(point, ()).is_some();
+        if already_visited {
+            return;
+        }
+
+        if let Some(control_inst) = self.control_insts.get(point) {
+            for &target in &control_inst.targets {
+                self.post_order_step(target, visited, post_order);
+            }
+        } else {
+            // Blocks don't have `ControlInst`s attached to their `Entry`,
+            // only to their `Exit`, but we don't have access to the `RegionDef`
+            // to confirm - however, only blocks should have this distinction.
+            if let ControlPoint::Entry(region) = point {
+                let target = ControlPoint::Exit(region);
+                self.post_order_step(target, visited, post_order);
+            }
+        }
+        post_order.push(point);
+    }
 }
