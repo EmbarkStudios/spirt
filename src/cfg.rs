@@ -1,8 +1,8 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, ControlNode, ControlRegion, EntityOrientedDenseMap, EntityOrientedMapKey,
-    FxIndexMap, Value,
+    spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityOrientedDenseMap,
+    EntityOrientedMapKey, FuncDefBody, FxIndexMap, Value,
 };
 use smallvec::SmallVec;
 
@@ -113,41 +113,54 @@ pub enum SelectionKind {
 }
 
 impl ControlFlowGraph {
-    /// Iterate over all `ControlPoint`s reachable through the CFG for `region`,
+    /// Iterate over all `ControlPoint`s reachable through the CFG for `func_def_body`,
     /// in reverse post-order (RPO).
     ///
     /// RPO iteration over a CFG provides certain guarantees, most importantly
     /// that SSA definitions are visited before any of their uses.
     pub fn rev_post_order(
         &self,
-        region: &ControlRegion,
+        func_def_body: &FuncDefBody,
     ) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        self.post_order(region).rev()
+        self.post_order(func_def_body).rev()
     }
 
-    /// Iterate over all `ControlPoint`s reachable through the CFG for `region`,
+    /// Iterate over all `ControlPoint`s reachable through the CFG for `func_def_body`,
     /// in post-order.
     pub fn post_order(
         &self,
-        region: &ControlRegion,
+        func_def_body: &FuncDefBody,
     ) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        let entry = ControlPoint::Entry(region.first);
-        assert!(
-            region.last == region.first,
-            "unimplemented structured regions",
-        );
-
         let mut post_order = SmallVec::<[_; 8]>::new();
         {
             let mut visited = EntityOrientedDenseMap::new();
-            self.post_order_step(entry, &mut visited, &mut post_order);
+            self.post_order_step(
+                func_def_body,
+                Ok(&RefList::Empty),
+                ControlPoint::Entry(func_def_body.body.first),
+                &mut visited,
+                &mut post_order,
+            );
         }
 
         post_order.into_iter()
     }
+}
 
+/// Reference-based singly-linked list (used by `post_order_step` for ancestor nodes).
+enum RefList<'a, T> {
+    Empty,
+    Append(&'a RefList<'a, T>, T),
+}
+
+/// Error marker type for `post_order_step` leaving structured control-flow.
+struct OutsideStructuredControlFlow;
+
+impl ControlFlowGraph {
     fn post_order_step(
         &self,
+        func_def_body: &FuncDefBody,
+        ancestors: Result<&RefList<ControlNode>, OutsideStructuredControlFlow>,
         point: ControlPoint,
         // FIXME(eddyb) use a dense entity-oriented bitset here instead.
         visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
@@ -158,17 +171,78 @@ impl ControlFlowGraph {
             return;
         }
 
+        let mut visit_target = |new_ancestors: Result<&_, _>, target| {
+            self.post_order_step(func_def_body, new_ancestors, target, visited, post_order);
+        };
         if let Some(control_inst) = self.control_insts.get(point) {
+            // With a `ControlInst`, it can be followed regardless of `ControlNodeKind`.
             for &target in &control_inst.targets {
-                self.post_order_step(target, visited, post_order);
+                visit_target(Err(OutsideStructuredControlFlow), target);
             }
         } else {
-            // Blocks don't have `ControlInst`s attached to their `Entry`,
-            // only to their `Exit`, but we don't have access to the `ControlNodeDef`
-            // to confirm - however, only blocks should have this distinction.
-            if let ControlPoint::Entry(control_node) = point {
-                let target = ControlPoint::Exit(control_node);
-                self.post_order_step(target, visited, post_order);
+            // Without a `ControlInst`, edges must be structural/implicit.
+            let control_node = point.control_node();
+            let control_node_def = &func_def_body.control_nodes[control_node];
+
+            if let (ControlPoint::Entry(_), ControlNodeKind::Block { .. }) =
+                (point, &control_node_def.kind)
+            {
+                // Blocks don't have `ControlInst`s attached to their `Entry`,
+                // only to their `Exit`, so we pretend here there is an edge
+                // between their `Entry` and `Exit` points.
+                visit_target(ancestors, ControlPoint::Exit(control_node));
+            } else {
+                // FIXME(eddyb) is any of this machinery necessary? it might be
+                // best if the CFG wasn't used at all in the structured parts.
+
+                let ancestors = match ancestors {
+                    Ok(ancestors) => ancestors,
+                    Err(OutsideStructuredControlFlow) => {
+                        unreachable!(
+                            "cfg: missing `ControlInst`, despite having left structured control-flow"
+                        )
+                    }
+                };
+
+                match point {
+                    // Entering a `ControlNode` depends entirely on the `ControlNodeKind`.
+                    ControlPoint::Entry(_) => {
+                        let child_regions: &[ControlRegion] = match control_node_def.kind {
+                            ControlNodeKind::Block { .. } => unreachable!(),
+
+                            ControlNodeKind::UnstructuredMerge => &[],
+                        };
+                        for region in child_regions {
+                            visit_target(
+                                Ok(&RefList::Append(ancestors, control_node)),
+                                ControlPoint::Entry(region.first),
+                            )
+                        }
+                    }
+
+                    // Exiting a `ControlNode` chains to a sibling/parent.
+                    ControlPoint::Exit(_) => {
+                        match control_node_def.next_in_control_region {
+                            // Enter the next sibling in the `ControlRegion`, if one exists.
+                            Some(next_control_node) => {
+                                visit_target(Ok(ancestors), ControlPoint::Entry(next_control_node));
+                            }
+
+                            None => match ancestors {
+                                // Exit the parent `ControlNode`, if one exists.
+                                &RefList::Append(ancestors_of_parent, parent) => {
+                                    visit_target(
+                                        Ok(ancestors_of_parent),
+                                        ControlPoint::Exit(parent),
+                                    );
+                                }
+
+                                // Exiting the whole function body, structurally, is a noop.
+                                RefList::Empty => {}
+                            },
+                        }
+                    }
+                }
             }
         }
         post_order.push(point);

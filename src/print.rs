@@ -476,7 +476,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                 let mut control_node_counter = 0;
                 let mut value_counter = 0;
 
-                for point in func_def_body.cfg.rev_post_order(&func_def_body.body) {
+                for point in func_def_body.cfg.rev_post_order(func_def_body) {
                     let control_node = point.control_node();
                     let ControlNodeDef {
                         prev_in_control_region: _,
@@ -1510,14 +1510,16 @@ impl Print for FuncDecl {
 
         let def = match def {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
-            DeclDef::Present(FuncDefBody {
-                data_insts,
-                control_nodes,
-                body,
-                cfg,
-            }) => lazy_format!(|f| {
+            DeclDef::Present(
+                def @ FuncDefBody {
+                    data_insts,
+                    control_nodes,
+                    body: _,
+                    cfg,
+                },
+            ) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
-                for point in cfg.rev_post_order(body) {
+                for point in cfg.rev_post_order(def) {
                     let control_node = point.control_node();
                     let ControlNodeDef {
                         prev_in_control_region: _,

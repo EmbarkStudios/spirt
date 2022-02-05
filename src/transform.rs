@@ -448,14 +448,17 @@ impl InnerTransform for FuncParam {
 
 impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
+        // HACK(eddyb) have to compute this before borrowing any `self` fields.
+        let rpo = self.cfg.rev_post_order(self);
+
         let Self {
             data_insts,
             control_nodes,
-            body,
+            body: _,
             cfg,
         } = self;
 
-        for point in cfg.rev_post_order(body) {
+        for point in rpo {
             let ControlNodeDef {
                 prev_in_control_region: _,
                 next_in_control_region: _,

@@ -271,11 +271,11 @@ impl InnerVisit for FuncDefBody {
         let Self {
             data_insts,
             control_nodes,
-            body,
+            body: _,
             cfg,
         } = self;
 
-        for point in cfg.rev_post_order(body) {
+        for point in cfg.rev_post_order(self) {
             let ControlNodeDef {
                 prev_in_control_region: _,
                 next_in_control_region: _,
