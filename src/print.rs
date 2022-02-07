@@ -478,12 +478,8 @@ impl<'a, 'b> Printer<'a, 'b> {
 
                 for point in func_def_body.cfg.rev_post_order(func_def_body) {
                     let control_node = point.control_node();
-                    let ControlNodeDef {
-                        prev_in_control_region: _,
-                        next_in_control_region: _,
-                        kind,
-                        outputs,
-                    } = &func_def_body.control_nodes[control_node];
+                    let ControlNodeDef { kind, outputs } =
+                        &*func_def_body.control_nodes[control_node];
 
                     // Only handle each `ControlNode` once.
                     if let cfg::ControlPoint::Exit(_) = point {
@@ -1521,12 +1517,7 @@ impl Print for FuncDecl {
                 writeln!(f, "{} {{", sig)?;
                 for point in cfg.rev_post_order(def) {
                     let control_node = point.control_node();
-                    let ControlNodeDef {
-                        prev_in_control_region: _,
-                        next_in_control_region: _,
-                        kind,
-                        outputs,
-                    } = &control_nodes[control_node];
+                    let ControlNodeDef { kind, outputs } = &*control_nodes[control_node];
 
                     // Only handle each `ControlNode` once.
                     if let cfg::ControlPoint::Exit(_) = point {

@@ -459,12 +459,7 @@ impl InnerInPlaceTransform for FuncDefBody {
         } = self;
 
         for point in rpo {
-            let ControlNodeDef {
-                prev_in_control_region: _,
-                next_in_control_region: _,
-                kind,
-                outputs,
-            } = &mut control_nodes[point.control_node()];
+            let ControlNodeDef { kind, outputs } = &mut *control_nodes[point.control_node()];
 
             // HACK(eddyb) handle most of the node on `Entry`, but the outputs
             // on `Exit` instead, to account for `ControlNodeKind::UnstructuredMerge`.

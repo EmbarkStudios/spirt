@@ -276,12 +276,7 @@ impl InnerVisit for FuncDefBody {
         } = self;
 
         for point in cfg.rev_post_order(self) {
-            let ControlNodeDef {
-                prev_in_control_region: _,
-                next_in_control_region: _,
-                kind,
-                outputs,
-            } = &control_nodes[point.control_node()];
+            let ControlNodeDef { kind, outputs } = &*control_nodes[point.control_node()];
 
             // HACK(eddyb) handle most of the node on `Entry`, but the outputs
             // on `Exit` instead, to account for `ControlNodeKind::UnstructuredMerge`.

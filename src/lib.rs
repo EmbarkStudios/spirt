@@ -8,7 +8,7 @@ type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_h
 
 mod context;
 pub use context::{
-    AttrSet, Const, Context, ControlNode, DataInst, EntityDefs, EntityOrientedDenseMap,
+    AttrSet, Const, Context, ControlNode, DataInst, EntityDefs, EntityList, EntityOrientedDenseMap,
     EntityOrientedMapKey, Func, GlobalVar, InternedStr, Type,
 };
 
@@ -282,15 +282,13 @@ pub struct FuncDefBody {
 /// * provides direct access to `outputs` and ensures their presence
 ///
 /// Currently the `ControlNode` "graph" of a `ControlRegion` is a linear chain
-/// (using `first` and `last`, alongside the `{prev,next}_in_control_region`
-/// fields in each `ControlNodeDef`, to encode a doubly-linked list made of
-/// `ControlNode`s), but this may change in the future.
+/// (using `EntityList<ControlNode>`, a doubly-linked "intrusive" list going
+/// through `ControlNode`s' definitions), but this may change in the future.
 ///
 /// Also, regions could include `DataInst`s more directly (as simpler nodes),
 /// than merely having a `ControlNode` container for them (`ControlNodeKind::Block`).
 pub struct ControlRegion {
-    pub first: ControlNode,
-    pub last: ControlNode,
+    pub children: EntityList<ControlNode>,
 
     pub outputs: SmallVec<[Value; 2]>,
 }
@@ -318,11 +316,6 @@ pub struct ControlRegion {
 //
 // FIXME(eddyb) fully implement CFG structurization.
 pub struct ControlNodeDef {
-    /// Backwards link in a `ControlRegion`'s doubly-link list of `ControlNode`s.
-    pub prev_in_control_region: Option<ControlNode>,
-    /// Forwards link in a `ControlRegion`'s doubly-link list of `ControlNode`s.
-    pub next_in_control_region: Option<ControlNode>,
-
     pub kind: ControlNodeKind,
     pub outputs: SmallVec<[ControlNodeOutputDecl; 2]>,
 }

@@ -5,9 +5,9 @@ use crate::spv::{self, spec};
 use crate::{
     cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
-    DataInstKind, DeclDef, EntityDefs, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr, Module, Type, TypeCtor,
-    TypeCtorArg, TypeDef, Value,
+    DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
+    Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -756,18 +756,19 @@ impl Module {
                         let entry = control_nodes.define(
                             &cx,
                             ControlNodeDef {
-                                prev_in_control_region: None,
-                                next_in_control_region: None,
                                 kind: ControlNodeKind::Block { insts: vec![] },
                                 outputs: SmallVec::new(),
-                            },
+                            }
+                            .into(),
                         );
                         DeclDef::Present(FuncDefBody {
                             data_insts: Default::default(),
                             control_nodes,
                             body: ControlRegion {
-                                first: entry,
-                                last: entry,
+                                children: EntityList {
+                                    first: entry,
+                                    last: entry,
+                                },
                                 outputs: SmallVec::new(),
                             },
                             cfg: Default::default(),
@@ -927,18 +928,17 @@ impl Module {
                                 let block = if is_entry_block {
                                     // An empty `ControlNodeKind::Block` node was defined
                                     // earlier, to be able to create the `FuncDefBody`.
-                                    func_def_body.body.first
+                                    func_def_body.body.children.first
                                 } else {
                                     // HACK(eddyb) can't get a `ControlNode` without
                                     // defining it as an (empty) `ControlNodeDef` first.
                                     func_def_body.control_nodes.define(
                                         &cx,
                                         ControlNodeDef {
-                                            prev_in_control_region: None,
-                                            next_in_control_region: None,
                                             kind: ControlNodeKind::Block { insts: vec![] },
                                             outputs: SmallVec::new(),
-                                        },
+                                        }
+                                        .into(),
                                     )
                                 };
                                 block_details.insert(
@@ -967,11 +967,10 @@ impl Module {
                                         let phi_merge_target = func_def_body.control_nodes.define(
                                             &cx,
                                             ControlNodeDef {
-                                                prev_in_control_region: None,
-                                                next_in_control_region: None,
                                                 kind: ControlNodeKind::UnstructuredMerge,
                                                 outputs: SmallVec::new(),
-                                            },
+                                            }
+                                            .into(),
                                         );
                                         func_def_body.cfg.control_insts.insert(
                                             cfg::ControlPoint::Exit(phi_merge_target),
@@ -1484,7 +1483,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if block_details[&func_def_body.body.first].phi_count > 0 {
+                if block_details[&func_def_body.body.children.first].phi_count > 0 {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(

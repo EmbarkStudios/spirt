@@ -2,6 +2,7 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::mem;
 use std::num::NonZeroU32;
+use std::ops::{Deref, DerefMut};
 
 /// Context object with global resources for SPIR-T.
 ///
@@ -429,6 +430,67 @@ impl<K: EntityOrientedMapKey<V>, V> std::ops::IndexMut<K> for EntityOrientedDens
     }
 }
 
+/// Doubly-linked non-empty list, "intrusively" going through `E::Def`, which
+/// must be a `EntityListNode<E, _>`.
+///
+/// For a possibly-empty list, wrap an `EntityList` in `Option`.
+//
+// FIXME(eddyb) the non-empty aspect is very handy for `ControlRegion`, but
+// should it exist generally? maybe two types are needed instead?
+#[derive(Copy, Clone)]
+pub struct EntityList<E: sealed::Entity> {
+    // FIXME(eddyb) protect the structure of the list from arbitrary mutation.
+    pub first: E,
+    pub last: E,
+}
+
+/// `EntityList<E>` node, containing the "intrusive" list links, and the rest of
+/// the entity definition (the `inner_def` field of type `D`).
+///
+/// Fields are private to avoid arbitrary user interactions outside of special
+/// methods and `Deref`/`DerefMut`.
+//
+// FIXME(eddyb) `Deref`/`DerefMut` aren't the best API, could this be hidden
+// further by making `EntityDefs` hide the list links in the `Index` impl?
+pub struct EntityListNode<E: sealed::Entity<Def = Self>, D> {
+    prev: Option<E>,
+    next: Option<E>,
+
+    inner_def: D,
+}
+
+impl<E: sealed::Entity<Def = Self>, D> From<D> for EntityListNode<E, D> {
+    fn from(inner_def: D) -> Self {
+        Self {
+            prev: None,
+            next: None,
+            inner_def,
+        }
+    }
+}
+
+impl<E: sealed::Entity<Def = Self>, D> EntityListNode<E, D> {
+    pub fn prev_in_list(&self) -> Option<E> {
+        self.prev
+    }
+    pub fn next_in_list(&self) -> Option<E> {
+        self.next
+    }
+}
+
+impl<E: sealed::Entity<Def = Self>, D> Deref for EntityListNode<E, D> {
+    type Target = D;
+    fn deref(&self) -> &D {
+        &self.inner_def
+    }
+}
+
+impl<E: sealed::Entity<Def = Self>, D> DerefMut for EntityListNode<E, D> {
+    fn deref_mut(&mut self) -> &mut D {
+        &mut self.inner_def
+    }
+}
+
 macro_rules! interners {
     (
         needs_as_ref { $($needs_as_ref_ty:ty),* $(,)? }
@@ -566,6 +628,6 @@ macro_rules! entities {
 entities! {
     GlobalVar => chunk_size(0x1_0000) crate::GlobalVarDecl,
     Func => chunk_size(0x1_0000) crate::FuncDecl,
-    ControlNode => chunk_size(0x1000) crate::ControlNodeDef,
+    ControlNode => chunk_size(0x1000) EntityListNode<ControlNode, crate::ControlNodeDef>,
     DataInst => chunk_size(0x1000) crate::DataInstDef,
 }

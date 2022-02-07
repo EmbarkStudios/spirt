@@ -137,7 +137,7 @@ impl ControlFlowGraph {
             self.post_order_step(
                 func_def_body,
                 Ok(&RefList::Empty),
-                ControlPoint::Entry(func_def_body.body.first),
+                ControlPoint::Entry(func_def_body.body.children.first),
                 &mut visited,
                 &mut post_order,
             );
@@ -215,14 +215,14 @@ impl ControlFlowGraph {
                         for region in child_regions {
                             visit_target(
                                 Ok(&RefList::Append(ancestors, control_node)),
-                                ControlPoint::Entry(region.first),
+                                ControlPoint::Entry(region.children.first),
                             )
                         }
                     }
 
                     // Exiting a `ControlNode` chains to a sibling/parent.
                     ControlPoint::Exit(_) => {
-                        match control_node_def.next_in_control_region {
+                        match control_node_def.next_in_list() {
                             // Enter the next sibling in the `ControlRegion`, if one exists.
                             Some(next_control_node) => {
                                 visit_target(Ok(ancestors), ControlPoint::Entry(next_control_node));
