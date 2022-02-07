@@ -1,8 +1,9 @@
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNodeDef,
-    ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef,
+    ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -49,6 +50,9 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         func_decl.inner_visit_with(self);
+    }
+    fn visit_control_node_def(&mut self, func_at_control_node: FuncAt<'a, ControlNode>) {
+        func_at_control_node.inner_visit_with(self);
     }
     fn visit_data_inst_def(&mut self, data_inst_def: &'a DataInstDef) {
         data_inst_def.inner_visit_with(self);
@@ -269,36 +273,50 @@ impl InnerVisit for FuncParam {
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self {
-            data_insts,
+            data_insts: _,
             control_nodes,
             body: _,
             cfg,
         } = self;
 
         for point in cfg.rev_post_order(self) {
-            let ControlNodeDef { kind, outputs } = &*control_nodes[point.control_node()];
-
-            // HACK(eddyb) handle most of the node on `Entry`, but the outputs
-            // on `Exit` instead, to account for `ControlNodeKind::UnstructuredMerge`.
-            match point {
-                cfg::ControlPoint::Entry(_) => match kind {
-                    ControlNodeKind::UnstructuredMerge => unreachable!(),
-                    ControlNodeKind::Block { insts } => {
-                        for &inst in insts {
-                            visitor.visit_data_inst_def(&data_insts[inst]);
-                        }
-                    }
-                },
-                cfg::ControlPoint::Exit(_) => {
-                    for output in outputs {
-                        output.inner_visit_with(visitor);
-                    }
+            // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
+            // instead of `Entry`, because they don't have have `Entry`s.
+            let can_uniquely_visit = match control_nodes[point.control_node()].kind {
+                ControlNodeKind::UnstructuredMerge => {
+                    assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                    true
                 }
+                _ => matches!(point, cfg::ControlPoint::Entry(_)),
+            };
+
+            if can_uniquely_visit {
+                visitor.visit_control_node_def(self.at(point.control_node()));
             }
 
             if let Some(control_inst) = cfg.control_insts.get(point) {
                 control_inst.inner_visit_with(visitor);
             }
+        }
+    }
+}
+
+// FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
+// requirement, whereas this has `'a` in `self: FuncAt<'a, ControlNode>`.
+impl<'a> FuncAt<'a, ControlNode> {
+    fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
+        let ControlNodeDef { kind, outputs } = &*self.control_nodes[self.position];
+
+        match kind {
+            ControlNodeKind::UnstructuredMerge => {}
+            ControlNodeKind::Block { insts } => {
+                for &inst in insts {
+                    visitor.visit_data_inst_def(&self.data_insts[inst]);
+                }
+            }
+        }
+        for output in outputs {
+            output.inner_visit_with(visitor);
         }
     }
 }

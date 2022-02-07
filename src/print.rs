@@ -2,9 +2,9 @@ use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInst, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap,
-    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncDefBody, FuncParam,
+    FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
+    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use format::lazy_format;
 use rustc_hash::FxHashMap;
@@ -90,7 +90,8 @@ enum Use {
     GlobalVar(GlobalVar),
     Func(Func),
 
-    ControlNode(ControlNode),
+    ControlPointLabel(cfg::ControlPoint),
+
     ControlNodeOutput {
         control_node: ControlNode,
         output_idx: u32,
@@ -104,8 +105,7 @@ impl Use {
             Self::Interned(node) => node.category(),
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
-            // FIXME(eddyb) maybe generate C-style labels for non-structured CFGs?
-            Self::ControlNode(_) => "ctl",
+            Self::ControlPointLabel(_) => "label",
             Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => "v",
         }
     }
@@ -278,6 +278,24 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::Dyn(debug_info));
     }
 
+    fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
+        if let DeclDef::Present(func_def_body) = &func_decl.def {
+            // FIXME(eddyb) computing the RPO and not reusing it later isn't very
+            // efficient, but there aren't any other ways to get the right order.
+            for point in func_def_body.cfg.rev_post_order(func_def_body) {
+                if let Some(control_inst) = func_def_body.cfg.control_insts.get(point) {
+                    for &target in &control_inst.targets {
+                        *self
+                            .use_counts
+                            .entry(Use::ControlPointLabel(target))
+                            .or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        func_decl.inner_visit_with(self);
+    }
     fn visit_value_use(&mut self, v: &'a Value) {
         match *v {
             Value::Const(_) | Value::FuncParam { .. } => {}
@@ -384,7 +402,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::ControlNode(_)
+                if let Use::ControlPointLabel(_)
                 | Use::ControlNodeOutput { .. }
                 | Use::DataInstOutput(_) = use_kind
                 {
@@ -441,7 +459,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                             }
                     }
                     Use::GlobalVar(_) | Use::Func(_) => false,
-                    Use::ControlNode(_)
+                    Use::ControlPointLabel(_)
                     | Use::ControlNodeOutput { .. }
                     | Use::DataInstOutput(_) => {
                         unreachable!()
@@ -457,7 +475,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
                         Use::GlobalVar(_) => &mut ac.global_vars,
                         Use::Func(_) => &mut ac.funcs,
-                        Use::ControlNode(_)
+                        Use::ControlPointLabel(_)
                         | Use::ControlNodeOutput { .. }
                         | Use::DataInstOutput(_) => {
                             unreachable!()
@@ -473,30 +491,34 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         for (&_func, &func_decl) in &plan.func_decl_cache {
             if let DeclDef::Present(func_def_body) = &func_decl.def {
-                let mut control_node_counter = 0;
+                let mut control_pointer_label_counter = 0;
                 let mut value_counter = 0;
 
                 for point in func_def_body.cfg.rev_post_order(func_def_body) {
+                    if let Some(use_style) = use_styles.get_mut(&Use::ControlPointLabel(point)) {
+                        let idx = control_pointer_label_counter;
+                        control_pointer_label_counter += 1;
+                        *use_style = UseStyle::Anon { idx };
+                    }
+
+                    // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
+                    // instead of `Entry`, because they don't have have `Entry`s.
+                    let can_uniquely_visit =
+                        match func_def_body.control_nodes[point.control_node()].kind {
+                            ControlNodeKind::UnstructuredMerge => {
+                                assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                                true
+                            }
+                            _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                        };
+
+                    if !can_uniquely_visit {
+                        continue;
+                    }
+
                     let control_node = point.control_node();
                     let ControlNodeDef { kind, outputs } =
                         &*func_def_body.control_nodes[control_node];
-
-                    // Only handle each `ControlNode` once.
-                    if let cfg::ControlPoint::Exit(_) = point {
-                        match kind {
-                            // `ControlNodeKind::UnstructuredMerge` only has an `Exit`
-                            // (see also `cfg::ControlPoint`'s doc comment).
-                            ControlNodeKind::UnstructuredMerge => {}
-
-                            _ => continue,
-                        }
-                    }
-
-                    {
-                        let idx = control_node_counter;
-                        control_node_counter += 1;
-                        use_styles.insert(Use::ControlNode(control_node), UseStyle::Anon { idx });
-                    }
 
                     let block_insts = match kind {
                         ControlNodeKind::UnstructuredMerge => &[][..],
@@ -849,9 +871,9 @@ impl Print for Use {
                 }
                 Self::GlobalVar(_) => format!("/* unused global_var */_"),
                 Self::Func(_) => format!("/* unused func */_"),
-                Self::ControlNode(_) | Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => {
-                    "_".to_string()
-                }
+                Self::ControlPointLabel(_)
+                | Self::ControlNodeOutput { .. }
+                | Self::DataInstOutput(_) => "_".to_string(),
             },
         };
 
@@ -1508,87 +1530,61 @@ impl Print for FuncDecl {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
             DeclDef::Present(
                 def @ FuncDefBody {
-                    data_insts,
+                    data_insts: _,
                     control_nodes,
                     body: _,
                     cfg,
                 },
             ) => lazy_format!(|f| {
                 writeln!(f, "{} {{", sig)?;
+                let mut first = true;
                 for point in cfg.rev_post_order(def) {
-                    let control_node = point.control_node();
-                    let ControlNodeDef { kind, outputs } = &*control_nodes[control_node];
-
-                    // Only handle each `ControlNode` once.
-                    if let cfg::ControlPoint::Exit(_) = point {
-                        match kind {
-                            // `ControlNodeKind::UnstructuredMerge` only has an `Exit`
-                            // (see also `cfg::ControlPoint`'s doc comment).
-                            ControlNodeKind::UnstructuredMerge => {}
-
-                            _ => continue,
-                        }
-                    }
-
-                    let mut header = Use::ControlNode(control_node).print(printer);
-                    if !outputs.is_empty() {
-                        let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
-                            let AttrsAndDef { attrs, def } = output.print(printer);
-                            attrs
-                                + &Value::ControlNodeOutput {
-                                    control_node,
-                                    output_idx: output_idx.try_into().unwrap(),
-                                }
-                                .print(printer)
-                                + &def
-                        });
-                        let outputs_lhs = if outputs.len() == 1 {
-                            outputs.next().unwrap()
-                        } else {
-                            printer.pretty_join_comma_sep("(", outputs, ",", ")")
-                        };
-                        header = outputs_lhs + " = " + &header;
-                    }
-                    writeln!(f, "  {} {{", header.replace("\n", "\n    "))?;
-                    match kind {
+                    // HACK(eddyb) this needs to print `UnstructuredMerge`s on `Exit`
+                    // instead of `Entry`, because they don't have have `Entry`s.
+                    let can_uniquely_print = match control_nodes[point.control_node()].kind {
                         ControlNodeKind::UnstructuredMerge => {
-                            writeln!(f, "    /* unstructured merge */")?;
+                            assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                            true
                         }
-                        ControlNodeKind::Block { insts } => {
-                            for &inst in insts {
-                                let data_inst_def = &data_insts[inst];
-                                let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
+                        _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                    };
 
-                                if data_inst_def.output_type.is_some() {
-                                    let header =
-                                        format!("{} =", Use::DataInstOutput(inst).print(printer));
-                                    // FIXME(eddyb) the reindenting here hurts more than
-                                    // it helps, maybe it eneds a heuristics?
-                                    def = if false {
-                                        printer.pretty_join_space(&header, [def])
-                                    } else {
-                                        header + " " + &def
-                                    };
-                                }
-                                writeln!(f, "    {}", (attrs + &def).replace("\n", "\n    "))?;
-                            }
-
-                            // Visually isolate the control-flow instruction.
-                            if !insts.is_empty() {
-                                writeln!(f)?;
-                            }
-                        }
+                    if !can_uniquely_print {
+                        continue;
                     }
+
+                    // Separate (top-level) control nodes with empty lines.
+                    if !first {
+                        writeln!(f)?;
+                    }
+                    first = false;
+
+                    let label = Use::ControlPointLabel(point);
+                    let label_header = if printer.use_styles.contains_key(&label) {
+                        // FIXME(eddyb) `:` as used here for C-like "label syntax"
+                        // interferes (in theory) with `e: T` "type ascription syntax".
+                        format!("  {}:\n", label.print(printer))
+                    } else {
+                        String::new()
+                    };
+
+                    if let cfg::ControlPoint::Entry(_) = point {
+                        write!(f, "{}", label_header)?;
+                    }
+                    let control_node = point.control_node();
+                    let control_node_body = def.at(control_node).print(printer);
+                    if !control_node_body.is_empty() {
+                        writeln!(f, "    {}", control_node_body.replace("\n", "\n    "))?;
+                    }
+                    if let cfg::ControlPoint::Exit(_) = point {
+                        write!(f, "{}", label_header)?;
+                    }
+
                     if let Some(control_inst) =
                         cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
                     {
-                        writeln!(
-                            f,
-                            "    {}",
-                            control_inst.print(printer).replace("\n", "\n    ")
-                        )?;
+                        writeln!(f, "  {}", control_inst.print(printer).replace("\n", "\n  "))?;
                     }
-                    writeln!(f, "  }}")?;
                 }
                 write!(f, "}}")
             })
@@ -1611,6 +1607,71 @@ impl Print for FuncParam {
             attrs: attrs.print(printer),
             def: printer.pretty_type_ascription_suffix(ty),
         }
+    }
+}
+
+impl Print for FuncAt<'_, ControlNode> {
+    type Output = String;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        let control_node = self.position;
+        let ControlNodeDef { kind, outputs } = &*self.control_nodes[control_node];
+
+        lazy_format!(|f| {
+            if !outputs.is_empty() {
+                let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
+                    let AttrsAndDef { attrs, def } = output.print(printer);
+                    attrs
+                        + &Value::ControlNodeOutput {
+                            control_node,
+                            output_idx: output_idx.try_into().unwrap(),
+                        }
+                        .print(printer)
+                        + &def
+                });
+                let outputs_lhs = if outputs.len() == 1 {
+                    outputs.next().unwrap()
+                } else {
+                    printer.pretty_join_comma_sep("(", outputs, ",", ")")
+                };
+                write!(f, "{} = ", outputs_lhs)?;
+            }
+
+            match kind {
+                ControlNodeKind::UnstructuredMerge => {
+                    write!(f, "/* unstructured merge */")?;
+                }
+                ControlNodeKind::Block { insts } => {
+                    assert!(outputs.is_empty());
+
+                    let mut first = true;
+                    for &inst in insts {
+                        let data_inst_def = &self.data_insts[inst];
+                        let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
+
+                        if data_inst_def.output_type.is_some() {
+                            let header = format!("{} =", Use::DataInstOutput(inst).print(printer));
+                            // FIXME(eddyb) the reindenting here hurts more than
+                            // it helps, maybe it eneds a heuristics?
+                            def = if false {
+                                printer.pretty_join_space(&header, [def])
+                            } else {
+                                header + " " + &def
+                            };
+                        }
+
+                        if !first {
+                            writeln!(f)?;
+                        }
+                        first = false;
+
+                        write!(f, "{}{}", attrs, &def)?;
+                    }
+                }
+            }
+
+            Ok(())
+        })
+        .to_string()
     }
 }
 
@@ -1687,12 +1748,8 @@ impl Print for cfg::ControlInst {
         let mut targets: SmallVec<[_; 4]> = targets
             .iter()
             .map(|&point| {
-                let mut target = format!(
-                    "=> {}",
-                    Use::ControlNode(point.control_node()).print(printer)
-                );
+                let mut target = format!("=> {}", Use::ControlPointLabel(point).print(printer));
                 if let cfg::ControlPoint::Exit(control_node) = point {
-                    target += ".exit";
                     if let Some(outputs) = target_merge_outputs.get(&control_node) {
                         target = printer.pretty_join_comma_sep(
                             &(target + "("),

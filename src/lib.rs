@@ -263,6 +263,71 @@ pub struct FuncDefBody {
     pub cfg: cfg::ControlFlowGraph,
 }
 
+/// Immutable traversal (i.e. visiting) helper for intra-function entities.
+///
+/// The point/position type `P` should be an entity or a shallow entity wrapper
+/// (e.g. `EntityList<ControlRegion>` or `cfg::ControlPoint`).
+#[derive(Copy, Clone)]
+pub struct FuncAt<'a, P: Copy> {
+    pub data_insts: &'a EntityDefs<DataInst>,
+    pub control_nodes: &'a EntityDefs<ControlNode>,
+
+    pub position: P,
+}
+
+impl<'a, P: Copy> FuncAt<'a, P> {
+    /// Reposition to `new_position`.
+    pub fn at<P2: Copy>(self, new_position: P2) -> FuncAt<'a, P2> {
+        FuncAt {
+            data_insts: self.data_insts,
+            control_nodes: self.control_nodes,
+            position: new_position,
+        }
+    }
+}
+
+impl<'a, P: Copy> FuncAtMut<'a, P> {
+    /// Reposition to `new_position`.
+    pub fn at<P2: Copy>(self, new_position: P2) -> FuncAtMut<'a, P2> {
+        FuncAtMut {
+            data_insts: self.data_insts,
+            control_nodes: self.control_nodes,
+            position: new_position,
+        }
+    }
+}
+
+/// Mutable traversal (i.e. transforming) helper for intra-function entities.
+///
+/// The point/position type `P` should be an entity or a shallow entity wrapper
+/// (e.g. `EntityList<ControlRegion>` or `cfg::ControlPoint`).
+pub struct FuncAtMut<'a, P: Copy> {
+    pub data_insts: &'a mut EntityDefs<DataInst>,
+    pub control_nodes: &'a mut EntityDefs<ControlNode>,
+
+    pub position: P,
+}
+
+impl FuncDefBody {
+    /// Start immutably traversing the function at `position`.
+    pub fn at<'a, P: Copy>(&'a self, position: P) -> FuncAt<'a, P> {
+        FuncAt {
+            data_insts: &self.data_insts,
+            control_nodes: &self.control_nodes,
+            position,
+        }
+    }
+
+    /// Start mutably traversing the function at `position`.
+    pub fn at_mut<'a, P: Copy>(&'a mut self, position: P) -> FuncAtMut<'a, P> {
+        FuncAtMut {
+            data_insts: &mut self.data_insts,
+            control_nodes: &mut self.control_nodes,
+            position,
+        }
+    }
+}
+
 /// A graph of `ControlNode`s, asymmetrically isolated from surrounding `ControlNode`s:
 /// * inputs inside the region are free to use values defined outside
 /// * values defined inside the region are hidden from outside users

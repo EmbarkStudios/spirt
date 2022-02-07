@@ -2,7 +2,7 @@
 
 use crate::{
     spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityOrientedDenseMap,
-    EntityOrientedMapKey, FuncDefBody, FxIndexMap, Value,
+    EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, Value,
 };
 use smallvec::SmallVec;
 
@@ -135,9 +135,8 @@ impl ControlFlowGraph {
         {
             let mut visited = EntityOrientedDenseMap::new();
             self.post_order_step(
-                func_def_body,
+                func_def_body.at(ControlPoint::Entry(func_def_body.body.children.first)),
                 Ok(&RefList::Empty),
-                ControlPoint::Entry(func_def_body.body.children.first),
                 &mut visited,
                 &mut post_order,
             );
@@ -159,20 +158,20 @@ struct OutsideStructuredControlFlow;
 impl ControlFlowGraph {
     fn post_order_step(
         &self,
-        func_def_body: &FuncDefBody,
+        func_at_point: FuncAt<ControlPoint>,
         ancestors: Result<&RefList<ControlNode>, OutsideStructuredControlFlow>,
-        point: ControlPoint,
         // FIXME(eddyb) use a dense entity-oriented bitset here instead.
         visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
         post_order: &mut SmallVec<[ControlPoint; 8]>,
     ) {
+        let point = func_at_point.position;
         let already_visited = visited.insert(point, ()).is_some();
         if already_visited {
             return;
         }
 
         let mut visit_target = |new_ancestors: Result<&_, _>, target| {
-            self.post_order_step(func_def_body, new_ancestors, target, visited, post_order);
+            self.post_order_step(func_at_point.at(target), new_ancestors, visited, post_order);
         };
         if let Some(control_inst) = self.control_insts.get(point) {
             // With a `ControlInst`, it can be followed regardless of `ControlNodeKind`.
@@ -182,7 +181,7 @@ impl ControlFlowGraph {
         } else {
             // Without a `ControlInst`, edges must be structural/implicit.
             let control_node = point.control_node();
-            let control_node_def = &func_def_body.control_nodes[control_node];
+            let control_node_def = &func_at_point.control_nodes[control_node];
 
             if let (ControlPoint::Entry(_), ControlNodeKind::Block { .. }) =
                 (point, &control_node_def.kind)
