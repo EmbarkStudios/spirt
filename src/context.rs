@@ -433,15 +433,118 @@ impl<K: EntityOrientedMapKey<V>, V> std::ops::IndexMut<K> for EntityOrientedDens
 /// Doubly-linked non-empty list, "intrusively" going through `E::Def`, which
 /// must be a `EntityListNode<E, _>`.
 ///
+/// Fields are private to avoid arbitrary user interactions.
+///
 /// For a possibly-empty list, wrap an `EntityList` in `Option`.
 //
 // FIXME(eddyb) the non-empty aspect is very handy for `ControlRegion`, but
 // should it exist generally? maybe two types are needed instead?
 #[derive(Copy, Clone)]
 pub struct EntityList<E: sealed::Entity> {
-    // FIXME(eddyb) protect the structure of the list from arbitrary mutation.
+    first: E,
+    last: E,
+}
+
+impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
+    pub fn iter(self) -> EntityListIter<E> {
+        EntityListIter {
+            first: self.first,
+            last: self.last,
+        }
+    }
+
+    /// Insert `new_node` (defined in `defs`) at the end of `old_list`, producing
+    /// a new list. This does not rely on `&mut self` because of the assymmetry
+    /// between `old_list` and the new list (which doesn't need `Option`).
+    //
+    // FIXME(eddyb) the awkwardness of this API could be alleviated by not
+    // requiring `EntityList` to be non-empty.
+    #[track_caller]
+    pub fn insert_last(old_list: Option<Self>, new_node: E, defs: &mut EntityDefs<E>) -> Self {
+        let new_node_def = &mut defs[new_node];
+        assert!(
+            new_node_def.prev.is_none() && new_node_def.next.is_none(),
+            "EntityList::insert_last: new node already linked into a (different?) list"
+        );
+
+        new_node_def.prev = old_list.map(|ol| ol.last);
+        if let Some(old_last) = new_node_def.prev {
+            let old_last_def = &mut defs[old_last];
+
+            // FIXME(eddyb) this situation should be impossible anyway, as it
+            // involves the `EntityListNode`s links, which should be unforgeable.
+            assert!(
+                old_last_def.next.is_none(),
+                "invalid EntityList: `last->next != None`"
+            );
+
+            old_last_def.next = Some(new_node);
+        }
+
+        Self {
+            first: old_list.map_or(new_node, |ol| ol.first),
+            last: new_node,
+        }
+    }
+}
+
+/// Non-empty `EntityList<E>` iterator, but with a different API than `Iterator`.
+///
+/// This can also be considered a (non-random-access) "subslice" of the list.
+///
+/// For a possibly-empty iterator, wrap an `EntityListIter` in `Option`.
+#[derive(Copy, Clone)]
+pub struct EntityListIter<E: sealed::Entity> {
     pub first: E,
     pub last: E,
+}
+
+impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityListIter<E> {
+    #[track_caller]
+    pub fn split_first(self, defs: &EntityDefs<E>) -> (E, Option<Self>) {
+        let Self {
+            first: current,
+            last,
+        } = self;
+        let next = defs[current].next;
+        match next {
+            // FIXME(eddyb) this situation should be impossible anyway, as it
+            // involves the `EntityListNode`s links, which should be unforgeable.
+            Some(next) => assert!(
+                defs[next].prev == Some(current),
+                "invalid EntityListNode: `node->next->prev != node`"
+            ),
+
+            None => assert!(
+                current == last,
+                "invalid EntityListIter: `first->next->...->next != last`"
+            ),
+        }
+        (current, next.map(|next| Self { first: next, last }))
+    }
+
+    #[track_caller]
+    pub fn split_last(self, defs: &EntityDefs<E>) -> (E, Option<Self>) {
+        let Self {
+            first,
+            last: current,
+        } = self;
+        let prev = defs[current].prev;
+        match prev {
+            // FIXME(eddyb) this situation should be impossible anyway, as it
+            // involves the `EntityListNode`s links, which should be unforgeable.
+            Some(prev) => assert!(
+                defs[prev].next == Some(current),
+                "invalid EntityListNode: `node->prev->next != node`"
+            ),
+
+            None => assert!(
+                current == first,
+                "invalid EntityListIter: `last->prev->...->prev != first`"
+            ),
+        }
+        (current, prev.map(|prev| Self { first, last: prev }))
+    }
 }
 
 /// `EntityList<E>` node, containing the "intrusive" list links, and the rest of
@@ -629,5 +732,5 @@ entities! {
     GlobalVar => chunk_size(0x1_0000) crate::GlobalVarDecl,
     Func => chunk_size(0x1_0000) crate::FuncDecl,
     ControlNode => chunk_size(0x1000) EntityListNode<ControlNode, crate::ControlNodeDef>,
-    DataInst => chunk_size(0x1000) crate::DataInstDef,
+    DataInst => chunk_size(0x1000) EntityListNode<DataInst, crate::DataInstDef>,
 }

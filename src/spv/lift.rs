@@ -4,9 +4,9 @@ use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
     cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeKind,
-    ControlNodeOutputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, ExportKey, Exportee, Func,
-    FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNodeOutputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, EntityList, ExportKey,
+    Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -202,7 +202,7 @@ struct FuncLifting<'a> {
 
 struct BlockLifting<'a> {
     phis: SmallVec<[Phi; 2]>,
-    insts: SmallVec<[&'a [DataInst]; 1]>,
+    insts: SmallVec<[EntityList<DataInst>; 1]>,
     terminator: &'a cfg::ControlInst,
 }
 
@@ -296,7 +296,7 @@ impl<'a> FuncLifting<'a> {
                 } else {
                     SmallVec::new()
                 };
-                let (insts, terminator) = match &control_node_def.kind {
+                let (insts, terminator) = match control_node_def.kind {
                     ControlNodeKind::Block { insts } => {
                         // The terminator of a `ControlNodeKind::Block` is attached
                         // to its `Exit` point, but as per the `filter` above,
@@ -307,7 +307,7 @@ impl<'a> FuncLifting<'a> {
                             .get(cfg::ControlPoint::Exit(point.control_node()))
                             .expect("missing terminator for `ControlNodeKind::Block`");
 
-                        (iter::once(&insts[..]).collect(), terminator)
+                        (insts.into_iter().collect(), terminator)
                     }
                     _ => (
                         SmallVec::new(),
@@ -425,13 +425,10 @@ impl<'a> FuncLifting<'a> {
 
         let all_insts_with_output = blocks
             .values()
-            .flat_map(|block| block.insts.iter().copied().flatten())
-            .copied()
-            .filter(|&inst| {
-                func_def_body.unwrap().data_insts[inst]
-                    .output_type
-                    .is_some()
-            });
+            .flat_map(|block| block.insts.iter().copied())
+            .flat_map(|insts| func_def_body.unwrap().at(Some(insts)))
+            .filter(|&func_at_inst| func_at_inst.def().output_type.is_some())
+            .map(|func_at_inst| func_at_inst.position);
 
         Ok(Self {
             func_id: alloc_id()?,
@@ -879,7 +876,6 @@ impl Module {
                             terminator,
                         } = block;
 
-                        let func_def_body = func_def_body.unwrap();
                         iter::once(LazyInst::OpLabel {
                             label_id: func_lifting.label_ids[&point],
                         })
@@ -887,16 +883,23 @@ impl Module {
                             parent_func: func_lifting,
                             phi,
                         }))
-                        .chain(insts.iter().copied().flatten().map(move |&inst| {
-                            let data_inst_def = &func_def_body.data_insts[inst];
-                            LazyInst::DataInst {
-                                parent_func: func_lifting,
-                                result_id: data_inst_def
-                                    .output_type
-                                    .map(|_| func_lifting.data_inst_output_ids[&inst]),
-                                data_inst_def,
-                            }
-                        }))
+                        .chain(
+                            insts
+                                .iter()
+                                .copied()
+                                .flat_map(move |insts| func_def_body.unwrap().at(Some(insts)))
+                                .map(move |func_at_inst| {
+                                    let data_inst_def = func_at_inst.def();
+                                    LazyInst::DataInst {
+                                        parent_func: func_lifting,
+                                        result_id: data_inst_def.output_type.map(|_| {
+                                            func_lifting.data_inst_output_ids
+                                                [&func_at_inst.position]
+                                        }),
+                                        data_inst_def,
+                                    }
+                                }),
+                        )
                         .chain([LazyInst::ControlInst {
                             parent_func: func_lifting,
                             control_inst: terminator,

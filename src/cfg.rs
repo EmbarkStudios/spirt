@@ -135,7 +135,9 @@ impl ControlFlowGraph {
         {
             let mut visited = EntityOrientedDenseMap::new();
             self.post_order_step(
-                func_def_body.at(ControlPoint::Entry(func_def_body.body.children.first)),
+                func_def_body.at(ControlPoint::Entry(
+                    func_def_body.body.children.iter().first,
+                )),
                 Ok(&RefList::Empty),
                 &mut visited,
                 &mut post_order,
@@ -214,7 +216,7 @@ impl ControlFlowGraph {
                         for region in child_regions {
                             visit_target(
                                 Ok(&RefList::Append(ancestors, control_node)),
-                                ControlPoint::Entry(region.children.first),
+                                ControlPoint::Entry(region.children.iter().first),
                             )
                         }
                     }

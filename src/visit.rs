@@ -305,13 +305,13 @@ impl InnerVisit for FuncDefBody {
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ControlNode>`.
 impl<'a> FuncAt<'a, ControlNode> {
     fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
-        let ControlNodeDef { kind, outputs } = &*self.control_nodes[self.position];
+        let ControlNodeDef { kind, outputs } = self.def();
 
-        match kind {
+        match *kind {
             ControlNodeKind::UnstructuredMerge => {}
             ControlNodeKind::Block { insts } => {
-                for &inst in insts {
-                    visitor.visit_data_inst_def(&self.data_insts[inst]);
+                for func_at_inst in self.at(insts) {
+                    visitor.visit_data_inst_def(func_at_inst.def());
                 }
             }
         }

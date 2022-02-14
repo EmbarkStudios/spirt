@@ -8,8 +8,8 @@ type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_h
 
 mod context;
 pub use context::{
-    AttrSet, Const, Context, ControlNode, DataInst, EntityDefs, EntityList, EntityOrientedDenseMap,
-    EntityOrientedMapKey, Func, GlobalVar, InternedStr, Type,
+    AttrSet, Const, Context, ControlNode, DataInst, EntityDefs, EntityList, EntityListIter,
+    EntityOrientedDenseMap, EntityOrientedMapKey, Func, GlobalVar, InternedStr, Type,
 };
 
 pub mod cfg;
@@ -286,7 +286,45 @@ impl<'a, P: Copy> FuncAt<'a, P> {
     }
 }
 
+impl<'a> IntoIterator for FuncAt<'a, Option<EntityList<DataInst>>> {
+    type IntoIter = FuncAt<'a, Option<EntityListIter<DataInst>>>;
+    type Item = FuncAt<'a, DataInst>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.at(self.position.map(|list| list.iter()))
+    }
+}
+
+impl<'a> Iterator for FuncAt<'a, Option<EntityListIter<DataInst>>> {
+    type Item = FuncAt<'a, DataInst>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (next, rest) = self.position?.split_first(&self.data_insts);
+        self.position = rest;
+        Some(self.at(next))
+    }
+}
+
+impl<'a> FuncAt<'a, DataInst> {
+    pub fn def(self) -> &'a DataInstDef {
+        &self.data_insts[self.position]
+    }
+}
+
+impl<'a> FuncAt<'a, ControlNode> {
+    pub fn def(self) -> &'a ControlNodeDef {
+        &self.control_nodes[self.position]
+    }
+}
+
 impl<'a, P: Copy> FuncAtMut<'a, P> {
+    /// Emulate a "reborrow", which is automatic only for `&mut` types.
+    pub fn reborrow(&mut self) -> FuncAtMut<'_, P> {
+        FuncAtMut {
+            data_insts: self.data_insts,
+            control_nodes: self.control_nodes,
+            position: self.position,
+        }
+    }
+
     /// Reposition to `new_position`.
     pub fn at<P2: Copy>(self, new_position: P2) -> FuncAtMut<'a, P2> {
         FuncAtMut {
@@ -294,6 +332,35 @@ impl<'a, P: Copy> FuncAtMut<'a, P> {
             control_nodes: self.control_nodes,
             position: new_position,
         }
+    }
+}
+
+// HACK(eddyb) can't implement `IntoIterator` because `next` borrows `self`.
+impl<'a> FuncAtMut<'a, Option<EntityList<DataInst>>> {
+    fn into_iter(self) -> FuncAtMut<'a, Option<EntityListIter<DataInst>>> {
+        let iter = self.position.map(|list| list.iter());
+        self.at(iter)
+    }
+}
+
+// HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
+impl FuncAtMut<'_, Option<EntityListIter<DataInst>>> {
+    fn next(&mut self) -> Option<FuncAtMut<'_, DataInst>> {
+        let (next, rest) = self.position?.split_first(&self.data_insts);
+        self.position = rest;
+        Some(self.reborrow().at(next))
+    }
+}
+
+impl<'a> FuncAtMut<'a, DataInst> {
+    pub fn def(self) -> &'a mut DataInstDef {
+        &mut self.data_insts[self.position]
+    }
+}
+
+impl<'a> FuncAtMut<'a, ControlNode> {
+    pub fn def(self) -> &'a mut ControlNodeDef {
+        &mut self.control_nodes[self.position]
     }
 }
 
@@ -399,7 +466,13 @@ pub enum ControlNodeKind {
     UnstructuredMerge,
 
     Block {
-        insts: Vec<DataInst>,
+        // FIXME(eddyb) should empty blocks be allowed? should their usecases be
+        // handled by a different `ControlNodeKind`? they mainly exist so that
+        // an empty `ControlRegion` can still have an entry & exit, but that
+        // itself might not be necessary (ironically, that's the main reason for
+        // `EntityList` being non-empty, so there's a kind of "balancing act").
+        // (OTOH, empty blocks could easily arise through e.g. dead code removal)
+        insts: Option<EntityList<DataInst>>,
     },
 }
 

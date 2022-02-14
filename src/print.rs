@@ -520,17 +520,17 @@ impl<'a, 'b> Printer<'a, 'b> {
                     let ControlNodeDef { kind, outputs } =
                         &*func_def_body.control_nodes[control_node];
 
-                    let block_insts = match kind {
-                        ControlNodeKind::UnstructuredMerge => &[][..],
+                    let block_insts = match *kind {
+                        ControlNodeKind::UnstructuredMerge => None,
                         ControlNodeKind::Block { insts } => insts,
                     };
 
                     let defined_values =
-                        block_insts
-                            .iter()
-                            .copied()
-                            .filter(|&inst| func_def_body.data_insts[inst].output_type.is_some())
-                            .map(Use::DataInstOutput)
+                        func_def_body
+                            .at(block_insts)
+                            .into_iter()
+                            .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
+                            .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
                             .chain(outputs.iter().enumerate().map(|(i, _)| {
                                 Use::ControlNodeOutput {
                                     control_node,
@@ -1614,7 +1614,7 @@ impl Print for FuncAt<'_, ControlNode> {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
         let control_node = self.position;
-        let ControlNodeDef { kind, outputs } = &*self.control_nodes[control_node];
+        let ControlNodeDef { kind, outputs } = self.def();
 
         lazy_format!(|f| {
             if !outputs.is_empty() {
@@ -1636,7 +1636,7 @@ impl Print for FuncAt<'_, ControlNode> {
                 write!(f, "{} = ", outputs_lhs)?;
             }
 
-            match kind {
+            match *kind {
                 ControlNodeKind::UnstructuredMerge => {
                     write!(f, "/* unstructured merge */")?;
                 }
@@ -1644,12 +1644,15 @@ impl Print for FuncAt<'_, ControlNode> {
                     assert!(outputs.is_empty());
 
                     let mut first = true;
-                    for &inst in insts {
-                        let data_inst_def = &self.data_insts[inst];
+                    for func_at_inst in self.at(insts) {
+                        let data_inst_def = func_at_inst.def();
                         let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
 
                         if data_inst_def.output_type.is_some() {
-                            let header = format!("{} =", Use::DataInstOutput(inst).print(printer));
+                            let header = format!(
+                                "{} =",
+                                Use::DataInstOutput(func_at_inst.position).print(printer)
+                            );
                             // FIXME(eddyb) the reindenting here hurts more than
                             // it helps, maybe it eneds a heuristics?
                             def = if false {

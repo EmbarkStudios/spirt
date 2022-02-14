@@ -482,16 +482,19 @@ impl InnerInPlaceTransform for FuncDefBody {
 
 impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let ControlNodeDef { kind, outputs } = &mut *self.control_nodes[self.position];
-
-        match kind {
+        // HACK(eddyb) handle `kind` separately to allow reborrowing `FuncAtMut`.
+        match self.reborrow().def().kind {
             ControlNodeKind::UnstructuredMerge => {}
             ControlNodeKind::Block { insts } => {
-                for inst in insts {
-                    transformer.in_place_transform_data_inst_def(&mut self.data_insts[*inst]);
+                let mut func_at_inst_iter = self.reborrow().at(insts).into_iter();
+                while let Some(func_at_inst) = func_at_inst_iter.next() {
+                    transformer.in_place_transform_data_inst_def(func_at_inst.def());
                 }
             }
         }
+
+        let ControlNodeDef { kind: _, outputs } = self.reborrow().def();
+
         for output in outputs {
             output.inner_transform_with(transformer).apply_to(output);
         }

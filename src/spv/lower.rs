@@ -756,21 +756,19 @@ impl Module {
                         let entry = control_nodes.define(
                             &cx,
                             ControlNodeDef {
-                                kind: ControlNodeKind::Block { insts: vec![] },
+                                kind: ControlNodeKind::Block { insts: None },
                                 outputs: SmallVec::new(),
                             }
                             .into(),
                         );
+                        let body = ControlRegion {
+                            children: EntityList::insert_last(None, entry, &mut control_nodes),
+                            outputs: SmallVec::new(),
+                        };
                         DeclDef::Present(FuncDefBody {
                             data_insts: Default::default(),
                             control_nodes,
-                            body: ControlRegion {
-                                children: EntityList {
-                                    first: entry,
-                                    last: entry,
-                                },
-                                outputs: SmallVec::new(),
-                            },
+                            body,
                             cfg: Default::default(),
                         })
                     }
@@ -928,14 +926,14 @@ impl Module {
                                 let block = if is_entry_block {
                                     // An empty `ControlNodeKind::Block` node was defined
                                     // earlier, to be able to create the `FuncDefBody`.
-                                    func_def_body.body.children.first
+                                    func_def_body.body.children.iter().first
                                 } else {
                                     // HACK(eddyb) can't get a `ControlNode` without
                                     // defining it as an (empty) `ControlNodeDef` first.
                                     func_def_body.control_nodes.define(
                                         &cx,
                                         ControlNodeDef {
-                                            kind: ControlNodeKind::Block { insts: vec![] },
+                                            kind: ControlNodeKind::Block { insts: None },
                                             outputs: SmallVec::new(),
                                         }
                                         .into(),
@@ -1021,7 +1019,8 @@ impl Module {
                                         kind: DataInstKind::SpvInst(wk.OpNop.into()),
                                         output_type: None,
                                         inputs: [].into_iter().collect(),
-                                    },
+                                    }
+                                    .into(),
                                 );
                                 LocalIdDef::Value(Value::DataInstOutput(inst))
                             }
@@ -1294,7 +1293,7 @@ impl Module {
                         },
                     );
                 } else if opcode == wk.OpPhi {
-                    if !current_block_insts.is_empty() {
+                    if !current_block_insts.is_none() {
                         return Err(invalid(
                             "out of order: `OpPhi`s should come before \
                              the rest of the block's instructions",
@@ -1415,15 +1414,19 @@ impl Module {
                             LocalIdDef::Value(Value::DataInstOutput(inst)) => {
                                 // A dummy was defined earlier, to be able to
                                 // have an entry in `local_id_defs`.
-                                func_def_body.data_insts[inst] = data_inst_def;
+                                func_def_body.data_insts[inst] = data_inst_def.into();
 
                                 inst
                             }
                             _ => unreachable!(),
                         },
-                        None => func_def_body.data_insts.define(&cx, data_inst_def),
+                        None => func_def_body.data_insts.define(&cx, data_inst_def.into()),
                     };
-                    current_block_insts.push(inst);
+                    *current_block_insts = Some(EntityList::insert_last(
+                        *current_block_insts,
+                        inst,
+                        &mut func_def_body.data_insts,
+                    ));
                 }
             }
 
@@ -1483,7 +1486,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if block_details[&func_def_body.body.children.first].phi_count > 0 {
+                if block_details[&func_def_body.body.children.iter().first].phi_count > 0 {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(
