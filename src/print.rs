@@ -1,3 +1,8 @@
+// FIXME(eddyb) stop using `itertools` for methods like `intersperse` when they
+// get stabilized on `Iterator` instead.
+#![allow(unstable_name_collisions)]
+use itertools::Itertools as _;
+
 use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
@@ -629,13 +634,12 @@ impl<'a, 'b> Printer<'a, 'b> {
         )
     }
 
-    /// Returns `prefix + contents.join(comma + " ") + suffix` if the resulting
-    /// string can fit on one line, or a multi-line indented version otherwise.
+    /// Returns `prefix + contents.join(", ") + suffix` if the resulting string
+    /// can fit on one line, or a multi-line indented version otherwise.
     fn pretty_join_comma_sep(
         &self,
         prefix: &str,
         contents: impl IntoIterator<Item = String>,
-        comma: &str,
         suffix: &str,
     ) -> String {
         // FIXME(eddyb) this is probably more complicated than it needs to be.
@@ -651,34 +655,19 @@ impl<'a, 'b> Printer<'a, 'b> {
                 },
             ]
             .into_iter()
-            .chain(contents.into_iter().enumerate().flat_map(|(i, entry)| {
-                // FIXME(eddyb) use `Iterator::intersperse` when that's stable.
-                let sep = if i == 0 {
-                    None
-                } else {
-                    Some([
-                        PrettyPiece::Joiner {
-                            single_line: comma,
-                            multi_line: comma,
-                        },
-                        PrettyPiece::Joiner {
-                            single_line: " ",
-                            multi_line: "\n  ",
-                        },
-                    ])
-                };
-                sep.into_iter()
-                    .flatten()
-                    .chain([PrettyPiece::Content(entry)])
-            }))
+            .chain(
+                contents
+                    .into_iter()
+                    .map(|entry| PrettyPiece::Content(entry))
+                    .intersperse(PrettyPiece::Joiner {
+                        single_line: ", ",
+                        multi_line: ",\n  ",
+                    }),
+            )
             .chain([
                 PrettyPiece::Joiner {
                     single_line: "",
-                    multi_line: comma,
-                },
-                PrettyPiece::Joiner {
-                    single_line: "",
-                    multi_line: "\n",
+                    multi_line: ",\n",
                 },
                 PrettyPiece::Joiner {
                     single_line: suffix,
@@ -761,7 +750,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         let mut out = opcode.name().to_string();
 
         if angle_bracket_operands.peek().is_some() {
-            out = self.pretty_join_comma_sep(&(out + "<"), angle_bracket_operands, ",", ">");
+            out = self.pretty_join_comma_sep(&(out + "<"), angle_bracket_operands, ">");
         }
 
         let type_ascription_suffix = result_type.map(|ty| self.pretty_type_ascription_suffix(ty));
@@ -770,7 +759,6 @@ impl<'a, 'b> Printer<'a, 'b> {
             out = self.pretty_join_comma_sep(
                 &(out + "("),
                 paren_operands,
-                ",",
                 type_ascription_suffix
                     .map(|s| format!("){}", s))
                     .as_deref()
@@ -787,6 +775,7 @@ impl<'a, 'b> Printer<'a, 'b> {
 }
 
 /// Helper type for for `pretty_concat_pieces`.
+#[derive(Clone)]
 enum PrettyPiece<'a> {
     Content(String),
     Joiner {
@@ -1522,7 +1511,6 @@ impl Print for FuncDecl {
                     .print(printer)
                     + &def
             }),
-            ",",
             &format!(") -> {}", ret_type.print(printer)),
         );
 
@@ -1631,7 +1619,7 @@ impl Print for FuncAt<'_, ControlNode> {
                 let outputs_lhs = if outputs.len() == 1 {
                     outputs.next().unwrap()
                 } else {
-                    printer.pretty_join_comma_sep("(", outputs, ",", ")")
+                    printer.pretty_join_comma_sep("(", outputs, ")")
                 };
                 write!(f, "{} = ", outputs_lhs)?;
             }
@@ -1724,7 +1712,6 @@ impl Print for DataInstDef {
         let def = printer.pretty_join_comma_sep(
             &(header + "("),
             inputs.iter().map(|v| v.print(printer)),
-            ",",
             &output_type
                 .map(|ty| format!("){}", printer.pretty_type_ascription_suffix(ty)))
                 .as_deref()
@@ -1765,7 +1752,6 @@ impl Print for cfg::ControlInst {
                                     + " <- "
                                     + &v.print(printer)
                             }),
-                            ",",
                             ")",
                         );
                     }
