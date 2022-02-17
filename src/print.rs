@@ -14,6 +14,7 @@ use crate::{
 use format::lazy_format;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::{fmt, iter};
 
 /// "Definitions-before-uses" / "topo-sorted" printing plan.
@@ -567,12 +568,14 @@ impl<'a, 'b> Printer<'a, 'b> {
 
     /// Returns a concatenation of `pieces` using `.for_single_line()` if the
     /// resulting string can fit on one line, or a multi-line indented version
-    /// otherwise (`.for_multi_line()` with reindented `Content` pieces).
+    /// otherwise (`.for_multi_line()` and `{Push,Pop}Indent`-driven indentation).
     fn pretty_concat_pieces<'c>(
         &self,
         pieces: impl IntoIterator<Item = PrettyPiece<'c>>,
+        // FIXME(eddyb) fit this into `{Push,Pop}Indent` somehow.
+        multi_line_override: Option<bool>,
     ) -> String {
-        let mut pieces: SmallVec<[_; 16]> = pieces.into_iter().collect();
+        let pieces: SmallVec<[_; 16]> = pieces.into_iter().collect();
 
         // FIXME(eddyb) make max line width configurable.
         let max_line_len = 80;
@@ -588,25 +591,78 @@ impl<'a, 'b> Printer<'a, 'b> {
                     .filter(|&len| len <= max_line_len)
             })
             .is_some();
+        let fits_on_single_line = multi_line_override
+            .map(|force_multi_line| !force_multi_line)
+            .unwrap_or(fits_on_single_line);
 
-        if !fits_on_single_line {
-            // FIXME(eddyb) automate reindenting (and make it configurable).
-            for piece in &mut pieces {
-                if let PrettyPiece::Content(content) = piece {
-                    *content = content.replace("\n", "\n  ");
-                }
-            }
-        }
+        // FIXME(eddyb) make this configurable.
+        const INDENT: &str = "  ";
 
-        let pieces = pieces.iter().map(|piece| {
-            if fits_on_single_line {
-                piece.for_single_line()
-            } else {
-                piece.for_multi_line()
+        let mk_reindented_pieces = || {
+            /// Operation on a representation that stores lines separately.
+            /// Such a representation doesn't exist yet - instead, an iterator
+            /// of `LineOp`s is turned into an iterator of `&str`s.
+            #[derive(Copy, Clone)]
+            enum LineOp<'a> {
+                AppendToLine(&'a str),
+                StartNewLine { indent_after: u32 },
             }
-        });
-        let mut combined = String::with_capacity(pieces.clone().map(|s| s.len()).sum());
-        combined.extend(pieces);
+
+            let mut indent = 0;
+            let mut line_ops = pieces
+                .iter()
+                .flat_map(move |piece| {
+                    match piece {
+                        PrettyPiece::PushIndent => indent += 1,
+                        PrettyPiece::PopIndent => {
+                            assert!(indent > 0);
+                            indent -= 1;
+                        }
+                        _ => {}
+                    }
+
+                    let piece_text = if fits_on_single_line {
+                        piece.for_single_line()
+                    } else {
+                        piece.for_multi_line()
+                    };
+
+                    piece_text
+                        .split('\n')
+                        .map(LineOp::AppendToLine)
+                        .intersperse(LineOp::StartNewLine {
+                            indent_after: indent,
+                        })
+                })
+                .filter(|op| !matches!(op, LineOp::AppendToLine("")))
+                .peekable();
+
+            iter::from_fn(move || {
+                let (text, indent_after) = match line_ops.next()? {
+                    LineOp::AppendToLine(text) => (text, 0),
+                    LineOp::StartNewLine { indent_after } => {
+                        // HACK(eddyb) this is not perfect because we don't have
+                        // the entire document ahead of time, but it does avoid
+                        // any trailing indentation internal to any one call.
+                        let is_starting_empty_line =
+                            matches!(line_ops.peek(), Some(LineOp::StartNewLine { .. }));
+
+                        (
+                            "\n",
+                            if is_starting_empty_line {
+                                0
+                            } else {
+                                indent_after
+                            },
+                        )
+                    }
+                };
+                Some(iter::once(text).chain((0..indent_after).map(|_| INDENT)))
+            })
+            .flatten()
+        };
+        let mut combined = String::with_capacity(mk_reindented_pieces().map(|s| s.len()).sum());
+        combined.extend(mk_reindented_pieces());
         combined
     }
 
@@ -618,19 +674,61 @@ impl<'a, 'b> Printer<'a, 'b> {
         contents: impl IntoIterator<Item = String>,
     ) -> String {
         self.pretty_concat_pieces(
-            iter::once(PrettyPiece::Joiner {
-                single_line: header,
-                multi_line: header,
-            })
-            .chain(contents.into_iter().flat_map(|entry| {
-                [
-                    PrettyPiece::Joiner {
-                        single_line: " ",
-                        multi_line: "\n  ",
-                    },
-                    PrettyPiece::Content(entry),
-                ]
-            })),
+            [header.into(), PrettyPiece::PushIndent]
+                .into_iter()
+                .chain(contents.into_iter().flat_map(|entry| {
+                    [
+                        PrettyPiece::Joiner {
+                            single_line: " ",
+                            multi_line: "\n",
+                        },
+                        entry.into(),
+                    ]
+                }))
+                .chain([PrettyPiece::PopIndent]),
+            None,
+        )
+    }
+
+    // FIXME(eddyb) remove the need for this by replacing `prefix`/`suffix` with
+    // some `enum` that also determines whether to force the multi-line format.
+    // Alternatively, `contents` values could indicate whether they have to be
+    // on their own lines (without including extra `\n` themselves).
+    fn pretty_join_comma_sep_with_multiline_override(
+        &self,
+        prefix: &str,
+        contents: impl IntoIterator<Item = String>,
+        suffix: &str,
+        multi_line_override: Option<bool>,
+    ) -> String {
+        self.pretty_concat_pieces(
+            [
+                prefix.into(),
+                PrettyPiece::PushIndent,
+                PrettyPiece::Joiner {
+                    single_line: "",
+                    multi_line: "\n",
+                },
+            ]
+            .into_iter()
+            .chain(
+                contents
+                    .into_iter()
+                    .map(|entry| PrettyPiece::Text(entry.into()))
+                    .intersperse(PrettyPiece::Joiner {
+                        single_line: ", ",
+                        multi_line: ",\n",
+                    }),
+            )
+            .chain([
+                PrettyPiece::PopIndent,
+                PrettyPiece::Joiner {
+                    single_line: "",
+                    multi_line: ",\n",
+                },
+                suffix.into(),
+            ]),
+            multi_line_override,
         )
     }
 
@@ -642,39 +740,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         contents: impl IntoIterator<Item = String>,
         suffix: &str,
     ) -> String {
-        // FIXME(eddyb) this is probably more complicated than it needs to be.
-        self.pretty_concat_pieces(
-            [
-                PrettyPiece::Joiner {
-                    single_line: prefix,
-                    multi_line: prefix,
-                },
-                PrettyPiece::Joiner {
-                    single_line: "",
-                    multi_line: "\n  ",
-                },
-            ]
-            .into_iter()
-            .chain(
-                contents
-                    .into_iter()
-                    .map(|entry| PrettyPiece::Content(entry))
-                    .intersperse(PrettyPiece::Joiner {
-                        single_line: ", ",
-                        multi_line: ",\n  ",
-                    }),
-            )
-            .chain([
-                PrettyPiece::Joiner {
-                    single_line: "",
-                    multi_line: ",\n",
-                },
-                PrettyPiece::Joiner {
-                    single_line: suffix,
-                    multi_line: suffix,
-                },
-            ]),
-        )
+        self.pretty_join_comma_sep_with_multiline_override(prefix, contents, suffix, None)
     }
 
     /// Pretty-print a `: T` style "type ascription" suffix.
@@ -777,23 +843,42 @@ impl<'a, 'b> Printer<'a, 'b> {
 /// Helper type for for `pretty_concat_pieces`.
 #[derive(Clone)]
 enum PrettyPiece<'a> {
-    Content(String),
+    // FIXME(eddyb) make this more like a "DOM" instead of flatly stateful.
+    PushIndent,
+    PopIndent,
+
     Joiner {
         single_line: &'a str,
         multi_line: &'a str,
     },
+
+    Text(Cow<'a, str>),
+}
+
+impl<'a> From<&'a str> for PrettyPiece<'a> {
+    fn from(text: &'a str) -> Self {
+        Self::Text(text.into())
+    }
+}
+
+impl From<String> for PrettyPiece<'_> {
+    fn from(text: String) -> Self {
+        Self::Text(text.into())
+    }
 }
 
 impl PrettyPiece<'_> {
     fn for_single_line(&self) -> &str {
         match self {
-            Self::Content(s) => s,
+            Self::PushIndent | Self::PopIndent => "",
+            Self::Text(s) => s,
             Self::Joiner { single_line, .. } => single_line,
         }
     }
     fn for_multi_line(&self) -> &str {
         match self {
-            Self::Content(s) => s,
+            Self::PushIndent | Self::PopIndent => "",
+            Self::Text(s) => s,
             Self::Joiner { multi_line, .. } => multi_line,
         }
     }
@@ -963,130 +1048,131 @@ impl Print for Node<'_> {
 impl Print for Module {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
-        lazy_format!(|f| {
-            if self.exports.is_empty() {
-                return Ok(());
-            }
-            writeln!(f, "export {{")?;
-            for (export_key, exportee) in &self.exports {
-                writeln!(
-                    f,
-                    "  {}: {},",
-                    export_key.print(printer).replace("\n", "\n  "),
-                    exportee.print(printer)
-                )?;
-            }
-            write!(f, "}}")
-        })
-        .to_string()
+        if self.exports.is_empty() {
+            return String::new();
+        }
+
+        printer.pretty_join_comma_sep_with_multiline_override(
+            "export {",
+            self.exports.iter().map(|(export_key, exportee)| {
+                (export_key.print(printer) + ": " + &exportee.print(printer)).into()
+            }),
+            "}",
+            Some(true),
+        )
     }
 }
 
 impl Print for ModuleDialect {
     type Output = String;
-    fn print(&self, _printer: &Printer<'_, '_>) -> String {
-        lazy_format!(|f| {
-            write!(f, "module.dialect = ")?;
-            match self {
-                Self::Spv(spv::Dialect {
-                    version_major,
-                    version_minor,
-                    capabilities,
-                    extensions,
-                    addressing_model,
-                    memory_model,
-                }) => {
-                    let wk = &spv::spec::Spec::get().well_known;
+    fn print(&self, printer: &Printer<'_, '_>) -> String {
+        let dialect = match self {
+            Self::Spv(spv::Dialect {
+                version_major,
+                version_minor,
+                capabilities,
+                extensions,
+                addressing_model,
+                memory_model,
+            }) => {
+                let wk = &spv::spec::Spec::get().well_known;
 
-                    writeln!(f, "SPIR-V {{")?;
-                    writeln!(f, "  version: {}.{},", version_major, version_minor)?;
-                    writeln!(f, "  extensions: {:?},", extensions)?;
-
-                    write!(f, "  capabilities: ")?;
-                    f.debug_set()
-                        .entries(capabilities.iter().map(|&cap| {
-                            format::Debug(move |f| {
-                                write!(f, "{}", spv::print::imm(wk.Capability, cap))
-                            })
-                        }))
-                        .finish()?;
-                    writeln!(f, ",")?;
-
-                    writeln!(
-                        f,
-                        "  addressing_model: {},",
-                        spv::print::imm(wk.AddressingModel, *addressing_model)
-                    )?;
-                    writeln!(
-                        f,
-                        "  memory_model: {},",
-                        spv::print::imm(wk.MemoryModel, *memory_model)
-                    )?;
-                    write!(f, "}}")
-                }
+                printer.pretty_join_comma_sep_with_multiline_override(
+                    "SPIR-V {",
+                    [
+                        format!("version: {}.{}", version_major, version_minor),
+                        printer.pretty_join_comma_sep(
+                            "extensions: {",
+                            extensions.iter().map(|ext| format!("{:?}", ext)),
+                            "}",
+                        ),
+                        printer.pretty_join_comma_sep(
+                            "capabilities: {",
+                            capabilities
+                                .iter()
+                                .map(|&cap| spv::print::imm(wk.Capability, cap)),
+                            "}",
+                        ),
+                        format!(
+                            "addressing_model: {}",
+                            spv::print::imm(wk.AddressingModel, *addressing_model)
+                        ),
+                        format!(
+                            "memory_model: {}",
+                            spv::print::imm(wk.MemoryModel, *memory_model)
+                        ),
+                    ],
+                    "}",
+                    Some(true),
+                )
             }
-        })
-        .to_string()
+        };
+        format!("module.dialect = {}", dialect)
     }
 }
 
 impl Print for ModuleDebugInfo {
     type Output = String;
     fn print(&self, printer: &Printer<'_, '_>) -> String {
-        lazy_format!(|f| {
-            write!(f, "module.debug_info = ")?;
-            match self {
-                Self::Spv(spv::ModuleDebugInfo {
-                    original_generator_magic,
-                    source_languages,
-                    source_extensions,
-                    module_processes,
-                }) => {
-                    let wk = &spv::spec::Spec::get().well_known;
+        let debug_info = match self {
+            Self::Spv(spv::ModuleDebugInfo {
+                original_generator_magic,
+                source_languages,
+                source_extensions,
+                module_processes,
+            }) => {
+                let wk = &spv::spec::Spec::get().well_known;
 
-                    writeln!(f, "SPIR-V {{")?;
-
-                    if let Some(generator_magic) = original_generator_magic {
-                        let (tool_id, tool_version) =
-                            (generator_magic.get() >> 16, generator_magic.get() as u16);
-                        writeln!(
-                            f,
-                            "  generator: {{ tool_id: {}, version: {} }},",
-                            tool_id, tool_version
-                        )?;
-                    }
-
-                    write!(f, "  source_languages: {{")?;
-                    if !source_languages.is_empty() {
-                        writeln!(f)?;
-                        for (lang, sources) in source_languages {
-                            let spv::DebugSources { file_contents } = sources;
-                            write!(
-                                f,
-                                "    {} {{ version: {} }}: {{",
-                                spv::print::imm(wk.SourceLanguage, lang.lang),
-                                lang.version
-                            )?;
-                            if !file_contents.is_empty() {
-                                writeln!(f)?;
-                                for (&file, contents) in file_contents {
-                                    writeln!(f, "      {:?}: {:?},", &printer.cx[file], contents)?;
-                                }
-                                write!(f, "    ")?;
-                            }
-                            writeln!(f, "}},")?;
-                        }
-                        write!(f, "  ")?;
-                    }
-                    writeln!(f, "}},")?;
-
-                    writeln!(f, "  source_extensions: {:?},", source_extensions)?;
-                    writeln!(f, "  module_processes: {:?},", module_processes)?;
-                    write!(f, "}}")
-                }
+                printer.pretty_join_comma_sep_with_multiline_override(
+                    "SPIR-V {",
+                    [
+                        format!(
+                            "generator: {}",
+                            original_generator_magic
+                                .map(|generator_magic| {
+                                    let (tool_id, tool_version) =
+                                        (generator_magic.get() >> 16, generator_magic.get() as u16);
+                                    format!("{{ tool_id: {}, version: {} }}", tool_id, tool_version)
+                                })
+                                .unwrap_or_else(|| "unknown".into())
+                        ),
+                        printer.pretty_join_comma_sep_with_multiline_override(
+                            "source_languages: {",
+                            source_languages.iter().map(|(lang, sources)| {
+                                let spv::DebugSources { file_contents } = sources;
+                                printer.pretty_join_comma_sep_with_multiline_override(
+                                    &format!(
+                                        "{} {{ version: {} }}: {{",
+                                        spv::print::imm(wk.SourceLanguage, lang.lang),
+                                        lang.version
+                                    ),
+                                    file_contents.iter().map(|(&file, contents)| {
+                                        format!("{:?}: {:?}", &printer.cx[file], contents)
+                                    }),
+                                    "}",
+                                    if !file_contents.is_empty() {
+                                        Some(true)
+                                    } else {
+                                        None
+                                    },
+                                )
+                            }),
+                            "}",
+                            if !source_languages.is_empty() {
+                                Some(true)
+                            } else {
+                                None
+                            },
+                        ),
+                        format!("source_extensions: {:?}", source_extensions),
+                        format!("module_processes: {:?}", module_processes),
+                    ],
+                    "}",
+                    Some(true),
+                )
             }
-        })
-        .to_string()
+        };
+        format!("module.debug_info = {}", debug_info)
     }
 }
 
@@ -1158,19 +1244,23 @@ impl Print for AttrSetDef {
             }
         }
 
-        let non_comment_attrs = match &non_comment_attrs[..] {
-            [] => String::new(),
-            // FIXME(eddyb) this could use `pretty_join_comma_sep`, except that
-            // will gladly put multiple attributes on the same line.
-            [attr] if !attr.contains("\n") => format!("#{{{}}}", attr),
-            _ => lazy_format!(|f| {
-                writeln!(f, "#{{")?;
-                for attr in &non_comment_attrs {
-                    writeln!(f, "  {},", attr.replace("\n", "\n  "))?;
-                }
-                write!(f, "}}")
-            })
-            .to_string(),
+        let non_comment_attrs = if non_comment_attrs.is_empty() {
+            String::new()
+        } else {
+            // FIXME(eddyb) remove this special-case by having some mode for
+            // "prefer multi-line but admit a single-element compact form".
+            let multi_line_override = if non_comment_attrs.len() > 1 {
+                Some(true)
+            } else {
+                None
+            };
+
+            printer.pretty_join_comma_sep_with_multiline_override(
+                "#{",
+                non_comment_attrs,
+                "}",
+                multi_line_override,
+            )
         };
 
         let comments = comments.join("\n");
@@ -1523,60 +1613,82 @@ impl Print for FuncDecl {
                     body: _,
                     cfg,
                 },
-            ) => lazy_format!(|f| {
-                writeln!(f, "{} {{", sig)?;
-                let mut first = true;
-                for point in cfg.rev_post_order(def) {
-                    // HACK(eddyb) this needs to print `UnstructuredMerge`s on `Exit`
-                    // instead of `Entry`, because they don't have have `Entry`s.
-                    let can_uniquely_print = match control_nodes[point.control_node()].kind {
-                        ControlNodeKind::UnstructuredMerge => {
-                            assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                            true
-                        }
-                        _ => matches!(point, cfg::ControlPoint::Entry(_)),
-                    };
+            ) => printer.pretty_concat_pieces(
+                [sig.into(), " {".into(), PrettyPiece::PushIndent]
+                    .into_iter()
+                    .chain(
+                        cfg.rev_post_order(def)
+                            .filter(|point| {
+                                // HACK(eddyb) this needs to print `UnstructuredMerge`s on `Exit`
+                                // instead of `Entry`, because they don't have have `Entry`s.
+                                match control_nodes[point.control_node()].kind {
+                                    ControlNodeKind::UnstructuredMerge => {
+                                        assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                                        true
+                                    }
+                                    _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                                }
+                            })
+                            .enumerate()
+                            .flat_map(|(i, point)| {
+                                let label = Use::ControlPointLabel(point);
+                                let label_header = if printer.use_styles.contains_key(&label) {
+                                    // FIXME(eddyb) `:` as used here for C-like "label syntax"
+                                    // interferes (in theory) with `e: T` "type ascription syntax".
+                                    Some((label.print(printer) + ":").into())
+                                } else {
+                                    None
+                                };
+                                let (entry_label_header, exit_label_header) = match point {
+                                    cfg::ControlPoint::Entry(_) => (label_header, None),
+                                    cfg::ControlPoint::Exit(_) => (None, label_header),
+                                };
 
-                    if !can_uniquely_print {
-                        continue;
-                    }
+                                let control_node = point.control_node();
+                                let control_node_body = def.at(control_node).print(printer);
 
-                    // Separate (top-level) control nodes with empty lines.
-                    if !first {
-                        writeln!(f)?;
-                    }
-                    first = false;
-
-                    let label = Use::ControlPointLabel(point);
-                    let label_header = if printer.use_styles.contains_key(&label) {
-                        // FIXME(eddyb) `:` as used here for C-like "label syntax"
-                        // interferes (in theory) with `e: T` "type ascription syntax".
-                        format!("  {}:\n", label.print(printer))
-                    } else {
-                        String::new()
-                    };
-
-                    if let cfg::ControlPoint::Entry(_) = point {
-                        write!(f, "{}", label_header)?;
-                    }
-                    let control_node = point.control_node();
-                    let control_node_body = def.at(control_node).print(printer);
-                    if !control_node_body.is_empty() {
-                        writeln!(f, "    {}", control_node_body.replace("\n", "\n    "))?;
-                    }
-                    if let cfg::ControlPoint::Exit(_) = point {
-                        write!(f, "{}", label_header)?;
-                    }
-
-                    if let Some(control_inst) =
-                        cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
-                    {
-                        writeln!(f, "  {}", control_inst.print(printer).replace("\n", "\n  "))?;
-                    }
-                }
-                write!(f, "}}")
-            })
-            .to_string(),
+                                [
+                                    if i > 0 {
+                                        // Separate (top-level) control nodes with empty lines.
+                                        Some("".into())
+                                    } else {
+                                        None
+                                    },
+                                    entry_label_header,
+                                    Some(PrettyPiece::PushIndent),
+                                    if !control_node_body.is_empty() {
+                                        Some(control_node_body.into())
+                                    } else {
+                                        None
+                                    },
+                                    Some(PrettyPiece::PopIndent),
+                                    exit_label_header,
+                                    if let Some(control_inst) =
+                                        cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
+                                    {
+                                        Some(control_inst.print(printer).into())
+                                    } else {
+                                        None
+                                    },
+                                ]
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|piece| {
+                                    // FIXME(eddyb) this should use a mechanism
+                                    // for "force onto separate lines" instead
+                                    // of inserting `\n` manually.
+                                    let prefix_newline = if let PrettyPiece::Text(_) = piece {
+                                        Some("\n".into())
+                                    } else {
+                                        None
+                                    };
+                                    prefix_newline.into_iter().chain([piece])
+                                })
+                            }),
+                    )
+                    .chain([PrettyPiece::PopIndent, "\n".into(), "}".into()]),
+                Some(true),
+            ),
         };
 
         AttrsAndDef {
@@ -1735,38 +1847,37 @@ impl Print for cfg::ControlInst {
 
         let attrs = attrs.print(printer);
 
-        let mut targets: SmallVec<[_; 4]> = targets
-            .iter()
-            .map(|&point| {
-                let mut target = format!("=> {}", Use::ControlPointLabel(point).print(printer));
-                if let cfg::ControlPoint::Exit(control_node) = point {
-                    if let Some(outputs) = target_merge_outputs.get(&control_node) {
-                        target = printer.pretty_join_comma_sep(
-                            &(target + "("),
-                            outputs.iter().enumerate().map(|(output_idx, v)| {
-                                Value::ControlNodeOutput {
-                                    control_node: control_node,
-                                    output_idx: output_idx.try_into().unwrap(),
-                                }
-                                .print(printer)
-                                    + " <- "
-                                    + &v.print(printer)
-                            }),
-                            ")",
-                        );
-                    }
+        let mut targets = targets.iter().map(|&point| {
+            let mut target = format!("=> {}", Use::ControlPointLabel(point).print(printer));
+            if let cfg::ControlPoint::Exit(control_node) = point {
+                if let Some(outputs) = target_merge_outputs.get(&control_node) {
+                    target = printer.pretty_join_comma_sep(
+                        &(target + "("),
+                        outputs.iter().enumerate().map(|(output_idx, v)| {
+                            Value::ControlNodeOutput {
+                                control_node: control_node,
+                                output_idx: output_idx.try_into().unwrap(),
+                            }
+                            .print(printer)
+                                + " <- "
+                                + &v.print(printer)
+                        }),
+                        ")",
+                    );
                 }
-                target
-            })
-            .collect();
+            }
+            target
+        });
 
         let def = match *kind {
             cfg::ControlInstKind::Unreachable => {
-                assert!(targets.is_empty() && inputs.is_empty());
+                // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
+                assert!(targets.len() == 0 && inputs.is_empty());
                 "unreachable".to_string()
             }
             cfg::ControlInstKind::Return => {
-                assert!(targets.is_empty());
+                // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
+                assert!(targets.len() == 0);
                 match inputs[..] {
                     [] => "return".to_string(),
                     [v] => format!("return {}", v.print(printer)),
@@ -1777,28 +1888,42 @@ impl Print for cfg::ControlInst {
                 opcode,
                 ref imms,
             })) => {
-                assert!(targets.is_empty());
+                // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
+                assert!(targets.len() == 0);
                 printer.pretty_spv_inst(opcode, imms, inputs, Print::print, None)
             }
 
             cfg::ControlInstKind::Branch => {
                 assert_eq!((targets.len(), inputs.len()), (1, 0));
-                format!("branch {}", targets[0])
+                format!("branch {}", targets.nth(0).unwrap())
             }
 
             cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond) => {
                 assert_eq!((targets.len(), inputs.len()), (2, 1));
-
-                // FIXME(eddyb) automate reindenting (and make it configurable).
-                for target in &mut targets {
-                    *target = target.replace("\n", "\n  ");
-                }
-
-                format!(
-                    "if {} {{\n  {}\n}} else {{\n  {}\n}}",
-                    inputs[0].print(printer),
-                    targets[0],
-                    targets[1]
+                let [target_then, target_else] = {
+                    // HACK(eddyb) work around the lack of `Into<[T; N]>` on `SmallVec`.
+                    let mut it = targets.into_iter();
+                    [it.next().unwrap(), it.next().unwrap()]
+                };
+                printer.pretty_concat_pieces(
+                    [
+                        "if ".into(),
+                        inputs[0].print(printer).into(),
+                        " {".into(),
+                        PrettyPiece::PushIndent,
+                        "\n".into(),
+                        target_then.into(),
+                        PrettyPiece::PopIndent,
+                        "\n".into(),
+                        "} else {".into(),
+                        PrettyPiece::PushIndent,
+                        "\n".into(),
+                        target_else.into(),
+                        PrettyPiece::PopIndent,
+                        "\n".into(),
+                        "}".into(),
+                    ],
+                    Some(true),
                 )
             }
             cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(spv::Inst {
@@ -1814,7 +1939,7 @@ impl Print for cfg::ControlInst {
                     inputs
                         .iter()
                         .map(Ok)
-                        .chain(targets.iter().map(|_| Err(TargetLabelId))),
+                        .chain((0..targets.len()).map(|_| Err(TargetLabelId))),
                     |id, printer| match id {
                         Ok(v) => Some(v.print(printer)),
                         Err(TargetLabelId) => None,
@@ -1824,14 +1949,13 @@ impl Print for cfg::ControlInst {
 
                 match targets.len() {
                     0 => header,
-                    1 => header + " " + &targets[0],
-                    _ => {
-                        // FIXME(eddyb) automate reindenting (and make it configurable).
-                        for target in &mut targets {
-                            *target = target.replace("\n", "\n  ");
-                        }
-                        header + " {\n  " + &targets.join(",\n  ") + ",\n}"
-                    }
+                    1 => header + " " + &targets.nth(0).unwrap(),
+                    _ => printer.pretty_join_comma_sep_with_multiline_override(
+                        &(header + " {"),
+                        targets,
+                        "}",
+                        Some(true),
+                    ),
                 }
             }
         };
