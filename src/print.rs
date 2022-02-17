@@ -11,7 +11,6 @@ use crate::{
     FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
     ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
-use format::lazy_format;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -1716,65 +1715,63 @@ impl Print for FuncAt<'_, ControlNode> {
         let control_node = self.position;
         let ControlNodeDef { kind, outputs } = self.def();
 
-        lazy_format!(|f| {
-            if !outputs.is_empty() {
-                let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
-                    let AttrsAndDef { attrs, def } = output.print(printer);
-                    attrs
-                        + &Value::ControlNodeOutput {
-                            control_node,
-                            output_idx: output_idx.try_into().unwrap(),
-                        }
-                        .print(printer)
-                        + &def
-                });
-                let outputs_lhs = if outputs.len() == 1 {
-                    outputs.next().unwrap()
-                } else {
-                    printer.pretty_join_comma_sep("(", outputs, ")")
-                };
-                write!(f, "{} = ", outputs_lhs)?;
-            }
-
-            match *kind {
-                ControlNodeKind::UnstructuredMerge => {
-                    write!(f, "/* unstructured merge */")?;
-                }
-                ControlNodeKind::Block { insts } => {
-                    assert!(outputs.is_empty());
-
-                    let mut first = true;
-                    for func_at_inst in self.at(insts) {
-                        let data_inst_def = func_at_inst.def();
-                        let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
-
-                        if data_inst_def.output_type.is_some() {
-                            let header = format!(
-                                "{} =",
-                                Use::DataInstOutput(func_at_inst.position).print(printer)
-                            );
-                            // FIXME(eddyb) the reindenting here hurts more than
-                            // it helps, maybe it eneds a heuristics?
-                            def = if false {
-                                printer.pretty_join_space(&header, [def])
-                            } else {
-                                header + " " + &def
-                            };
-                        }
-
-                        if !first {
-                            writeln!(f)?;
-                        }
-                        first = false;
-
-                        write!(f, "{}{}", attrs, &def)?;
+        let outputs_header = if !outputs.is_empty() {
+            let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
+                let AttrsAndDef { attrs, def } = output.print(printer);
+                attrs
+                    + &Value::ControlNodeOutput {
+                        control_node,
+                        output_idx: output_idx.try_into().unwrap(),
                     }
-                }
-            }
+                    .print(printer)
+                    + &def
+            });
+            let outputs_lhs = if outputs.len() == 1 {
+                outputs.next().unwrap()
+            } else {
+                printer.pretty_join_comma_sep("(", outputs, ")")
+            };
+            format!("{} = ", outputs_lhs)
+        } else {
+            String::new()
+        };
 
-            Ok(())
-        })
-        .to_string()
+        let control_node_body = match *kind {
+            ControlNodeKind::UnstructuredMerge => {
+                format!("/* unstructured merge */")
+            }
+            ControlNodeKind::Block { insts } => {
+                assert!(outputs.is_empty());
+
+                printer.pretty_concat_pieces(
+                    self.at(insts)
+                        .into_iter()
+                        .map(|func_at_inst| {
+                            let data_inst_def = func_at_inst.def();
+                            let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
+
+                            if data_inst_def.output_type.is_some() {
+                                let header = format!(
+                                    "{} =",
+                                    Use::DataInstOutput(func_at_inst.position).print(printer)
+                                );
+                                // FIXME(eddyb) the reindenting here hurts more than
+                                // it helps, maybe it needs some heuristics?
+                                def = if false {
+                                    printer.pretty_join_space(&header, [def])
+                                } else {
+                                    header + " " + &def
+                                };
+                            }
+
+                            (attrs + &def).into()
+                        })
+                        .intersperse("\n".into()),
+                    Some(true),
+                )
+            }
+        };
+        outputs_header + &control_node_body
     }
 }
 
