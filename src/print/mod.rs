@@ -13,8 +13,9 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use std::borrow::Cow;
-use std::{fmt, iter};
+use std::fmt;
+
+mod pretty;
 
 /// "Definitions-before-uses" / "topo-sorted" printing plan.
 ///
@@ -565,189 +566,12 @@ impl<'a, 'b> Printer<'a, 'b> {
         self.cx
     }
 
-    /// Returns a concatenation of `pieces` using `.for_single_line()` if the
-    /// resulting string can fit on one line, or a multi-line indented version
-    /// otherwise (`.for_multi_line()` and `{Push,Pop}Indent`-driven indentation).
-    fn pretty_concat_pieces<'c>(
-        &self,
-        pieces: impl IntoIterator<Item = PrettyPiece<'c>>,
-        // FIXME(eddyb) fit this into `{Push,Pop}Indent` somehow.
-        multi_line_override: Option<bool>,
-    ) -> String {
-        let pieces: SmallVec<[_; 16]> = pieces.into_iter().collect();
-
-        // FIXME(eddyb) make max line width configurable.
-        let max_line_len = 80;
-        let fits_on_single_line = pieces
-            .iter()
-            .map(|piece| piece.for_single_line())
-            .try_fold(0usize, |single_line_len, piece| {
-                if piece.contains("\n") {
-                    return None;
-                }
-                single_line_len
-                    .checked_add(piece.len())
-                    .filter(|&len| len <= max_line_len)
-            })
-            .is_some();
-        let fits_on_single_line = multi_line_override
-            .map(|force_multi_line| !force_multi_line)
-            .unwrap_or(fits_on_single_line);
-
-        // FIXME(eddyb) make this configurable.
-        const INDENT: &str = "  ";
-
-        let mk_reindented_pieces = || {
-            /// Operation on a representation that stores lines separately.
-            /// Such a representation doesn't exist yet - instead, an iterator
-            /// of `LineOp`s is turned into an iterator of `&str`s.
-            #[derive(Copy, Clone)]
-            enum LineOp<'a> {
-                AppendToLine(&'a str),
-                StartNewLine { indent_after: u32 },
-            }
-
-            let mut indent = 0;
-            let mut line_ops = pieces
-                .iter()
-                .flat_map(move |piece| {
-                    match piece {
-                        PrettyPiece::PushIndent => indent += 1,
-                        PrettyPiece::PopIndent => {
-                            assert!(indent > 0);
-                            indent -= 1;
-                        }
-                        _ => {}
-                    }
-
-                    let piece_text = if fits_on_single_line {
-                        piece.for_single_line()
-                    } else {
-                        piece.for_multi_line()
-                    };
-
-                    piece_text
-                        .split('\n')
-                        .map(LineOp::AppendToLine)
-                        .intersperse(LineOp::StartNewLine {
-                            indent_after: indent,
-                        })
-                })
-                .filter(|op| !matches!(op, LineOp::AppendToLine("")))
-                .peekable();
-
-            iter::from_fn(move || {
-                let (text, indent_after) = match line_ops.next()? {
-                    LineOp::AppendToLine(text) => (text, 0),
-                    LineOp::StartNewLine { indent_after } => {
-                        // HACK(eddyb) this is not perfect because we don't have
-                        // the entire document ahead of time, but it does avoid
-                        // any trailing indentation internal to any one call.
-                        let is_starting_empty_line =
-                            matches!(line_ops.peek(), Some(LineOp::StartNewLine { .. }));
-
-                        (
-                            "\n",
-                            if is_starting_empty_line {
-                                0
-                            } else {
-                                indent_after
-                            },
-                        )
-                    }
-                };
-                Some(iter::once(text).chain((0..indent_after).map(|_| INDENT)))
-            })
-            .flatten()
-        };
-        let mut combined = String::with_capacity(mk_reindented_pieces().map(|s| s.len()).sum());
-        combined.extend(mk_reindented_pieces());
-        combined
-    }
-
-    /// Returns `header + " " + contents.join(" ")` if the resulting string can
-    /// fit on one line, or a multi-line indented version otherwise.
-    fn pretty_join_space(
-        &self,
-        header: &str,
-        contents: impl IntoIterator<Item = String>,
-    ) -> String {
-        self.pretty_concat_pieces(
-            [header.into(), PrettyPiece::PushIndent]
-                .into_iter()
-                .chain(contents.into_iter().flat_map(|entry| {
-                    [
-                        PrettyPiece::Joiner {
-                            single_line: " ",
-                            multi_line: "\n",
-                        },
-                        entry.into(),
-                    ]
-                }))
-                .chain([PrettyPiece::PopIndent]),
-            None,
-        )
-    }
-
-    // FIXME(eddyb) remove the need for this by replacing `prefix`/`suffix` with
-    // some `enum` that also determines whether to force the multi-line format.
-    // Alternatively, `contents` values could indicate whether they have to be
-    // on their own lines (without including extra `\n` themselves).
-    fn pretty_join_comma_sep_with_multiline_override(
-        &self,
-        prefix: &str,
-        contents: impl IntoIterator<Item = String>,
-        suffix: &str,
-        multi_line_override: Option<bool>,
-    ) -> String {
-        self.pretty_concat_pieces(
-            [
-                prefix.into(),
-                PrettyPiece::PushIndent,
-                PrettyPiece::Joiner {
-                    single_line: "",
-                    multi_line: "\n",
-                },
-            ]
-            .into_iter()
-            .chain(
-                contents
-                    .into_iter()
-                    .map(|entry| PrettyPiece::Text(entry.into()))
-                    .intersperse(PrettyPiece::Joiner {
-                        single_line: ", ",
-                        multi_line: ",\n",
-                    }),
-            )
-            .chain([
-                PrettyPiece::PopIndent,
-                PrettyPiece::Joiner {
-                    single_line: "",
-                    multi_line: ",\n",
-                },
-                suffix.into(),
-            ]),
-            multi_line_override,
-        )
-    }
-
-    /// Returns `prefix + contents.join(", ") + suffix` if the resulting string
-    /// can fit on one line, or a multi-line indented version otherwise.
-    fn pretty_join_comma_sep(
-        &self,
-        prefix: &str,
-        contents: impl IntoIterator<Item = String>,
-        suffix: &str,
-    ) -> String {
-        self.pretty_join_comma_sep_with_multiline_override(prefix, contents, suffix, None)
-    }
-
     /// Pretty-print a `: T` style "type ascription" suffix.
     ///
     /// This should be used everywhere some type ascription notation is needed,
     /// to ensure consistency across all such situations.
     fn pretty_type_ascription_suffix(&self, ty: Type) -> String {
-        self.pretty_join_space(":", [ty.print(self)])
+        pretty::join_space(":", [ty.print(self)])
     }
 
     /// Pretty-print an arbitrary SPIR-V `opcode` with `imms` and `ids` as its
@@ -815,13 +639,13 @@ impl<'a, 'b> Printer<'a, 'b> {
         let mut out = opcode.name().to_string();
 
         if angle_bracket_operands.peek().is_some() {
-            out = self.pretty_join_comma_sep(&(out + "<"), angle_bracket_operands, ">");
+            out = pretty::join_comma_sep(&(out + "<"), angle_bracket_operands, ">");
         }
 
         let type_ascription_suffix = result_type.map(|ty| self.pretty_type_ascription_suffix(ty));
 
         if !paren_operands.is_empty() {
-            out = self.pretty_join_comma_sep(
+            out = pretty::join_comma_sep(
                 &(out + "("),
                 paren_operands,
                 type_ascription_suffix
@@ -836,50 +660,6 @@ impl<'a, 'b> Printer<'a, 'b> {
         }
 
         out
-    }
-}
-
-/// Helper type for for `pretty_concat_pieces`.
-#[derive(Clone)]
-enum PrettyPiece<'a> {
-    // FIXME(eddyb) make this more like a "DOM" instead of flatly stateful.
-    PushIndent,
-    PopIndent,
-
-    Joiner {
-        single_line: &'a str,
-        multi_line: &'a str,
-    },
-
-    Text(Cow<'a, str>),
-}
-
-impl<'a> From<&'a str> for PrettyPiece<'a> {
-    fn from(text: &'a str) -> Self {
-        Self::Text(text.into())
-    }
-}
-
-impl From<String> for PrettyPiece<'_> {
-    fn from(text: String) -> Self {
-        Self::Text(text.into())
-    }
-}
-
-impl PrettyPiece<'_> {
-    fn for_single_line(&self) -> &str {
-        match self {
-            Self::PushIndent | Self::PopIndent => "",
-            Self::Text(s) => s,
-            Self::Joiner { single_line, .. } => single_line,
-        }
-    }
-    fn for_multi_line(&self) -> &str {
-        match self {
-            Self::PushIndent | Self::PopIndent => "",
-            Self::Text(s) => s,
-            Self::Joiner { multi_line, .. } => multi_line,
-        }
     }
 }
 
@@ -1051,7 +831,7 @@ impl Print for Module {
             return String::new();
         }
 
-        printer.pretty_join_comma_sep_with_multiline_override(
+        pretty::join_comma_sep_with_multiline_override(
             "export {",
             self.exports.iter().map(|(export_key, exportee)| {
                 (export_key.print(printer) + ": " + &exportee.print(printer)).into()
@@ -1064,7 +844,7 @@ impl Print for Module {
 
 impl Print for ModuleDialect {
     type Output = String;
-    fn print(&self, printer: &Printer<'_, '_>) -> String {
+    fn print(&self, _printer: &Printer<'_, '_>) -> String {
         let dialect = match self {
             Self::Spv(spv::Dialect {
                 version_major,
@@ -1076,16 +856,16 @@ impl Print for ModuleDialect {
             }) => {
                 let wk = &spv::spec::Spec::get().well_known;
 
-                printer.pretty_join_comma_sep_with_multiline_override(
+                pretty::join_comma_sep_with_multiline_override(
                     "SPIR-V {",
                     [
                         format!("version: {}.{}", version_major, version_minor),
-                        printer.pretty_join_comma_sep(
+                        pretty::join_comma_sep(
                             "extensions: {",
                             extensions.iter().map(|ext| format!("{:?}", ext)),
                             "}",
                         ),
-                        printer.pretty_join_comma_sep(
+                        pretty::join_comma_sep(
                             "capabilities: {",
                             capabilities
                                 .iter()
@@ -1122,7 +902,7 @@ impl Print for ModuleDebugInfo {
             }) => {
                 let wk = &spv::spec::Spec::get().well_known;
 
-                printer.pretty_join_comma_sep_with_multiline_override(
+                pretty::join_comma_sep_with_multiline_override(
                     "SPIR-V {",
                     [
                         format!(
@@ -1135,11 +915,11 @@ impl Print for ModuleDebugInfo {
                                 })
                                 .unwrap_or_else(|| "unknown".into())
                         ),
-                        printer.pretty_join_comma_sep_with_multiline_override(
+                        pretty::join_comma_sep_with_multiline_override(
                             "source_languages: {",
                             source_languages.iter().map(|(lang, sources)| {
                                 let spv::DebugSources { file_contents } = sources;
-                                printer.pretty_join_comma_sep_with_multiline_override(
+                                pretty::join_comma_sep_with_multiline_override(
                                     &format!(
                                         "{} {{ version: {} }}: {{",
                                         spv::print::imm(wk.SourceLanguage, lang.lang),
@@ -1254,7 +1034,7 @@ impl Print for AttrSetDef {
                 None
             };
 
-            printer.pretty_join_comma_sep_with_multiline_override(
+            pretty::join_comma_sep_with_multiline_override(
                 "#{",
                 non_comment_attrs,
                 "}",
@@ -1569,7 +1349,7 @@ impl Print for GlobalVarDecl {
                 None => header,
             }
         } else {
-            printer.pretty_join_space(&header, body)
+            pretty::join_space(&header, body)
         };
 
         AttrsAndDef {
@@ -1589,7 +1369,7 @@ impl Print for FuncDecl {
             def,
         } = self;
 
-        let sig = printer.pretty_join_comma_sep(
+        let sig = pretty::join_comma_sep(
             "(",
             params.iter().enumerate().map(|(i, param)| {
                 let AttrsAndDef { attrs, def } = param.print(printer);
@@ -1612,8 +1392,8 @@ impl Print for FuncDecl {
                     body: _,
                     cfg,
                 },
-            ) => printer.pretty_concat_pieces(
-                [sig.into(), " {".into(), PrettyPiece::PushIndent]
+            ) => pretty::concat_pieces(
+                [sig.into(), " {".into(), pretty::Piece::PushIndent]
                     .into_iter()
                     .chain(
                         cfg.rev_post_order(def)
@@ -1654,13 +1434,13 @@ impl Print for FuncDecl {
                                         None
                                     },
                                     entry_label_header,
-                                    Some(PrettyPiece::PushIndent),
+                                    Some(pretty::Piece::PushIndent),
                                     if !control_node_body.is_empty() {
                                         Some(control_node_body.into())
                                     } else {
                                         None
                                     },
-                                    Some(PrettyPiece::PopIndent),
+                                    Some(pretty::Piece::PopIndent),
                                     exit_label_header,
                                     if let Some(control_inst) =
                                         cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
@@ -1676,7 +1456,7 @@ impl Print for FuncDecl {
                                     // FIXME(eddyb) this should use a mechanism
                                     // for "force onto separate lines" instead
                                     // of inserting `\n` manually.
-                                    let prefix_newline = if let PrettyPiece::Text(_) = piece {
+                                    let prefix_newline = if let pretty::Piece::Text(_) = piece {
                                         Some("\n".into())
                                     } else {
                                         None
@@ -1685,7 +1465,7 @@ impl Print for FuncDecl {
                                 })
                             }),
                     )
-                    .chain([PrettyPiece::PopIndent, "\n".into(), "}".into()]),
+                    .chain([pretty::Piece::PopIndent, "\n".into(), "}".into()]),
                 Some(true),
             ),
         };
@@ -1729,7 +1509,7 @@ impl Print for FuncAt<'_, ControlNode> {
             let outputs_lhs = if outputs.len() == 1 {
                 outputs.next().unwrap()
             } else {
-                printer.pretty_join_comma_sep("(", outputs, ")")
+                pretty::join_comma_sep("(", outputs, ")")
             };
             format!("{} = ", outputs_lhs)
         } else {
@@ -1743,7 +1523,7 @@ impl Print for FuncAt<'_, ControlNode> {
             ControlNodeKind::Block { insts } => {
                 assert!(outputs.is_empty());
 
-                printer.pretty_concat_pieces(
+                pretty::concat_pieces(
                     self.at(insts)
                         .into_iter()
                         .map(|func_at_inst| {
@@ -1758,7 +1538,7 @@ impl Print for FuncAt<'_, ControlNode> {
                                 // FIXME(eddyb) the reindenting here hurts more than
                                 // it helps, maybe it needs some heuristics?
                                 def = if false {
-                                    printer.pretty_join_space(&header, [def])
+                                    pretty::join_space(&header, [def])
                                 } else {
                                     header + " " + &def
                                 };
@@ -1818,7 +1598,7 @@ impl Print for DataInstDef {
 
         // FIXME(eddyb) deduplicate the "parens + optional type ascription"
         // logic with `pretty_spv_inst`.
-        let def = printer.pretty_join_comma_sep(
+        let def = pretty::join_comma_sep(
             &(header + "("),
             inputs.iter().map(|v| v.print(printer)),
             &output_type
@@ -1848,7 +1628,7 @@ impl Print for cfg::ControlInst {
             let mut target = format!("=> {}", Use::ControlPointLabel(point).print(printer));
             if let cfg::ControlPoint::Exit(control_node) = point {
                 if let Some(outputs) = target_merge_outputs.get(&control_node) {
-                    target = printer.pretty_join_comma_sep(
+                    target = pretty::join_comma_sep(
                         &(target + "("),
                         outputs.iter().enumerate().map(|(output_idx, v)| {
                             Value::ControlNodeOutput {
@@ -1902,21 +1682,21 @@ impl Print for cfg::ControlInst {
                     let mut it = targets.into_iter();
                     [it.next().unwrap(), it.next().unwrap()]
                 };
-                printer.pretty_concat_pieces(
+                pretty::concat_pieces(
                     [
                         "if ".into(),
                         inputs[0].print(printer).into(),
                         " {".into(),
-                        PrettyPiece::PushIndent,
+                        pretty::Piece::PushIndent,
                         "\n".into(),
                         target_then.into(),
-                        PrettyPiece::PopIndent,
+                        pretty::Piece::PopIndent,
                         "\n".into(),
                         "} else {".into(),
-                        PrettyPiece::PushIndent,
+                        pretty::Piece::PushIndent,
                         "\n".into(),
                         target_else.into(),
-                        PrettyPiece::PopIndent,
+                        pretty::Piece::PopIndent,
                         "\n".into(),
                         "}".into(),
                     ],
@@ -1947,7 +1727,7 @@ impl Print for cfg::ControlInst {
                 match targets.len() {
                     0 => header,
                     1 => header + " " + &targets.nth(0).unwrap(),
-                    _ => printer.pretty_join_comma_sep_with_multiline_override(
+                    _ => pretty::join_comma_sep_with_multiline_override(
                         &(header + " {"),
                         targets,
                         "}",
