@@ -570,7 +570,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     ///
     /// This should be used everywhere some type ascription notation is needed,
     /// to ensure consistency across all such situations.
-    fn pretty_type_ascription_suffix(&self, ty: Type) -> String {
+    fn pretty_type_ascription_suffix(&self, ty: Type) -> pretty::Fragment<'static> {
         pretty::join_space(":", [ty.print(self)])
     }
 
@@ -639,10 +639,11 @@ impl<'a, 'b> Printer<'a, 'b> {
         let mut out = opcode.name().to_string();
 
         if angle_bracket_operands.peek().is_some() {
-            out = pretty::join_comma_sep(&(out + "<"), angle_bracket_operands, ">");
+            out = pretty::join_comma_sep(&(out + "<"), angle_bracket_operands, ">").render(None);
         }
 
-        let type_ascription_suffix = result_type.map(|ty| self.pretty_type_ascription_suffix(ty));
+        let type_ascription_suffix =
+            result_type.map(|ty| self.pretty_type_ascription_suffix(ty).render(None));
 
         if !paren_operands.is_empty() {
             out = pretty::join_comma_sep(
@@ -652,7 +653,8 @@ impl<'a, 'b> Printer<'a, 'b> {
                     .map(|s| format!("){}", s))
                     .as_deref()
                     .unwrap_or(")"),
-            );
+            )
+            .render(None);
         } else {
             if let Some(type_ascription_suffix) = type_ascription_suffix {
                 out = out + &type_ascription_suffix;
@@ -831,14 +833,14 @@ impl Print for Module {
             return String::new();
         }
 
-        pretty::join_comma_sep_with_multiline_override(
+        pretty::join_comma_sep(
             "export {",
             self.exports.iter().map(|(export_key, exportee)| {
                 (export_key.print(printer) + ": " + &exportee.print(printer)).into()
             }),
             "}",
-            Some(true),
         )
+        .render(Some(true))
     }
 }
 
@@ -856,7 +858,7 @@ impl Print for ModuleDialect {
             }) => {
                 let wk = &spv::spec::Spec::get().well_known;
 
-                pretty::join_comma_sep_with_multiline_override(
+                pretty::join_comma_sep(
                     "SPIR-V {",
                     [
                         format!("version: {}.{}", version_major, version_minor),
@@ -864,14 +866,16 @@ impl Print for ModuleDialect {
                             "extensions: {",
                             extensions.iter().map(|ext| format!("{:?}", ext)),
                             "}",
-                        ),
+                        )
+                        .render(None),
                         pretty::join_comma_sep(
                             "capabilities: {",
                             capabilities
                                 .iter()
                                 .map(|&cap| spv::print::imm(wk.Capability, cap)),
                             "}",
-                        ),
+                        )
+                        .render(None),
                         format!(
                             "addressing_model: {}",
                             spv::print::imm(wk.AddressingModel, *addressing_model)
@@ -882,8 +886,8 @@ impl Print for ModuleDialect {
                         ),
                     ],
                     "}",
-                    Some(true),
                 )
+                .render(Some(true))
             }
         };
         format!("module.dialect = {}", dialect)
@@ -902,7 +906,7 @@ impl Print for ModuleDebugInfo {
             }) => {
                 let wk = &spv::spec::Spec::get().well_known;
 
-                pretty::join_comma_sep_with_multiline_override(
+                pretty::join_comma_sep(
                     "SPIR-V {",
                     [
                         format!(
@@ -915,11 +919,11 @@ impl Print for ModuleDebugInfo {
                                 })
                                 .unwrap_or_else(|| "unknown".into())
                         ),
-                        pretty::join_comma_sep_with_multiline_override(
+                        pretty::join_comma_sep(
                             "source_languages: {",
                             source_languages.iter().map(|(lang, sources)| {
                                 let spv::DebugSources { file_contents } = sources;
-                                pretty::join_comma_sep_with_multiline_override(
+                                pretty::join_comma_sep(
                                     &format!(
                                         "{} {{ version: {} }}: {{",
                                         spv::print::imm(wk.SourceLanguage, lang.lang),
@@ -929,6 +933,8 @@ impl Print for ModuleDebugInfo {
                                         format!("{:?}: {:?}", &printer.cx[file], contents)
                                     }),
                                     "}",
+                                )
+                                .render(
                                     if !file_contents.is_empty() {
                                         Some(true)
                                     } else {
@@ -937,18 +943,18 @@ impl Print for ModuleDebugInfo {
                                 )
                             }),
                             "}",
-                            if !source_languages.is_empty() {
-                                Some(true)
-                            } else {
-                                None
-                            },
-                        ),
+                        )
+                        .render(if !source_languages.is_empty() {
+                            Some(true)
+                        } else {
+                            None
+                        }),
                         format!("source_extensions: {:?}", source_extensions),
                         format!("module_processes: {:?}", module_processes),
                     ],
                     "}",
-                    Some(true),
                 )
+                .render(Some(true))
             }
         };
         format!("module.debug_info = {}", debug_info)
@@ -1034,12 +1040,7 @@ impl Print for AttrSetDef {
                 None
             };
 
-            pretty::join_comma_sep_with_multiline_override(
-                "#{",
-                non_comment_attrs,
-                "}",
-                multi_line_override,
-            )
+            pretty::join_comma_sep("#{", non_comment_attrs, "}").render(multi_line_override)
         };
 
         let comments = comments.join("\n");
@@ -1319,7 +1320,9 @@ impl Print for GlobalVarDecl {
             match &type_of_ptr_to_def.ctor {
                 TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypePointer => {
                     match type_of_ptr_to_def.ctor_args[..] {
-                        [TypeCtorArg::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
+                        [TypeCtorArg::Type(ty)] => {
+                            printer.pretty_type_ascription_suffix(ty).render(None)
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -1349,7 +1352,7 @@ impl Print for GlobalVarDecl {
                 None => header,
             }
         } else {
-            pretty::join_space(&header, body)
+            pretty::join_space(&header, body).render(None)
         };
 
         AttrsAndDef {
@@ -1381,7 +1384,8 @@ impl Print for FuncDecl {
                     + &def
             }),
             &format!(") -> {}", ret_type.print(printer)),
-        );
+        )
+        .render(None);
 
         let def = match def {
             DeclDef::Imported(import) => sig + " = " + &import.print(printer),
@@ -1392,7 +1396,7 @@ impl Print for FuncDecl {
                     body: _,
                     cfg,
                 },
-            ) => pretty::concat_pieces(
+            ) => pretty::Fragment::new(
                 [sig.into(), " {".into(), pretty::Piece::PushIndent]
                     .into_iter()
                     .chain(
@@ -1466,8 +1470,8 @@ impl Print for FuncDecl {
                             }),
                     )
                     .chain([pretty::Piece::PopIndent, "\n".into(), "}".into()]),
-                Some(true),
-            ),
+            )
+            .render(Some(true)),
         };
 
         AttrsAndDef {
@@ -1484,7 +1488,7 @@ impl Print for FuncParam {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_type_ascription_suffix(ty),
+            def: printer.pretty_type_ascription_suffix(ty).render(None),
         }
     }
 }
@@ -1509,7 +1513,7 @@ impl Print for FuncAt<'_, ControlNode> {
             let outputs_lhs = if outputs.len() == 1 {
                 outputs.next().unwrap()
             } else {
-                pretty::join_comma_sep("(", outputs, ")")
+                pretty::join_comma_sep("(", outputs, ")").render(None)
             };
             format!("{} = ", outputs_lhs)
         } else {
@@ -1523,7 +1527,7 @@ impl Print for FuncAt<'_, ControlNode> {
             ControlNodeKind::Block { insts } => {
                 assert!(outputs.is_empty());
 
-                pretty::concat_pieces(
+                pretty::Fragment::new(
                     self.at(insts)
                         .into_iter()
                         .map(|func_at_inst| {
@@ -1538,7 +1542,7 @@ impl Print for FuncAt<'_, ControlNode> {
                                 // FIXME(eddyb) the reindenting here hurts more than
                                 // it helps, maybe it needs some heuristics?
                                 def = if false {
-                                    pretty::join_space(&header, [def])
+                                    pretty::join_space(&header, [def]).render(None)
                                 } else {
                                     header + " " + &def
                                 };
@@ -1547,8 +1551,8 @@ impl Print for FuncAt<'_, ControlNode> {
                             (attrs + &def).into()
                         })
                         .intersperse("\n".into()),
-                    Some(true),
                 )
+                .render(Some(true))
             }
         };
         outputs_header + &control_node_body
@@ -1562,7 +1566,7 @@ impl Print for ControlNodeOutputDecl {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_type_ascription_suffix(ty),
+            def: printer.pretty_type_ascription_suffix(ty).render(None),
         }
     }
 }
@@ -1602,10 +1606,16 @@ impl Print for DataInstDef {
             &(header + "("),
             inputs.iter().map(|v| v.print(printer)),
             &output_type
-                .map(|ty| format!("){}", printer.pretty_type_ascription_suffix(ty)))
+                .map(|ty| {
+                    format!(
+                        "){}",
+                        printer.pretty_type_ascription_suffix(ty).render(None)
+                    )
+                })
                 .as_deref()
                 .unwrap_or(")"),
-        );
+        )
+        .render(None);
 
         AttrsAndDef { attrs, def }
     }
@@ -1640,7 +1650,8 @@ impl Print for cfg::ControlInst {
                                 + &v.print(printer)
                         }),
                         ")",
-                    );
+                    )
+                    .render(None);
                 }
             }
             target
@@ -1682,26 +1693,24 @@ impl Print for cfg::ControlInst {
                     let mut it = targets.into_iter();
                     [it.next().unwrap(), it.next().unwrap()]
                 };
-                pretty::concat_pieces(
-                    [
-                        "if ".into(),
-                        inputs[0].print(printer).into(),
-                        " {".into(),
-                        pretty::Piece::PushIndent,
-                        "\n".into(),
-                        target_then.into(),
-                        pretty::Piece::PopIndent,
-                        "\n".into(),
-                        "} else {".into(),
-                        pretty::Piece::PushIndent,
-                        "\n".into(),
-                        target_else.into(),
-                        pretty::Piece::PopIndent,
-                        "\n".into(),
-                        "}".into(),
-                    ],
-                    Some(true),
-                )
+                pretty::Fragment::new([
+                    "if ".into(),
+                    inputs[0].print(printer).into(),
+                    " {".into(),
+                    pretty::Piece::PushIndent,
+                    "\n".into(),
+                    target_then.into(),
+                    pretty::Piece::PopIndent,
+                    "\n".into(),
+                    "} else {".into(),
+                    pretty::Piece::PushIndent,
+                    "\n".into(),
+                    target_else.into(),
+                    pretty::Piece::PopIndent,
+                    "\n".into(),
+                    "}".into(),
+                ])
+                .render(Some(true))
             }
             cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(spv::Inst {
                 opcode,
@@ -1727,12 +1736,7 @@ impl Print for cfg::ControlInst {
                 match targets.len() {
                     0 => header,
                     1 => header + " " + &targets.nth(0).unwrap(),
-                    _ => pretty::join_comma_sep_with_multiline_override(
-                        &(header + " {"),
-                        targets,
-                        "}",
-                        Some(true),
-                    ),
+                    _ => pretty::join_comma_sep(&(header + " {"), targets, "}").render(Some(true)),
                 }
             }
         };
