@@ -1397,7 +1397,7 @@ impl Print for FuncDecl {
                     cfg,
                 },
             ) => pretty::Fragment::new(
-                [sig.into(), " {".into(), pretty::Piece::PushIndent]
+                [sig.into(), " {".into(), pretty::Node::PushIndent]
                     .into_iter()
                     .chain(
                         cfg.rev_post_order(def)
@@ -1438,13 +1438,13 @@ impl Print for FuncDecl {
                                         None
                                     },
                                     entry_label_header,
-                                    Some(pretty::Piece::PushIndent),
+                                    Some(pretty::Node::PushIndent),
                                     if !control_node_body.is_empty() {
                                         Some(control_node_body.into())
                                     } else {
                                         None
                                     },
-                                    Some(pretty::Piece::PopIndent),
+                                    Some(pretty::Node::PopIndent),
                                     exit_label_header,
                                     if let Some(control_inst) =
                                         cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
@@ -1456,20 +1456,20 @@ impl Print for FuncDecl {
                                 ]
                                 .into_iter()
                                 .flatten()
-                                .flat_map(|piece| {
+                                .flat_map(|node| {
                                     // FIXME(eddyb) this should use a mechanism
                                     // for "force onto separate lines" instead
                                     // of inserting `\n` manually.
-                                    let prefix_newline = if let pretty::Piece::Text(_) = piece {
+                                    let prefix_newline = if let pretty::Node::Text(_) = node {
                                         Some("\n".into())
                                     } else {
                                         None
                                     };
-                                    prefix_newline.into_iter().chain([piece])
+                                    prefix_newline.into_iter().chain([node])
                                 })
                             }),
                     )
-                    .chain([pretty::Piece::PopIndent, "\n".into(), "}".into()]),
+                    .chain([pretty::Node::PopIndent, "\n".into(), "}".into()]),
             )
             .render(Some(true)),
         };
@@ -1697,16 +1697,16 @@ impl Print for cfg::ControlInst {
                     "if ".into(),
                     inputs[0].print(printer).into(),
                     " {".into(),
-                    pretty::Piece::PushIndent,
+                    pretty::Node::PushIndent,
                     "\n".into(),
                     target_then.into(),
-                    pretty::Piece::PopIndent,
+                    pretty::Node::PopIndent,
                     "\n".into(),
                     "} else {".into(),
-                    pretty::Piece::PushIndent,
+                    pretty::Node::PushIndent,
                     "\n".into(),
                     target_else.into(),
-                    pretty::Piece::PopIndent,
+                    pretty::Node::PopIndent,
                     "\n".into(),
                     "}".into(),
                 ])

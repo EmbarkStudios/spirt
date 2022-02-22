@@ -9,13 +9,13 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::iter;
 
-/// Part of a pretty document, made up of `Piece`s.
+/// Part of a pretty document, made up of `Node`s.
 pub struct Fragment<'a> {
-    pub pieces: SmallVec<[Piece<'a>; 8]>,
+    pub nodes: SmallVec<[Node<'a>; 8]>,
 }
 
 #[derive(Clone)]
-pub enum Piece<'a> {
+pub enum Node<'a> {
     // FIXME(eddyb) make this more like a "DOM" instead of flatly stateful.
     PushIndent,
     PopIndent,
@@ -28,19 +28,19 @@ pub enum Piece<'a> {
     Text(Cow<'a, str>),
 }
 
-impl<'a> From<&'a str> for Piece<'a> {
+impl<'a> From<&'a str> for Node<'a> {
     fn from(text: &'a str) -> Self {
         Self::Text(text.into())
     }
 }
 
-impl From<String> for Piece<'_> {
+impl From<String> for Node<'_> {
     fn from(text: String) -> Self {
         Self::Text(text.into())
     }
 }
 
-impl Piece<'_> {
+impl Node<'_> {
     fn for_single_line(&self) -> &str {
         match self {
             Self::PushIndent | Self::PopIndent => "",
@@ -58,9 +58,9 @@ impl Piece<'_> {
 }
 
 impl<'a> Fragment<'a> {
-    pub fn new(pieces: impl IntoIterator<Item = Piece<'a>>) -> Self {
+    pub fn new(nodes: impl IntoIterator<Item = Node<'a>>) -> Self {
         Self {
-            pieces: pieces.into_iter().collect(),
+            nodes: nodes.into_iter().collect(),
         }
     }
 
@@ -73,15 +73,15 @@ impl<'a> Fragment<'a> {
         // FIXME(eddyb) make max line width configurable.
         let max_line_len = 80;
         let fits_on_single_line = self
-            .pieces
+            .nodes
             .iter()
-            .map(|piece| piece.for_single_line())
-            .try_fold(0usize, |single_line_len, piece| {
-                if piece.contains("\n") {
+            .map(|node| node.for_single_line())
+            .try_fold(0usize, |single_line_len, node| {
+                if node.contains("\n") {
                     return None;
                 }
                 single_line_len
-                    .checked_add(piece.len())
+                    .checked_add(node.len())
                     .filter(|&len| len <= max_line_len)
             })
             .is_some();
@@ -92,7 +92,7 @@ impl<'a> Fragment<'a> {
         // FIXME(eddyb) make this configurable.
         const INDENT: &str = "  ";
 
-        let mk_reindented_pieces = || {
+        let mk_reindented_nodes = || {
             /// Operation on a representation that stores lines separately.
             /// Such a representation doesn't exist yet - instead, an iterator
             /// of `LineOp`s is turned into an iterator of `&str`s.
@@ -104,30 +104,29 @@ impl<'a> Fragment<'a> {
 
             let mut indent = 0;
             let mut line_ops = self
-                .pieces
+                .nodes
                 .iter()
-                .flat_map(move |piece| {
-                    match piece {
-                        Piece::PushIndent => indent += 1,
-                        Piece::PopIndent => {
+                .flat_map(move |node| {
+                    match node {
+                        Node::PushIndent => indent += 1,
+                        Node::PopIndent => {
                             assert!(indent > 0);
                             indent -= 1;
                         }
                         _ => {}
                     }
 
-                    let piece_text = if fits_on_single_line {
-                        piece.for_single_line()
+                    let node_text = if fits_on_single_line {
+                        node.for_single_line()
                     } else {
-                        piece.for_multi_line()
+                        node.for_multi_line()
                     };
 
-                    piece_text
-                        .split('\n')
-                        .map(LineOp::AppendToLine)
-                        .intersperse(LineOp::StartNewLine {
+                    node_text.split('\n').map(LineOp::AppendToLine).intersperse(
+                        LineOp::StartNewLine {
                             indent_after: indent,
-                        })
+                        },
+                    )
                 })
                 .filter(|op| !matches!(op, LineOp::AppendToLine("")))
                 .peekable();
@@ -156,8 +155,8 @@ impl<'a> Fragment<'a> {
             })
             .flatten()
         };
-        let mut combined = String::with_capacity(mk_reindented_pieces().map(|s| s.len()).sum());
-        combined.extend(mk_reindented_pieces());
+        let mut combined = String::with_capacity(mk_reindented_nodes().map(|s| s.len()).sum());
+        combined.extend(mk_reindented_nodes());
         combined
     }
 }
@@ -167,18 +166,18 @@ impl<'a> Fragment<'a> {
 /// * multi-line: `header + "\n" + indent(contents).join("\n")`
 pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> Fragment<'_> {
     Fragment::new(
-        [header.into(), Piece::PushIndent]
+        [header.into(), Node::PushIndent]
             .into_iter()
             .chain(contents.into_iter().flat_map(|entry| {
                 [
-                    Piece::Joiner {
+                    Node::Joiner {
                         single_line: " ",
                         multi_line: "\n",
                     },
                     entry.into(),
                 ]
             }))
-            .chain([Piece::PopIndent]),
+            .chain([Node::PopIndent]),
     )
 }
 
@@ -193,8 +192,8 @@ pub fn join_comma_sep<'a>(
     Fragment::new(
         [
             prefix.into(),
-            Piece::PushIndent,
-            Piece::Joiner {
+            Node::PushIndent,
+            Node::Joiner {
                 single_line: "",
                 multi_line: "\n",
             },
@@ -203,15 +202,15 @@ pub fn join_comma_sep<'a>(
         .chain(
             contents
                 .into_iter()
-                .map(|entry| Piece::Text(entry.into()))
-                .intersperse(Piece::Joiner {
+                .map(|entry| Node::Text(entry.into()))
+                .intersperse(Node::Joiner {
                     single_line: ", ",
                     multi_line: ",\n",
                 }),
         )
         .chain([
-            Piece::PopIndent,
-            Piece::Joiner {
+            Node::PopIndent,
+            Node::Joiner {
                 single_line: "",
                 multi_line: ",\n",
             },
