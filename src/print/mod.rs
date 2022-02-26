@@ -1368,16 +1368,7 @@ impl Print for GlobalVarDecl {
             }
         };
 
-        let def = if header.contains("\n") {
-            // The last line of `header` likely only contains a single `)`,
-            // no need to further indent the body in that case.
-            match body {
-                Some(body) => header + " " + &body,
-                None => header,
-            }
-        } else {
-            pretty::join_space(&header, body).render()
-        };
+        let def = pretty::join_space(&header, body).render();
 
         AttrsAndDef {
             attrs: attrs.print(printer),
