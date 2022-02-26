@@ -7,9 +7,9 @@ use itertools::Itertools as _;
 
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::iter;
 
 /// Part of a pretty document, made up of `Node`s.
+#[derive(Clone)]
 pub struct Fragment<'a> {
     pub nodes: SmallVec<[Node<'a>; 8]>,
 }
@@ -19,6 +19,13 @@ pub enum Node<'a> {
     // FIXME(eddyb) make this more like a "DOM" instead of flatly stateful.
     PushIndent,
     PopIndent,
+
+    /// Require that nodes before and after this node, go on different lines.
+    ///
+    /// This is similar in effect to a `Text("\n")`, except that it doesn't
+    /// introduce a new `\n` when the previous node(s) had already started
+    /// an (empty) new line (e.g. `Text("...\n")` or another `ForceLineStart`).
+    ForceLineSeparation,
 
     Joiner {
         single_line: &'a str,
@@ -44,6 +51,7 @@ impl Node<'_> {
     fn for_single_line(&self) -> &str {
         match self {
             Self::PushIndent | Self::PopIndent => "",
+            Self::ForceLineSeparation => unreachable!(),
             Self::Text(s) => s,
             Self::Joiner { single_line, .. } => single_line,
         }
@@ -51,9 +59,16 @@ impl Node<'_> {
     fn for_multi_line(&self) -> &str {
         match self {
             Self::PushIndent | Self::PopIndent => "",
+            Self::ForceLineSeparation => "\n",
             Self::Text(s) => s,
             Self::Joiner { multi_line, .. } => multi_line,
         }
+    }
+}
+
+impl<'a, T: Into<Node<'a>>> From<T> for Fragment<'a> {
+    fn from(x: T) -> Self {
+        Self::new([x.into()])
     }
 }
 
@@ -65,29 +80,25 @@ impl<'a> Fragment<'a> {
     }
 
     /// Flatten the `Fragment` to plain text (indented where necessary).
-    pub fn render(
-        self,
-        // FIXME(eddyb) fit this into `{Push,Pop}Indent` somehow.
-        multi_line_override: Option<bool>,
-    ) -> String {
+    pub fn render(self) -> String {
         // FIXME(eddyb) make max line width configurable.
         let max_line_len = 80;
         let fits_on_single_line = self
             .nodes
             .iter()
-            .map(|node| node.for_single_line())
             .try_fold(0usize, |single_line_len, node| {
-                if node.contains("\n") {
+                if let Node::ForceLineSeparation = node {
+                    return None;
+                }
+                let node_text = node.for_single_line();
+                if node_text.contains("\n") {
                     return None;
                 }
                 single_line_len
-                    .checked_add(node.len())
+                    .checked_add(node_text.len())
                     .filter(|&len| len <= max_line_len)
             })
             .is_some();
-        let fits_on_single_line = multi_line_override
-            .map(|force_multi_line| !force_multi_line)
-            .unwrap_or(fits_on_single_line);
 
         // FIXME(eddyb) make this configurable.
         const INDENT: &str = "  ";
@@ -98,62 +109,77 @@ impl<'a> Fragment<'a> {
             /// of `LineOp`s is turned into an iterator of `&str`s.
             #[derive(Copy, Clone)]
             enum LineOp<'a> {
-                AppendToLine(&'a str),
-                StartNewLine { indent_after: u32 },
+                AppendToLine { indent_before: u32, text: &'a str },
+                StartNewLine,
+                ForceLineSeparation,
             }
 
             let mut indent = 0;
-            let mut line_ops = self
-                .nodes
-                .iter()
-                .flat_map(move |node| {
-                    match node {
-                        Node::PushIndent => indent += 1,
-                        Node::PopIndent => {
-                            assert!(indent > 0);
-                            indent -= 1;
-                        }
-                        _ => {}
+            let line_ops = self.nodes.iter().flat_map(move |node| {
+                match node {
+                    Node::PushIndent => indent += 1,
+                    Node::PopIndent => {
+                        assert!(indent > 0);
+                        indent -= 1;
                     }
+                    _ => {}
+                }
 
-                    let node_text = if fits_on_single_line {
-                        node.for_single_line()
-                    } else {
-                        node.for_multi_line()
-                    };
-
-                    node_text.split('\n').map(LineOp::AppendToLine).intersperse(
-                        LineOp::StartNewLine {
-                            indent_after: indent,
-                        },
-                    )
-                })
-                .filter(|op| !matches!(op, LineOp::AppendToLine("")))
-                .peekable();
-
-            iter::from_fn(move || {
-                let (text, indent_after) = match line_ops.next()? {
-                    LineOp::AppendToLine(text) => (text, 0),
-                    LineOp::StartNewLine { indent_after } => {
-                        // HACK(eddyb) this is not perfect because we don't have
-                        // the entire document ahead of time, but it does avoid
-                        // any trailing indentation internal to any one call.
-                        let is_starting_empty_line =
-                            matches!(line_ops.peek(), Some(LineOp::StartNewLine { .. }));
-
-                        (
-                            "\n",
-                            if is_starting_empty_line {
-                                0
-                            } else {
-                                indent_after
-                            },
-                        )
-                    }
+                let node_text = if fits_on_single_line {
+                    node.for_single_line()
+                } else {
+                    node.for_multi_line()
                 };
-                Some(iter::once(text).chain((0..indent_after).map(|_| INDENT)))
+
+                node_text
+                    .split('\n')
+                    .map(move |text| LineOp::AppendToLine {
+                        indent_before: indent,
+                        text,
+                    })
+                    .intersperse(if let Node::ForceLineSeparation = node {
+                        LineOp::ForceLineSeparation
+                    } else {
+                        LineOp::StartNewLine
+                    })
+            });
+
+            // When `on_empty_new_line` is `true`, a new line was started, but
+            // lacks text, so the `LineOp::AppendToLine { indent_before, text }`
+            // first on that line (with non-empty `text`) needs to materialize
+            // `indent_before` levels of indentation (before its `text` content).
+            //
+            // NOTE(eddyb) indentation is not immediatelly materialized in order
+            // to avoid trailing whitespace on otherwise-empty lines.
+            let mut on_empty_new_line = true;
+
+            line_ops.flat_map(move |op| {
+                let indent_before = match op {
+                    LineOp::AppendToLine {
+                        indent_before,
+                        text,
+                    } if on_empty_new_line && text != "" => indent_before,
+
+                    _ => 0,
+                };
+
+                let text = match op {
+                    LineOp::AppendToLine { text, .. } => text,
+
+                    // NOTE(eddyb) reuse the last `\n` if no text came after it,
+                    // to avoid creating unnecessary empty lines.
+                    LineOp::ForceLineSeparation if on_empty_new_line => "",
+
+                    LineOp::StartNewLine | LineOp::ForceLineSeparation => "\n",
+                };
+
+                if (indent_before, text) != (0, "") {
+                    on_empty_new_line =
+                        matches!(op, LineOp::StartNewLine | LineOp::ForceLineSeparation);
+                }
+
+                (0..indent_before).map(|_| INDENT).chain([text])
             })
-            .flatten()
         };
         let mut combined = String::with_capacity(mk_reindented_nodes().map(|s| s.len()).sum());
         combined.extend(mk_reindented_nodes());
@@ -186,7 +212,7 @@ pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> F
 /// * multi-line: `prefix + "\n" + indent(contents).join(",\n") + ",\n" + suffix`
 pub fn join_comma_sep<'a>(
     prefix: &'a str,
-    contents: impl IntoIterator<Item = String>,
+    contents: impl IntoIterator<Item = impl Into<Fragment<'a>>>,
     suffix: &'a str,
 ) -> Fragment<'a> {
     Fragment::new(
@@ -202,17 +228,22 @@ pub fn join_comma_sep<'a>(
         .chain(
             contents
                 .into_iter()
-                .map(|entry| Node::Text(entry.into()))
-                .intersperse(Node::Joiner {
+                .map(Into::into)
+                .intersperse(Fragment::new([Node::Joiner {
                     single_line: ", ",
                     multi_line: ",\n",
-                }),
+                }]))
+                .flat_map(|fragment| fragment.nodes),
         )
         .chain([
+            Node::Joiner {
+                single_line: "",
+                multi_line: ",",
+            },
             Node::PopIndent,
             Node::Joiner {
                 single_line: "",
-                multi_line: ",\n",
+                multi_line: "\n",
             },
             suffix.into(),
         ]),
