@@ -7,6 +7,7 @@ use itertools::Itertools as _;
 
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::iter;
 
 /// Part of a pretty document, made up of `Node`s.
 #[derive(Clone)]
@@ -216,36 +217,39 @@ pub fn join_comma_sep<'a>(
     suffix: &'a str,
 ) -> Fragment<'a> {
     Fragment::new(
-        [
-            prefix.into(),
-            Node::PushIndent,
-            Node::Joiner {
-                single_line: "",
-                multi_line: "\n",
-            },
-        ]
-        .into_iter()
-        .chain(
-            contents
-                .into_iter()
-                .map(Into::into)
-                .intersperse(Fragment::new([Node::Joiner {
-                    single_line: ", ",
-                    multi_line: ",\n",
-                }]))
-                .flat_map(|fragment| fragment.nodes),
-        )
-        .chain([
-            Node::Joiner {
-                single_line: "",
-                multi_line: ",",
-            },
-            Node::PopIndent,
-            Node::Joiner {
-                single_line: "",
-                multi_line: "\n",
-            },
-            suffix.into(),
-        ]),
+        [prefix.into(), Node::PushIndent]
+            .into_iter()
+            .chain(
+                contents
+                    .into_iter()
+                    .map(|entry| {
+                        Fragment::new(
+                            iter::once(Node::Joiner {
+                                single_line: "",
+                                multi_line: "\n",
+                            })
+                            .chain(entry.into().nodes)
+                            .chain([Node::Joiner {
+                                single_line: "",
+                                multi_line: ",",
+                            }]),
+                        )
+                    })
+                    .intersperse(Fragment::new([Node::Joiner {
+                        single_line: ", ",
+                        multi_line: "",
+                    }]))
+                    .flat_map(|fragment| fragment.nodes),
+            )
+            .chain([
+                Node::PopIndent,
+                // FIXME(eddyb) this causes `prefix + "\n" + suffix` output when
+                // `contents` is empty, instead of `prefix + suffix`.
+                Node::Joiner {
+                    single_line: "",
+                    multi_line: "\n",
+                },
+                suffix.into(),
+            ]),
     )
 }
