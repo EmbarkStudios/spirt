@@ -34,8 +34,8 @@ pub enum Node<'a> {
     /// Require that nodes before and after this node, go on different lines.
     ///
     /// This is similar in effect to a `Text("\n")`, except that it doesn't
-    /// introduce a new `\n` when the previous node(s) had already started
-    /// an (empty) new line (e.g. `Text("...\n")` or another `ForceLineStart`).
+    /// introduce a new `\n` when the previous/next node(s) already end/start
+    /// on a new line (whether from `Text("\n")` or another `ForceLineStart`).
     ForceLineSeparation,
 
     IfMultiLine(&'a Node<'a>),
@@ -102,9 +102,13 @@ impl<'a> Fragment<'a> {
             #[derive(Copy, Clone)]
             enum LineOp<'a> {
                 AppendToLine { indent_before: u32, text: &'a str },
-                BreakingOnlySpace,
                 StartNewLine,
-                ForceLineSeparation,
+                BreakIfWithinLine(Break),
+            }
+            #[derive(Copy, Clone)]
+            enum Break {
+                Space,
+                NewLine,
             }
 
             let mut indent = 0;
@@ -125,8 +129,10 @@ impl<'a> Fragment<'a> {
                         indent -= 1;
                         ("", None)
                     }
-                    Node::BreakingOnlySpace => ("", Some(LineOp::BreakingOnlySpace)),
-                    Node::ForceLineSeparation => ("", Some(LineOp::ForceLineSeparation)),
+                    Node::BreakingOnlySpace => ("", Some(LineOp::BreakIfWithinLine(Break::Space))),
+                    Node::ForceLineSeparation => {
+                        ("", Some(LineOp::BreakIfWithinLine(Break::NewLine)))
+                    }
                     Node::IfMultiLine(_) => ("", None),
                     Node::Text(s) => (&s[..], None),
                 };
@@ -150,57 +156,65 @@ impl<'a> Fragment<'a> {
             // to avoid trailing whitespace on otherwise-empty lines.
             let mut on_empty_new_line = true;
 
-            // Deferred `LineOp::BreakingOnlySpace`, which should turn into a
-            // single space only between two `LineOp::AppendToLine { text, .. }`
-            // (with non-empty `text`), on the same line.
-            let mut pending_breaking_only_space = false;
+            // Deferred `LineOp::BreakIfWithinLine`, which will be materialized
+            // only between two consecutive `LineOp::AppendToLine { text, .. }`
+            // (with non-empty `text`), that (would) share the same line.
+            let mut pending_break_if_within_line = None;
 
-            line_ops.flat_map(move |op| {
-                let indent_before = match op {
-                    LineOp::AppendToLine {
-                        indent_before,
-                        text,
-                    } if on_empty_new_line && text != "" => indent_before,
+            line_ops
+                .filter(|op| {
+                    // Do not allow (accidental) side-effects from no-op `op`s.
+                    !matches!(op, LineOp::AppendToLine { text: "", .. })
+                })
+                .flat_map(move |op| {
+                    let pre_text = match op {
+                        LineOp::AppendToLine { indent_before, .. } => {
+                            let (br, need_indent) = match pending_break_if_within_line {
+                                Some(Break::Space) => (" ", false),
+                                Some(Break::NewLine) => ("\n", true),
+                                None => ("", on_empty_new_line),
+                            };
+                            let indent = if need_indent { indent_before } else { 0 };
+                            Some(iter::once(br).chain((0..indent).map(|_| INDENT)))
+                        }
 
-                    _ => 0,
-                };
+                        _ => None,
+                    };
 
-                let space_before = match op {
-                    LineOp::AppendToLine { text, .. }
-                        if pending_breaking_only_space && text != "" =>
-                    {
-                        Some(" ")
-                    }
+                    let text = match op {
+                        LineOp::AppendToLine { text, .. } => {
+                            on_empty_new_line = false;
+                            pending_break_if_within_line = None;
 
-                    _ => None,
-                };
+                            text
+                        }
 
-                let text = match op {
-                    LineOp::AppendToLine { text, .. } => text,
+                        LineOp::StartNewLine => {
+                            on_empty_new_line = true;
+                            pending_break_if_within_line = None;
 
-                    LineOp::BreakingOnlySpace => "",
+                            "\n"
+                        }
 
-                    // NOTE(eddyb) reuse the last `\n` if no text came after it,
-                    // to avoid creating unnecessary empty lines.
-                    LineOp::ForceLineSeparation if on_empty_new_line => "",
+                        LineOp::BreakIfWithinLine(br) => {
+                            if !on_empty_new_line {
+                                // Merge two pending `Break`s if necessary,
+                                // preferring newlines over spaces.
+                                let br = match (pending_break_if_within_line, br) {
+                                    (Some(Break::NewLine), _) | (_, Break::NewLine) => {
+                                        Break::NewLine
+                                    }
+                                    (None | Some(Break::Space), Break::Space) => Break::Space,
+                                };
 
-                    LineOp::StartNewLine | LineOp::ForceLineSeparation => "\n",
-                };
+                                pending_break_if_within_line = Some(br);
+                            }
+                            ""
+                        }
+                    };
 
-                if (indent_before, text) != (0, "") {
-                    on_empty_new_line =
-                        matches!(op, LineOp::StartNewLine | LineOp::ForceLineSeparation);
-                    pending_breaking_only_space = false;
-                }
-                if !on_empty_new_line && matches!(op, LineOp::BreakingOnlySpace) {
-                    pending_breaking_only_space = true;
-                }
-
-                (0..indent_before)
-                    .map(|_| INDENT)
-                    .chain(space_before)
-                    .chain([text])
-            })
+                    pre_text.into_iter().flatten().chain([text])
+                })
         };
         let mut combined = String::with_capacity(mk_reindented_nodes().map(|s| s.len()).sum());
         combined.extend(mk_reindented_nodes());
@@ -208,21 +222,29 @@ impl<'a> Fragment<'a> {
     }
 }
 
+// FIXME(eddyb) encode this as a single `Node` with children.
+fn maybe_multi_line_indentable_group<'a>(
+    children: impl IntoIterator<Item = Fragment<'a>>,
+) -> impl Iterator<Item = Node<'a>> {
+    iter::once(Node::PushIndent)
+        .chain(children.into_iter().flat_map(|child| {
+            iter::once(Node::IfMultiLine(&Node::ForceLineSeparation))
+                .chain(child.nodes)
+                .chain([Node::IfMultiLine(&Node::ForceLineSeparation)])
+        }))
+        .chain([Node::PopIndent])
+}
+
 /// Constructs the `Fragment` corresponding to one of:
 /// * single-line: `header + " " + contents.join(" ")`
 /// * multi-line: `header + "\n" + indent(contents).join("\n")`
 pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> Fragment<'_> {
     Fragment::new(
-        [header.into(), Node::PushIndent]
-            .into_iter()
-            .chain(contents.into_iter().flat_map(|entry| {
-                [
-                    Node::IfMultiLine(&Node::ForceLineSeparation),
-                    Node::BreakingOnlySpace,
-                    entry.into(),
-                ]
-            }))
-            .chain([Node::PopIndent]),
+        iter::once(header.into()).chain(maybe_multi_line_indentable_group(
+            contents
+                .into_iter()
+                .map(|entry| Fragment::new([Node::BreakingOnlySpace, entry.into()])),
+        )),
     )
 }
 
@@ -234,29 +256,24 @@ pub fn join_comma_sep<'a>(
     contents: impl IntoIterator<Item = impl Into<Fragment<'a>>>,
     suffix: &'a str,
 ) -> Fragment<'a> {
-    let mut contents: SmallVec<[_; 8]> = contents.into_iter().map(Into::into).collect();
+    let mut children: SmallVec<[_; 8]> = contents.into_iter().map(Into::into).collect();
 
-    if let Some((last_fragment, non_last_fragments)) = contents.split_last_mut() {
-        for non_last_fragment in non_last_fragments {
-            non_last_fragment
+    if let Some((last_child, non_last_children)) = children.split_last_mut() {
+        for non_last_child in non_last_children {
+            non_last_child
                 .nodes
                 .extend([",".into(), Node::BreakingOnlySpace]);
         }
 
         // Trailing comma is only needed after the very last element.
-        last_fragment
+        last_child
             .nodes
             .push(Node::IfMultiLine(&Node::Text(Cow::Borrowed(","))));
     }
 
     Fragment::new(
-        [prefix.into(), Node::PushIndent]
-            .into_iter()
-            .chain(contents.into_iter().flat_map(|fragment| {
-                iter::once(Node::IfMultiLine(&Node::ForceLineSeparation))
-                    .chain(fragment.nodes)
-                    .chain([Node::IfMultiLine(&Node::ForceLineSeparation)])
-            }))
-            .chain([Node::PopIndent, suffix.into()]),
+        iter::once(prefix.into())
+            .chain(maybe_multi_line_indentable_group(children))
+            .chain([suffix.into()]),
     )
 }
