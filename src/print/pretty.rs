@@ -38,10 +38,7 @@ pub enum Node<'a> {
     /// an (empty) new line (e.g. `Text("...\n")` or another `ForceLineStart`).
     ForceLineSeparation,
 
-    Joiner {
-        single_line: &'a str,
-        multi_line: &'a str,
-    },
+    IfMultiLine(&'a Node<'a>),
 
     Text(Cow<'a, str>),
 }
@@ -55,26 +52,6 @@ impl<'a> From<&'a str> for Node<'a> {
 impl From<String> for Node<'_> {
     fn from(text: String) -> Self {
         Self::Text(text.into())
-    }
-}
-
-impl Node<'_> {
-    fn for_single_line(&self) -> &str {
-        match self {
-            Self::PushIndent | Self::PopIndent => "",
-            Self::BreakingOnlySpace => " ",
-            Self::ForceLineSeparation => unreachable!(),
-            Self::Text(s) => s,
-            Self::Joiner { single_line, .. } => single_line,
-        }
-    }
-    fn for_multi_line(&self) -> &str {
-        match self {
-            Self::PushIndent | Self::PopIndent => "",
-            Self::BreakingOnlySpace | Self::ForceLineSeparation => unreachable!(),
-            Self::Text(s) => s,
-            Self::Joiner { multi_line, .. } => multi_line,
-        }
     }
 }
 
@@ -99,10 +76,13 @@ impl<'a> Fragment<'a> {
             .nodes
             .iter()
             .try_fold(0usize, |single_line_len, node| {
-                if let Node::ForceLineSeparation = node {
-                    return None;
-                }
-                let node_text = node.for_single_line();
+                let node_text = match node {
+                    Node::PushIndent | Node::PopIndent => "",
+                    Node::BreakingOnlySpace => " ",
+                    Node::ForceLineSeparation => return None,
+                    Node::Text(s) => s,
+                    Node::IfMultiLine(_) => "",
+                };
                 if node_text.contains("\n") {
                     return None;
                 }
@@ -129,6 +109,12 @@ impl<'a> Fragment<'a> {
 
             let mut indent = 0;
             let line_ops = self.nodes.iter().flat_map(move |node| {
+                let mut node = node;
+                if !fits_on_single_line {
+                    while let Node::IfMultiLine(multi_line_node) = node {
+                        node = multi_line_node;
+                    }
+                }
                 let (node_text, special_op) = match node {
                     Node::PushIndent => {
                         indent += 1;
@@ -141,14 +127,8 @@ impl<'a> Fragment<'a> {
                     }
                     Node::BreakingOnlySpace => ("", Some(LineOp::BreakingOnlySpace)),
                     Node::ForceLineSeparation => ("", Some(LineOp::ForceLineSeparation)),
-                    _ => (
-                        if fits_on_single_line {
-                            node.for_single_line()
-                        } else {
-                            node.for_multi_line()
-                        },
-                        None,
-                    ),
+                    Node::IfMultiLine(_) => ("", None),
+                    Node::Text(s) => (&s[..], None),
                 };
 
                 node_text
@@ -237,10 +217,7 @@ pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> F
             .into_iter()
             .chain(contents.into_iter().flat_map(|entry| {
                 [
-                    Node::Joiner {
-                        single_line: "",
-                        multi_line: "\n",
-                    },
+                    Node::IfMultiLine(&Node::ForceLineSeparation),
                     Node::BreakingOnlySpace,
                     entry.into(),
                 ]
@@ -267,33 +244,19 @@ pub fn join_comma_sep<'a>(
         }
 
         // Trailing comma is only needed after the very last element.
-        last_fragment.nodes.push(Node::Joiner {
-            single_line: "",
-            multi_line: ",",
-        });
+        last_fragment
+            .nodes
+            .push(Node::IfMultiLine(&Node::Text(Cow::Borrowed(","))));
     }
-
-    // FIXME(eddyb) replace this with more automated handling of line separation.
-    let is_empty = contents.is_empty();
 
     Fragment::new(
         [prefix.into(), Node::PushIndent]
             .into_iter()
             .chain(contents.into_iter().flat_map(|fragment| {
-                iter::once(Node::Joiner {
-                    single_line: "",
-                    multi_line: "\n",
-                })
-                .chain(fragment.nodes)
+                iter::once(Node::IfMultiLine(&Node::ForceLineSeparation))
+                    .chain(fragment.nodes)
+                    .chain([Node::IfMultiLine(&Node::ForceLineSeparation)])
             }))
-            .chain(if is_empty {
-                None
-            } else {
-                Some(Node::Joiner {
-                    single_line: "",
-                    multi_line: "\n",
-                })
-            })
             .chain([Node::PopIndent, suffix.into()]),
     )
 }
