@@ -273,6 +273,9 @@ pub fn join_comma_sep<'a>(
         });
     }
 
+    // FIXME(eddyb) replace this with more automated handling of line separation.
+    let is_empty = contents.is_empty();
+
     Fragment::new(
         [prefix.into(), Node::PushIndent]
             .into_iter()
@@ -283,15 +286,14 @@ pub fn join_comma_sep<'a>(
                 })
                 .chain(fragment.nodes)
             }))
-            .chain([
-                Node::PopIndent,
-                // FIXME(eddyb) this causes `prefix + "\n" + suffix` output when
-                // `contents` is empty, instead of `prefix + suffix`.
-                Node::Joiner {
+            .chain(if is_empty {
+                None
+            } else {
+                Some(Node::Joiner {
                     single_line: "",
                     multi_line: "\n",
-                },
-                suffix.into(),
-            ]),
+                })
+            })
+            .chain([Node::PopIndent, suffix.into()]),
     )
 }
