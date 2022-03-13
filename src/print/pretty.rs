@@ -17,6 +17,8 @@ pub struct Fragment<'a> {
 
 #[derive(Clone)]
 pub enum Node<'a> {
+    Text(Cow<'a, str>),
+
     // FIXME(eddyb) make this more like a "DOM" instead of flatly stateful.
     PushIndent,
     PopIndent,
@@ -38,9 +40,8 @@ pub enum Node<'a> {
     /// on a new line (whether from `Text("\n")` or another `ForceLineStart`).
     ForceLineSeparation,
 
-    IfMultiLine(&'a Node<'a>),
-
-    Text(Cow<'a, str>),
+    // FIXME(eddyb) remove this allocation (likely by removing `IfBlockLayout`).
+    IfBlockLayout(Box<Node<'a>>),
 }
 
 impl<'a> From<&'a str> for Node<'a> {
@@ -69,33 +70,140 @@ impl<'a> Fragment<'a> {
     }
 
     /// Flatten the `Fragment` to plain text (indented where necessary).
-    pub fn render(self) -> String {
+    pub fn render(mut self) -> String {
         // FIXME(eddyb) make max line width configurable.
-        let max_line_len = 80;
-        let fits_on_single_line = self
-            .nodes
-            .iter()
-            .try_fold(0usize, |single_line_len, node| {
-                let node_text = match node {
-                    Node::PushIndent | Node::PopIndent => "",
-                    Node::BreakingOnlySpace => " ",
-                    Node::ForceLineSeparation => return None,
-                    Node::Text(s) => s,
-                    Node::IfMultiLine(_) => "",
-                };
-                if node_text.contains("\n") {
-                    return None;
-                }
-                single_line_len
-                    .checked_add(node_text.len())
-                    .filter(|&len| len <= max_line_len)
-            })
-            .is_some();
+        let max_line_width = 80;
 
+        self.approx_layout(MaxWidths {
+            inline: max_line_width,
+            block: max_line_width,
+        });
+        self.render_post_layout()
+    }
+}
+
+// Rendering implementation details (including approximate layout).
+
+/// The approximate shape of a `Node`, regarding its 2D placement.
+enum ApproxLayout {
+    /// Only occupies part of a line, (at most) `worst_width` columns wide.
+    ///
+    /// `worst_width` can exceed the `inline` field of `MaxWidths`, in which
+    /// case the choice of inline vs block is instead made by a surrounding node.
+    Inline { worst_width: usize },
+
+    /// Needs to occupy multiple lines.
+    Block,
+}
+
+impl ApproxLayout {
+    fn append(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Block, _) | (_, Self::Block) => Self::Block,
+            (Self::Inline { worst_width: a }, Self::Inline { worst_width: b }) => Self::Inline {
+                worst_width: a.checked_add(b).unwrap(),
+            },
+        }
+    }
+}
+
+/// Maximum numbers of columns, available to a `Node`, for both inline layout
+/// and block layout (i.e. multi-line with indentation).
+///
+/// That is, these are the best-case scenarios across all possible choices of
+/// inline vs block for all surrounding nodes (up to the root) that admit both
+/// cases, and those choices will be made inside-out based on actual widths.
+#[derive(Copy, Clone)]
+struct MaxWidths {
+    inline: usize,
+    block: usize,
+}
+
+impl Node<'_> {
+    /// Determine the `ApproxLayout` of this `Node`, while making any necessary
+    /// adjustments, in order to fit within the provided `max_widths`.
+    fn approx_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
+        match self {
+            Self::Text(text) => {
+                if text.contains('\n') {
+                    ApproxLayout::Block
+                } else {
+                    // FIXME(eddyb) use `unicode-width` crate for accurate column count.
+                    let width = text.len();
+
+                    ApproxLayout::Inline { worst_width: width }
+                }
+            }
+
+            Self::PushIndent | Self::PopIndent => ApproxLayout::Inline { worst_width: 0 },
+            Self::BreakingOnlySpace => ApproxLayout::Inline { worst_width: 1 },
+            Self::ForceLineSeparation => ApproxLayout::Block,
+            Self::IfBlockLayout(block_version) => {
+                // Keep the inline `worst_width`, just in case this node is
+                // going to be used as part of an inline child of a block.
+                // NOTE(eddyb) this is currently only the case for the trailing
+                // comma added by `join_comma_sep`.
+                let worst_width = match block_version.approx_layout(max_widths) {
+                    ApproxLayout::Inline { worst_width } => worst_width,
+                    ApproxLayout::Block => 0,
+                };
+                ApproxLayout::Inline { worst_width }
+            }
+        }
+    }
+}
+
+impl Fragment<'_> {
+    /// Determine the `ApproxLayout` of this `Fragment`, while making any
+    /// necessary adjustments, in order to fit within the provided `max_widths`.
+    fn approx_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
+        let mut layout = ApproxLayout::Inline { worst_width: 0 };
+        for child in &mut self.nodes {
+            let child_layout = child.approx_layout(MaxWidths {
+                inline: match layout {
+                    ApproxLayout::Inline { worst_width } => {
+                        max_widths.inline.saturating_sub(worst_width)
+                    }
+                    ApproxLayout::Block => 0,
+                },
+                block: max_widths.block,
+            });
+            layout = layout.append(child_layout);
+        }
+
+        // HACK(eddyb) this treats the entire `Fragment` as a decision point for
+        // inline vs block layout, ideally that should be a `Node` variant.
+        if let ApproxLayout::Inline { worst_width } = layout {
+            if worst_width > max_widths.inline {
+                layout = ApproxLayout::Block;
+            }
+        }
+
+        self.nodes.retain(|node| match node {
+            Node::IfBlockLayout(block_version) => {
+                if let ApproxLayout::Inline { .. } = layout {
+                    false
+                } else {
+                    *node = (**block_version).clone();
+                    assert!(!matches!(node, Node::IfBlockLayout(_)));
+                    true
+                }
+            }
+            _ => true,
+        });
+
+        layout
+    }
+
+    /// The part of `Fragment::render` that can only run after `approx_layout`.
+    //
+    // FIXME(eddyb) replace this with `-> impl Iterator<Item = &str> + Clone`,
+    // or perhaps taking an `impl FnMut(&str)`, or even `impl fmt::Write`.
+    fn render_post_layout(&self) -> String {
         // FIXME(eddyb) make this configurable.
         const INDENT: &str = "  ";
 
-        let mk_reindented_nodes = || {
+        let mk_text_pieces = || {
             /// Operation on a representation that stores lines separately.
             /// Such a representation doesn't exist yet - instead, an iterator
             /// of `LineOp`s is turned into an iterator of `&str`s.
@@ -113,12 +221,6 @@ impl<'a> Fragment<'a> {
 
             let mut indent = 0;
             let line_ops = self.nodes.iter().flat_map(move |node| {
-                let mut node = node;
-                if !fits_on_single_line {
-                    while let Node::IfMultiLine(multi_line_node) = node {
-                        node = multi_line_node;
-                    }
-                }
                 let (node_text, special_op) = match node {
                     Node::PushIndent => {
                         indent += 1;
@@ -133,7 +235,7 @@ impl<'a> Fragment<'a> {
                     Node::ForceLineSeparation => {
                         ("", Some(LineOp::BreakIfWithinLine(Break::NewLine)))
                     }
-                    Node::IfMultiLine(_) => ("", None),
+                    Node::IfBlockLayout(_) => unreachable!(),
                     Node::Text(s) => (&s[..], None),
                 };
 
@@ -216,31 +318,35 @@ impl<'a> Fragment<'a> {
                     pre_text.into_iter().flatten().chain([text])
                 })
         };
-        let mut combined = String::with_capacity(mk_reindented_nodes().map(|s| s.len()).sum());
-        combined.extend(mk_reindented_nodes());
-        combined
+        let mut rendered_text = String::with_capacity(mk_text_pieces().map(|s| s.len()).sum());
+        rendered_text.extend(mk_text_pieces());
+        rendered_text
     }
 }
 
+// Pretty fragment "constructors".
+//
+// FIXME(eddyb) should these be methods on `Node`/`Fragment`?
+
 // FIXME(eddyb) encode this as a single `Node` with children.
-fn maybe_multi_line_indentable_group<'a>(
+fn inline_or_block<'a>(
     children: impl IntoIterator<Item = Fragment<'a>>,
 ) -> impl Iterator<Item = Node<'a>> {
     iter::once(Node::PushIndent)
         .chain(children.into_iter().flat_map(|child| {
-            iter::once(Node::IfMultiLine(&Node::ForceLineSeparation))
+            iter::once(Node::IfBlockLayout(Box::new(Node::ForceLineSeparation)))
                 .chain(child.nodes)
-                .chain([Node::IfMultiLine(&Node::ForceLineSeparation)])
+                .chain([Node::IfBlockLayout(Box::new(Node::ForceLineSeparation))])
         }))
         .chain([Node::PopIndent])
 }
 
 /// Constructs the `Fragment` corresponding to one of:
-/// * single-line: `header + " " + contents.join(" ")`
-/// * multi-line: `header + "\n" + indent(contents).join("\n")`
+/// * inline layout: `header + " " + contents.join(" ")`
+/// * block layout: `header + "\n" + indent(contents).join("\n")`
 pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> Fragment<'_> {
     Fragment::new(
-        iter::once(header.into()).chain(maybe_multi_line_indentable_group(
+        iter::once(header.into()).chain(inline_or_block(
             contents
                 .into_iter()
                 .map(|entry| Fragment::new([Node::BreakingOnlySpace, entry.into()])),
@@ -249,8 +355,8 @@ pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> F
 }
 
 /// Constructs the `Fragment` corresponding to one of:
-/// * single-line: `prefix + contents.join(", ") + suffix`
-/// * multi-line: `prefix + "\n" + indent(contents).join(",\n") + ",\n" + suffix`
+/// * inline layout: `prefix + contents.join(", ") + suffix`
+/// * block layout: `prefix + "\n" + indent(contents).join(",\n") + ",\n" + suffix`
 pub fn join_comma_sep<'a>(
     prefix: &'a str,
     contents: impl IntoIterator<Item = impl Into<Fragment<'a>>>,
@@ -268,12 +374,14 @@ pub fn join_comma_sep<'a>(
         // Trailing comma is only needed after the very last element.
         last_child
             .nodes
-            .push(Node::IfMultiLine(&Node::Text(Cow::Borrowed(","))));
+            .push(Node::IfBlockLayout(Box::new(Node::Text(Cow::Borrowed(
+                ",",
+            )))));
     }
 
     Fragment::new(
         iter::once(prefix.into())
-            .chain(maybe_multi_line_indentable_group(children))
+            .chain(inline_or_block(children))
             .chain([suffix.into()]),
     )
 }
