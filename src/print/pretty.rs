@@ -1,10 +1,5 @@
 //! Pretty-printing functionality (such as automatic indentation).
 
-// FIXME(eddyb) stop using `itertools` for methods like `intersperse` when they
-// get stabilized on `Iterator` instead.
-#![allow(unstable_name_collisions)]
-use itertools::Itertools as _;
-
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::iter;
@@ -70,6 +65,9 @@ impl<'a> Fragment<'a> {
     }
 
     /// Flatten the `Fragment` to plain text (indented where necessary).
+    //
+    // FIXME(eddyb) rename this to `layout_and_render` or something, when it's
+    // not called all over the place.
     pub fn render(mut self) -> String {
         // FIXME(eddyb) make max line width configurable.
         let max_line_width = 80;
@@ -78,7 +76,10 @@ impl<'a> Fragment<'a> {
             inline: max_line_width,
             block: max_line_width,
         });
-        self.render_post_layout()
+
+        let mut out = String::new();
+        self.render_to_line_ops(&mut LineOp::interpret_with(|text| out += text));
+        out
     }
 }
 
@@ -194,133 +195,148 @@ impl Fragment<'_> {
 
         layout
     }
+}
 
-    /// The part of `Fragment::render` that can only run after `approx_layout`.
+/// Line-oriented operation (i.e. as if lines are stored separately).
+///
+/// However, a representation that stores lines separately doesn't really exist,
+/// and instead `LineOp`s are (statefully) transformed into `&str`s on the fly
+/// (see `LineOp::interpret_with`).
+#[derive(Copy, Clone)]
+enum LineOp<'a> {
+    PushIndent,
+    PopIndent,
+
+    AppendToLine(&'a str),
+    StartNewLine,
+    BreakIfWithinLine(Break),
+}
+
+#[derive(Copy, Clone)]
+enum Break {
+    Space,
+    NewLine,
+}
+
+impl Node<'_> {
+    /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
+    fn render_to_line_ops(&self, each_line_op: &mut impl FnMut(LineOp<'_>)) {
+        match self {
+            Self::Text(text) => {
+                let mut lines = text.split('\n');
+                each_line_op(LineOp::AppendToLine(lines.next().unwrap()));
+                for line in lines {
+                    each_line_op(LineOp::StartNewLine);
+                    each_line_op(LineOp::AppendToLine(line));
+                }
+            }
+
+            Self::PushIndent => each_line_op(LineOp::PushIndent),
+            Self::PopIndent => each_line_op(LineOp::PopIndent),
+            Self::BreakingOnlySpace => each_line_op(LineOp::BreakIfWithinLine(Break::Space)),
+            Self::ForceLineSeparation => each_line_op(LineOp::BreakIfWithinLine(Break::NewLine)),
+            Self::IfBlockLayout(_) => unreachable!(),
+        }
+    }
+}
+
+impl Fragment<'_> {
+    /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
+    fn render_to_line_ops(&self, each_line_op: &mut impl FnMut(LineOp<'_>)) {
+        for node in &self.nodes {
+            node.render_to_line_ops(each_line_op);
+        }
+    }
+}
+
+impl LineOp<'_> {
+    /// Expand `LineOp`s passed to the returned `impl FnMut(LineOp<'_>)` closure,
+    /// forwarding the expanded `&str` pieces to `each_str_piece`.
     //
-    // FIXME(eddyb) replace this with `-> impl Iterator<Item = &str> + Clone`,
-    // or perhaps taking an `impl FnMut(&str)`, or even `impl fmt::Write`.
-    fn render_post_layout(&self) -> String {
+    // FIXME(eddyb) this'd be nicer if instead of returning a closure, it could
+    // be passed to an `impl for<F: FnMut(LineOp<'_>)> FnOnce(F)` callback.
+    fn interpret_with(mut each_str_piece: impl FnMut(&str)) -> impl FnMut(LineOp<'_>) {
         // FIXME(eddyb) make this configurable.
         const INDENT: &str = "  ";
 
-        let mk_text_pieces = || {
-            /// Operation on a representation that stores lines separately.
-            /// Such a representation doesn't exist yet - instead, an iterator
-            /// of `LineOp`s is turned into an iterator of `&str`s.
-            #[derive(Copy, Clone)]
-            enum LineOp<'a> {
-                AppendToLine { indent_before: u32, text: &'a str },
-                StartNewLine,
-                BreakIfWithinLine(Break),
-            }
-            #[derive(Copy, Clone)]
-            enum Break {
-                Space,
-                NewLine,
+        let mut indent = 0;
+
+        // When `on_empty_new_line` is `true`, a new line was started, but
+        // lacks text, so the `LineOp::AppendToLine { indent_before, text }`
+        // first on that line (with non-empty `text`) needs to materialize
+        // `indent_before` levels of indentation (before its `text` content).
+        //
+        // NOTE(eddyb) indentation is not immediatelly materialized in order
+        // to avoid trailing whitespace on otherwise-empty lines.
+        let mut on_empty_new_line = true;
+
+        // Deferred `LineOp::BreakIfWithinLine`, which will be materialized
+        // only between two consecutive `LineOp::AppendToLine { text, .. }`
+        // (with non-empty `text`), that (would) share the same line.
+        let mut pending_break_if_within_line = None;
+
+        move |op| {
+            // Do not allow (accidental) side-effects from no-op `op`s.
+            if let LineOp::AppendToLine("") = op {
+                return;
             }
 
-            let mut indent = 0;
-            let line_ops = self.nodes.iter().flat_map(move |node| {
-                let (node_text, special_op) = match node {
-                    Node::PushIndent => {
-                        indent += 1;
-                        ("", None)
+            if let LineOp::AppendToLine(_) = op {
+                let need_indent = match pending_break_if_within_line {
+                    Some(br) => {
+                        each_str_piece(match br {
+                            Break::Space => " ",
+                            Break::NewLine => "\n",
+                        });
+                        matches!(br, Break::NewLine)
                     }
-                    Node::PopIndent => {
-                        assert!(indent > 0);
-                        indent -= 1;
-                        ("", None)
-                    }
-                    Node::BreakingOnlySpace => ("", Some(LineOp::BreakIfWithinLine(Break::Space))),
-                    Node::ForceLineSeparation => {
-                        ("", Some(LineOp::BreakIfWithinLine(Break::NewLine)))
-                    }
-                    Node::IfBlockLayout(_) => unreachable!(),
-                    Node::Text(s) => (&s[..], None),
+                    None => on_empty_new_line,
                 };
+                if need_indent {
+                    for _ in 0..indent {
+                        each_str_piece(INDENT);
+                    }
+                }
+            }
 
-                node_text
-                    .split('\n')
-                    .map(move |text| LineOp::AppendToLine {
-                        indent_before: indent,
-                        text,
-                    })
-                    .intersperse(LineOp::StartNewLine)
-                    .chain(special_op)
-            });
+            match op {
+                LineOp::PushIndent => {
+                    indent += 1;
+                }
 
-            // When `on_empty_new_line` is `true`, a new line was started, but
-            // lacks text, so the `LineOp::AppendToLine { indent_before, text }`
-            // first on that line (with non-empty `text`) needs to materialize
-            // `indent_before` levels of indentation (before its `text` content).
-            //
-            // NOTE(eddyb) indentation is not immediatelly materialized in order
-            // to avoid trailing whitespace on otherwise-empty lines.
-            let mut on_empty_new_line = true;
+                LineOp::PopIndent => {
+                    assert!(indent > 0);
+                    indent -= 1;
+                }
 
-            // Deferred `LineOp::BreakIfWithinLine`, which will be materialized
-            // only between two consecutive `LineOp::AppendToLine { text, .. }`
-            // (with non-empty `text`), that (would) share the same line.
-            let mut pending_break_if_within_line = None;
+                LineOp::AppendToLine(text) => {
+                    each_str_piece(text);
 
-            line_ops
-                .filter(|op| {
-                    // Do not allow (accidental) side-effects from no-op `op`s.
-                    !matches!(op, LineOp::AppendToLine { text: "", .. })
-                })
-                .flat_map(move |op| {
-                    let pre_text = match op {
-                        LineOp::AppendToLine { indent_before, .. } => {
-                            let (br, need_indent) = match pending_break_if_within_line {
-                                Some(Break::Space) => (" ", false),
-                                Some(Break::NewLine) => ("\n", true),
-                                None => ("", on_empty_new_line),
-                            };
-                            let indent = if need_indent { indent_before } else { 0 };
-                            Some(iter::once(br).chain((0..indent).map(|_| INDENT)))
-                        }
+                    on_empty_new_line = false;
+                    pending_break_if_within_line = None;
+                }
 
-                        _ => None,
-                    };
+                LineOp::StartNewLine => {
+                    each_str_piece("\n");
 
-                    let text = match op {
-                        LineOp::AppendToLine { text, .. } => {
-                            on_empty_new_line = false;
-                            pending_break_if_within_line = None;
+                    on_empty_new_line = true;
+                    pending_break_if_within_line = None;
+                }
 
-                            text
-                        }
+                LineOp::BreakIfWithinLine(br) => {
+                    if !on_empty_new_line {
+                        // Merge two pending `Break`s if necessary,
+                        // preferring newlines over spaces.
+                        let br = match (pending_break_if_within_line, br) {
+                            (Some(Break::NewLine), _) | (_, Break::NewLine) => Break::NewLine,
+                            (None | Some(Break::Space), Break::Space) => Break::Space,
+                        };
 
-                        LineOp::StartNewLine => {
-                            on_empty_new_line = true;
-                            pending_break_if_within_line = None;
-
-                            "\n"
-                        }
-
-                        LineOp::BreakIfWithinLine(br) => {
-                            if !on_empty_new_line {
-                                // Merge two pending `Break`s if necessary,
-                                // preferring newlines over spaces.
-                                let br = match (pending_break_if_within_line, br) {
-                                    (Some(Break::NewLine), _) | (_, Break::NewLine) => {
-                                        Break::NewLine
-                                    }
-                                    (None | Some(Break::Space), Break::Space) => Break::Space,
-                                };
-
-                                pending_break_if_within_line = Some(br);
-                            }
-                            ""
-                        }
-                    };
-
-                    pre_text.into_iter().flatten().chain([text])
-                })
-        };
-        let mut rendered_text = String::with_capacity(mk_text_pieces().map(|s| s.len()).sum());
-        rendered_text.extend(mk_text_pieces());
-        rendered_text
+                        pending_break_if_within_line = Some(br);
+                    }
+                }
+            }
+        }
     }
 }
 
