@@ -75,7 +75,7 @@ impl Fragment {
     /// Perform layout on, and flatten the `Fragment` to plain text.
     pub fn layout_and_render_to_string(mut self) -> String {
         // FIXME(eddyb) make max line width configurable.
-        let max_line_width = 80;
+        let max_line_width = 100;
 
         self.approx_layout(MaxWidths {
             inline: max_line_width,
