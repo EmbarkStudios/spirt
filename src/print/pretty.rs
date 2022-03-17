@@ -2,7 +2,7 @@
 
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::mem;
+use std::{iter, mem};
 
 /// Part of a pretty document, made up of `Node`s.
 #[derive(Clone)]
@@ -56,14 +56,19 @@ impl From<String> for Node {
 
 impl<T: Into<Node>> From<T> for Fragment {
     fn from(x: T) -> Self {
-        Self::new([x.into()])
+        Self {
+            nodes: iter::once(x.into()).into_iter().collect(),
+        }
     }
 }
 
 impl Fragment {
-    pub fn new(nodes: impl IntoIterator<Item = Node>) -> Self {
+    pub fn new(fragments: impl IntoIterator<Item = impl Into<Self>>) -> Self {
         Self {
-            nodes: nodes.into_iter().collect(),
+            nodes: fragments
+                .into_iter()
+                .flat_map(|fragment| fragment.into().nodes)
+                .collect(),
         }
     }
 
