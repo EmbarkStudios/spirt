@@ -575,7 +575,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     ///
     /// This should be used everywhere some type ascription notation is needed,
     /// to ensure consistency across all such situations.
-    fn pretty_type_ascription_suffix(&self, ty: Type) -> pretty::Fragment<'static> {
+    fn pretty_type_ascription_suffix(&self, ty: Type) -> pretty::Fragment {
         pretty::join_space(":", [ty.print(self)])
     }
 
@@ -644,7 +644,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         let mut out = opcode.name().to_string();
 
         if angle_bracket_operands.peek().is_some() {
-            out = pretty::join_comma_sep(&(out + "<"), angle_bracket_operands, ">").render();
+            out = pretty::join_comma_sep(out + "<", angle_bracket_operands, ">").render();
         }
 
         let type_ascription_suffix =
@@ -652,12 +652,10 @@ impl<'a, 'b> Printer<'a, 'b> {
 
         if !paren_operands.is_empty() {
             out = pretty::join_comma_sep(
-                &(out + "("),
+                out + "(",
                 paren_operands,
                 type_ascription_suffix
-                    .map(|s| format!("){}", s))
-                    .as_deref()
-                    .unwrap_or(")"),
+                    .map_or(")".into(), |s| -> pretty::Node { format!("){}", s).into() }),
             )
             .render();
         } else {
@@ -933,7 +931,7 @@ impl Print for ModuleDebugInfo {
                                 .map(|(lang, sources)| {
                                     let spv::DebugSources { file_contents } = sources;
                                     pretty::join_comma_sep(
-                                        &format!(
+                                        format!(
                                             "{} {{ version: {} }}: {{",
                                             spv::print::imm(wk.SourceLanguage, lang.lang),
                                             lang.version
@@ -1368,7 +1366,7 @@ impl Print for GlobalVarDecl {
             }
         };
 
-        let def = pretty::join_space(&header, body).render();
+        let def = pretty::join_space(header, body).render();
 
         AttrsAndDef {
             attrs: attrs.print(printer),
@@ -1398,7 +1396,7 @@ impl Print for FuncDecl {
                     .print(printer)
                     + &def
             }),
-            &format!(") -> {}", ret_type.print(printer)),
+            format!(") -> {}", ret_type.print(printer)),
         )
         .render();
 
@@ -1555,7 +1553,7 @@ impl Print for FuncAt<'_, ControlNode> {
                                 // FIXME(eddyb) the reindenting here hurts more than
                                 // it helps, maybe it needs some heuristics?
                                 def = if false {
-                                    pretty::join_space(&header, [def]).render()
+                                    pretty::join_space(header, [def]).render()
                                 } else {
                                     header + " " + &def
                                 };
@@ -1621,12 +1619,11 @@ impl Print for DataInstDef {
         // FIXME(eddyb) deduplicate the "parens + optional type ascription"
         // logic with `pretty_spv_inst`.
         let def = pretty::join_comma_sep(
-            &(header + "("),
+            header + "(",
             inputs.iter().map(|v| v.print(printer)),
-            &output_type
-                .map(|ty| format!("){}", printer.pretty_type_ascription_suffix(ty).render()))
-                .as_deref()
-                .unwrap_or(")"),
+            output_type.map_or(")".into(), |ty| -> pretty::Node {
+                format!("){}", printer.pretty_type_ascription_suffix(ty).render()).into()
+            }),
         )
         .render();
 
@@ -1652,7 +1649,7 @@ impl Print for cfg::ControlInst {
             if let cfg::ControlPoint::Exit(control_node) = point {
                 if let Some(outputs) = target_merge_outputs.get(&control_node) {
                     target = pretty::join_comma_sep(
-                        &(target + "("),
+                        target + "(",
                         outputs.iter().enumerate().map(|(output_idx, v)| {
                             Value::ControlNodeOutput {
                                 control_node: control_node,
@@ -1742,7 +1739,7 @@ impl Print for cfg::ControlInst {
                     0 => header,
                     1 => header + " " + &targets.nth(0).unwrap(),
                     _ => pretty::join_comma_sep(
-                        &(header + " {"),
+                        header + " {",
                         targets.map(|entry| {
                             pretty::Fragment::new([pretty::Node::ForceLineSeparation, entry.into()])
                         }),

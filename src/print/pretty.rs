@@ -6,20 +6,20 @@ use std::mem;
 
 /// Part of a pretty document, made up of `Node`s.
 #[derive(Clone)]
-pub struct Fragment<'a> {
-    pub nodes: SmallVec<[Node<'a>; 8]>,
+pub struct Fragment {
+    pub nodes: SmallVec<[Node; 8]>,
 }
 
 #[derive(Clone)]
-pub enum Node<'a> {
-    Text(Cow<'a, str>),
+pub enum Node {
+    Text(Cow<'static, str>),
 
     /// Container for `Fragment`s, using block layout (indented on separate lines).
-    IndentedBlock(Vec<Fragment<'a>>),
+    IndentedBlock(Vec<Fragment>),
 
     /// Container for `Fragment`s, either using inline layout (all on one line)
     /// or block layout (indented on separate lines).
-    InlineOrIndentedBlock(Vec<Fragment<'a>>),
+    InlineOrIndentedBlock(Vec<Fragment>),
 
     /// Require that nodes before and after this node, are separated by some
     /// whitespace (either by a single space, or by being on different lines).
@@ -42,26 +42,26 @@ pub enum Node<'a> {
     IfBlockLayout(&'static str),
 }
 
-impl<'a> From<&'a str> for Node<'a> {
-    fn from(text: &'a str) -> Self {
+impl From<&'static str> for Node {
+    fn from(text: &'static str) -> Self {
         Self::Text(text.into())
     }
 }
 
-impl From<String> for Node<'_> {
+impl From<String> for Node {
     fn from(text: String) -> Self {
         Self::Text(text.into())
     }
 }
 
-impl<'a, T: Into<Node<'a>>> From<T> for Fragment<'a> {
+impl<T: Into<Node>> From<T> for Fragment {
     fn from(x: T) -> Self {
         Self::new([x.into()])
     }
 }
 
-impl<'a> Fragment<'a> {
-    pub fn new(nodes: impl IntoIterator<Item = Node<'a>>) -> Self {
+impl Fragment {
+    pub fn new(nodes: impl IntoIterator<Item = Node>) -> Self {
         Self {
             nodes: nodes.into_iter().collect(),
         }
@@ -165,7 +165,7 @@ struct MaxWidths {
 // FIXME(eddyb) make this configurable.
 const INDENT: &str = "  ";
 
-impl Node<'_> {
+impl Node {
     /// Determine the "rigid" component of the `ApproxLayout` of this `Node`.
     ///
     /// That is, this accounts for the parts of the `Node` that don't depend on
@@ -303,7 +303,7 @@ impl Node<'_> {
     }
 }
 
-impl Fragment<'_> {
+impl Fragment {
     /// Determine the `ApproxLayout` of this `Fragment`, potentially making
     /// adjustments in order to fit within `max_widths`.
     fn approx_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
@@ -386,7 +386,7 @@ enum Break {
     NewLine,
 }
 
-impl Node<'_> {
+impl Node {
     /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
     fn render_to_line_ops(
         &self,
@@ -430,7 +430,7 @@ impl Node<'_> {
     }
 }
 
-impl Fragment<'_> {
+impl Fragment {
     /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
     fn render_to_line_ops(
         &self,
@@ -538,7 +538,7 @@ impl LineOp<'_> {
 /// Constructs the `Fragment` corresponding to one of:
 /// * inline layout: `header + " " + contents.join(" ")`
 /// * block layout: `header + "\n" + indent(contents).join("\n")`
-pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> Fragment<'_> {
+pub fn join_space(header: impl Into<Node>, contents: impl IntoIterator<Item = String>) -> Fragment {
     Fragment::new([
         header.into(),
         Node::InlineOrIndentedBlock(
@@ -553,11 +553,11 @@ pub fn join_space(header: &str, contents: impl IntoIterator<Item = String>) -> F
 /// Constructs the `Fragment` corresponding to one of:
 /// * inline layout: `prefix + contents.join(", ") + suffix`
 /// * block layout: `prefix + "\n" + indent(contents).join(",\n") + ",\n" + suffix`
-pub fn join_comma_sep<'a>(
-    prefix: &'a str,
-    contents: impl IntoIterator<Item = impl Into<Fragment<'a>>>,
-    suffix: &'a str,
-) -> Fragment<'a> {
+pub fn join_comma_sep(
+    prefix: impl Into<Node>,
+    contents: impl IntoIterator<Item = impl Into<Fragment>>,
+    suffix: impl Into<Node>,
+) -> Fragment {
     let mut children: Vec<_> = contents.into_iter().map(Into::into).collect();
 
     if let Some((last_child, non_last_children)) = children.split_last_mut() {
