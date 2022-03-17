@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::{iter, mem};
 
 /// Part of a pretty document, made up of `Node`s.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Fragment {
     pub nodes: SmallVec<[Node; 8]>,
 }
@@ -72,11 +72,8 @@ impl Fragment {
         }
     }
 
-    /// Flatten the `Fragment` to plain text (indented where necessary).
-    //
-    // FIXME(eddyb) rename this to `layout_and_render` or something, when it's
-    // not called all over the place.
-    pub fn render(mut self) -> String {
+    /// Perform layout on, and flatten the `Fragment` to plain text.
+    pub fn layout_and_render_to_string(mut self) -> String {
         // FIXME(eddyb) make max line width configurable.
         let max_line_width = 80;
 
@@ -543,13 +540,18 @@ impl LineOp<'_> {
 /// Constructs the `Fragment` corresponding to one of:
 /// * inline layout: `header + " " + contents.join(" ")`
 /// * block layout: `header + "\n" + indent(contents).join("\n")`
-pub fn join_space(header: impl Into<Node>, contents: impl IntoIterator<Item = String>) -> Fragment {
+pub fn join_space(
+    header: impl Into<Node>,
+    contents: impl IntoIterator<Item = impl Into<Fragment>>,
+) -> Fragment {
     Fragment::new([
         header.into(),
         Node::InlineOrIndentedBlock(
             contents
                 .into_iter()
-                .map(|entry| Fragment::new([Node::BreakingOnlySpace, entry.into()]))
+                .map(|entry| {
+                    Fragment::new(iter::once(Node::BreakingOnlySpace).chain(entry.into().nodes))
+                })
                 .collect(),
         ),
     ])
