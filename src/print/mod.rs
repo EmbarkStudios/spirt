@@ -1411,83 +1411,79 @@ impl Print for FuncDecl {
                     body: _,
                     cfg,
                 },
-            ) => pretty::Fragment::new(
-                [sig.into(), " {".into(), pretty::Node::PushIndent]
-                    .into_iter()
-                    .chain(
-                        cfg.rev_post_order(def)
-                            .filter(|point| {
-                                // HACK(eddyb) this needs to print `UnstructuredMerge`s on `Exit`
-                                // instead of `Entry`, because they don't have have `Entry`s.
-                                match control_nodes[point.control_node()].kind {
-                                    ControlNodeKind::UnstructuredMerge => {
-                                        assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                                        true
-                                    }
-                                    _ => matches!(point, cfg::ControlPoint::Entry(_)),
+            ) => pretty::Fragment::new([
+                sig.into(),
+                " {".into(),
+                pretty::Node::IndentedBlock(
+                    cfg.rev_post_order(def)
+                        .filter(|point| {
+                            // HACK(eddyb) this needs to print `UnstructuredMerge`s on `Exit`
+                            // instead of `Entry`, because they don't have have `Entry`s.
+                            match control_nodes[point.control_node()].kind {
+                                ControlNodeKind::UnstructuredMerge => {
+                                    assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                                    true
                                 }
-                            })
-                            .map(|point| {
-                                let label = Use::ControlPointLabel(point);
-                                let label_header = if printer.use_styles.contains_key(&label) {
-                                    // FIXME(eddyb) `:` as used here for C-like "label syntax"
-                                    // interferes (in theory) with `e: T` "type ascription syntax".
-                                    Some((label.print(printer) + ":").into())
-                                } else {
-                                    None
-                                };
-                                let (entry_label_header, exit_label_header) = match point {
-                                    cfg::ControlPoint::Entry(_) => (label_header, None),
-                                    cfg::ControlPoint::Exit(_) => (None, label_header),
-                                };
+                                _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                            }
+                        })
+                        .map(|point| {
+                            let label = Use::ControlPointLabel(point);
+                            let label_header = if printer.use_styles.contains_key(&label) {
+                                // FIXME(eddyb) `:` as used here for C-like "label syntax"
+                                // interferes (in theory) with `e: T` "type ascription syntax".
+                                Some((label.print(printer) + ":").into())
+                            } else {
+                                None
+                            };
+                            let (entry_label_header, exit_label_header) = match point {
+                                cfg::ControlPoint::Entry(_) => (label_header, None),
+                                cfg::ControlPoint::Exit(_) => (None, label_header),
+                            };
 
-                                let control_node = point.control_node();
-                                let control_node_body = def.at(control_node).print(printer);
+                            let control_node = point.control_node();
+                            let control_node_body = def.at(control_node).print(printer);
 
-                                pretty::Fragment::new(
+                            pretty::Fragment::new(
+                                [
+                                    entry_label_header,
+                                    if !control_node_body.is_empty() {
+                                        Some(pretty::Node::IndentedBlock(vec![
+                                            control_node_body.into(),
+                                        ]))
+                                    } else {
+                                        None
+                                    },
+                                    exit_label_header,
+                                    if let Some(control_inst) =
+                                        cfg.control_insts.get(cfg::ControlPoint::Exit(control_node))
+                                    {
+                                        Some(control_inst.print(printer).into())
+                                    } else {
+                                        None
+                                    },
+                                ]
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|node| {
                                     [
-                                        entry_label_header,
-                                        if !control_node_body.is_empty() {
-                                            Some(pretty::Fragment::new([
-                                                pretty::Node::PushIndent,
-                                                control_node_body.into(),
-                                                pretty::Node::PopIndent,
-                                            ]))
-                                        } else {
-                                            None
-                                        },
-                                        exit_label_header,
-                                        if let Some(control_inst) = cfg
-                                            .control_insts
-                                            .get(cfg::ControlPoint::Exit(control_node))
-                                        {
-                                            Some(control_inst.print(printer).into())
-                                        } else {
-                                            None
-                                        },
+                                        pretty::Node::ForceLineSeparation,
+                                        node,
+                                        pretty::Node::ForceLineSeparation,
                                     ]
-                                    .into_iter()
-                                    .flatten()
-                                    .flat_map(|fragment| {
-                                        iter::once(pretty::Node::ForceLineSeparation)
-                                            .chain(fragment.nodes)
-                                    }),
-                                )
-                            })
-                            .intersperse({
-                                // Separate (top-level) control nodes with empty lines.
-                                // FIXME(eddyb) have an explicit `pretty::Node`
-                                // for "vertical gap" instead.
-                                "\n\n".into()
-                            })
-                            .flat_map(|fragment| fragment.nodes),
-                    )
-                    .chain([
-                        pretty::Node::PopIndent,
-                        pretty::Node::ForceLineSeparation,
-                        "}".into(),
-                    ]),
-            )
+                                }),
+                            )
+                        })
+                        .intersperse({
+                            // Separate (top-level) control nodes with empty lines.
+                            // FIXME(eddyb) have an explicit `pretty::Node`
+                            // for "vertical gap" instead.
+                            "\n\n".into()
+                        })
+                        .collect(),
+                ),
+                "}".into(),
+            ])
             .render(),
         };
 
@@ -1714,17 +1710,9 @@ impl Print for cfg::ControlInst {
                     "if ".into(),
                     inputs[0].print(printer).into(),
                     " {".into(),
-                    pretty::Node::PushIndent,
-                    pretty::Node::ForceLineSeparation,
-                    target_then.into(),
-                    pretty::Node::PopIndent,
-                    pretty::Node::ForceLineSeparation,
+                    pretty::Node::IndentedBlock(vec![target_then.into()]),
                     "} else {".into(),
-                    pretty::Node::PushIndent,
-                    pretty::Node::ForceLineSeparation,
-                    target_else.into(),
-                    pretty::Node::PopIndent,
-                    pretty::Node::ForceLineSeparation,
+                    pretty::Node::IndentedBlock(vec![target_else.into()]),
                     "}".into(),
                 ])
                 .render()
