@@ -96,6 +96,13 @@ impl Module {
         Self::lower_from_spv_module_parser(cx, spv::read::ModuleParser::read_from_spv_file(path)?)
     }
 
+    pub fn lower_from_spv_bytes(cx: Rc<Context>, spv_bytes: Vec<u8>) -> io::Result<Self> {
+        Self::lower_from_spv_module_parser(
+            cx,
+            spv::read::ModuleParser::read_from_spv_bytes(spv_bytes)?,
+        )
+    }
+
     pub fn lower_from_spv_module_parser(
         cx: Rc<Context>,
         parser: spv::read::ModuleParser,

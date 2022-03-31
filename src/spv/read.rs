@@ -277,9 +277,13 @@ fn invalid(reason: &str) -> io::Error {
 
 impl ModuleParser {
     pub fn read_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::read_from_spv_bytes(fs::read(path)?)
+    }
+
+    pub fn read_from_spv_bytes(spv_bytes: Vec<u8>) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
 
-        let spv_bytes = VecRefMut::new(fs::read(path)?);
+        let spv_bytes = VecRefMut::new(spv_bytes);
         if spv_bytes.len() % 4 != 0 {
             return Err(invalid("not a multiple of 4 bytes"));
         }
