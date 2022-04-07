@@ -196,11 +196,16 @@ impl<E: sealed::Entity> EntityDefs<E> {
         let entity = match self.incomplete_chunk_start_and_flattened_base {
             Some((chunk_start, flattened_base)) => {
                 let chunk_len = self.flattened.len() - flattened_base;
+
+                // This is the last entity in this chunk, completing it.
+                // NB: no new chunk is allocated here, but instead the next
+                // `define` call will find no incomplete chunk, which will
+                // prompt it to allocate a new chunk itself.
                 if chunk_len == (E::CHUNK_SIZE - 1) as usize {
                     self.complete_chunk_start_to_flattened_base
                         .extend(self.incomplete_chunk_start_and_flattened_base.take());
-                    panic!();
                 }
+
                 E::from_non_zero_u32(
                     NonZeroU32::new(chunk_start.to_non_zero_u32().get() + chunk_len as u32)
                         .unwrap(),
