@@ -190,7 +190,7 @@ pub struct InstructionDef {
     pub rest_operands: Option<RestOperandsUnit>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InstructionCategory {
     Type,
     Const,
@@ -617,13 +617,74 @@ impl Spec {
 
         let instructions = indexed::KhrSegmentedVec::from_in_order_iter(
             raw_core_grammar.instructions.iter().map(|inst| {
+                // Helper for checking if `inst.opname` starts with `prefix`
+                // followed by an uppercase letter indicating the start of
+                // the first "word" for the intra-category instruction name.
+                let has_categorical_prefix = |prefix| {
+                    inst.opname
+                        .strip_prefix(prefix)
+                        .filter(|next| next.starts_with(|c| ('A'..='Z').contains(&c)))
+                        .is_some()
+                };
+
+                let category_from_prefix = if has_categorical_prefix("OpType") {
+                    Some(InstructionCategory::Type)
+                } else if matches!(inst.opname, "OpConstant" | "OpSpecConstant")
+                    || has_categorical_prefix("OpConstant")
+                    || has_categorical_prefix("OpSpecConstant")
+                {
+                    Some(InstructionCategory::Const)
+                } else if has_categorical_prefix("OpIgnore")
+                    || has_categorical_prefix("OpTerminate")
+                {
+                    // HACK(eddyb) not category prefixes, but they help with
+                    // working around `Reserved` extensions with control-flow
+                    // instructions. False positives will be caught by the
+                    // assert further down, if `category_from_class` differs.
+                    Some(InstructionCategory::ControlFlow)
+                } else {
+                    None
+                };
+                let category_from_class = match inst.class {
+                    "Type-Declaration" => Some(InstructionCategory::Type),
+                    "Constant-Creation" => Some(InstructionCategory::Const),
+                    "Control-Flow" => Some(InstructionCategory::ControlFlow),
+
+                    // HACK(eddyb) work around all pipe instructions being in
+                    // the `Pipe` class, even when e.g. `Constant-Creation`
+                    // would be more appropriate (for `OpConstantPipeStorage`).
+                    "Pipe" => category_from_prefix.filter(|&category| {
+                        assert_eq!(
+                            (inst.opname, category),
+                            ("OpConstantPipeStorage", InstructionCategory::Const)
+                        );
+                        true
+                    }),
+
+                    // HACK(eddyb) work around extensions getting initially
+                    // added to catch-all classes like `Reserved` or `@exclude`.
+                    "Reserved" | "@exclude" => category_from_prefix,
+
+                    _ => None,
+                };
+                match (category_from_prefix, category_from_class) {
+                    // Control-flow instructions don't (all) have prefixes.
+                    (None, Some(InstructionCategory::ControlFlow)) => {}
+
+                    _ => assert!(
+                        category_from_prefix == category_from_class,
+                        "instruction name `{}` implies category `{:?}`, \
+                         but class `{}` implies category `{:?}`",
+                        inst.opname,
+                        category_from_prefix,
+                        inst.class,
+                        category_from_class,
+                    ),
+                }
+
                 let mut def = InstructionDef {
-                    category: match inst.class {
-                        "Type-Declaration" => InstructionCategory::Type,
-                        "Constant-Creation" => InstructionCategory::Const,
-                        "Control-Flow" => InstructionCategory::ControlFlow,
-                        _ => InstructionCategory::Other,
-                    },
+                    // FIXME(eddyb) should `Other` be replaced with `Option`?
+                    category: category_from_class.unwrap_or(InstructionCategory::Other),
 
                     has_result_type_id: false,
                     has_result_id: false,
