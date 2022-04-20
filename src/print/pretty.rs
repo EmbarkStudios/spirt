@@ -1,8 +1,10 @@
 //! Pretty-printing functionality (such as automatic indentation).
 
+use indexmap::IndexSet;
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::{iter, mem};
+use std::fmt::Write as _;
+use std::{fmt, iter, mem};
 
 /// Part of a pretty document, made up of `Node`s.
 #[derive(Clone, Default)]
@@ -13,6 +15,9 @@ pub struct Fragment {
 #[derive(Clone)]
 pub enum Node {
     Text(Cow<'static, str>),
+
+    // FIXME(eddyb) should this contain a `Node` instead of being text-only?
+    StyledText(Box<(Styles, Cow<'static, str>)>),
 
     /// Container for `Fragment`s, using block layout (indented on separate lines).
     IndentedBlock(Vec<Fragment>),
@@ -40,6 +45,41 @@ pub enum Node {
 
     // FIXME(eddyb) replace this with something lower-level than layout.
     IfBlockLayout(&'static str),
+}
+
+#[derive(Clone, Default)]
+pub struct Styles {
+    pub anchor: Option<String>,
+    pub anchor_is_def: bool,
+    pub color: Option<[u8; 3]>,
+    pub opacity: Option<f32>,
+}
+
+impl Styles {
+    pub fn color(color: [u8; 3]) -> Self {
+        Self {
+            color: Some(color),
+            ..Self::default()
+        }
+    }
+
+    pub fn apply(self, text: impl Into<Cow<'static, str>>) -> Node {
+        Node::StyledText(Box::new((self, text.into())))
+    }
+}
+
+/// Color palettes built-in for convenience (colors are RGB, as `[u8; 3]`).
+pub mod palettes {
+    /// Minimalist palette, chosen to work well on white background, but also
+    /// with "automatic dark mode" styles.
+    pub mod simple {
+        pub const RED: [u8; 3] = [0xcc, 0x33, 0x33];
+        pub const GREEN: [u8; 3] = [0x33, 0x99, 0x33];
+        pub const BLUE: [u8; 3] = [0x33, 0x33, 0xcc];
+        pub const YELLOW: [u8; 3] = [0xcc, 0x99, 0x33];
+        pub const MAGENTA: [u8; 3] = [0xcc, 0x33, 0xcc];
+        pub const CYAN: [u8; 3] = [0x33, 0x99, 0xcc];
+    }
 }
 
 impl From<&'static str> for Node {
@@ -72,19 +112,165 @@ impl Fragment {
         }
     }
 
-    /// Perform layout on, and flatten the `Fragment` to plain text.
-    pub fn layout_and_render_to_string(mut self) -> String {
-        // FIXME(eddyb) make max line width configurable.
-        let max_line_width = 100;
-
+    /// Perform layout on the `Fragment`, limiting lines to `max_line_width`
+    /// columns where possible.
+    pub fn layout_with_max_line_width(mut self, max_line_width: usize) -> FragmentPostLayout {
         self.approx_layout(MaxWidths {
             inline: max_line_width,
             block: max_line_width,
         });
+        FragmentPostLayout(self)
+    }
+}
 
-        let mut out = String::new();
-        self.render_to_line_ops(&mut LineOp::interpret_with(|text| out += text), false);
-        out
+// HACK(eddyb) simple wrapper to avoid misuse externally.
+pub struct FragmentPostLayout(Fragment);
+
+impl fmt::Display for FragmentPostLayout {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut result = Ok(());
+        self.0.render_to_line_ops(
+            &mut LineOp::interpret_with(|op| match op {
+                TextOp::Text(text) => {
+                    result = result.and_then(|_| f.write_str(text));
+                }
+                _ => {}
+            }),
+            false,
+        );
+        result
+    }
+}
+
+pub struct HtmlSnippet {
+    pub head_deduplicatable_elements: IndexSet<String>,
+    pub body: String,
+}
+
+impl HtmlSnippet {
+    /// Combine `head` and `body` into a complete HTML document, which starts
+    /// with `<!doctype html>`. Ideal for writing out a whole `.html` file.
+    //
+    // FIXME(eddyb) provide a non-allocating version.
+    pub fn to_html_doc(&self) -> String {
+        let mut html = String::new();
+        html += "<!doctype html>\n";
+        html += "<head>\n";
+        html += "<meta charset=\"utf-8\">\n";
+        for elem in &self.head_deduplicatable_elements {
+            html += elem;
+            html += "\n";
+        }
+        html += "</head>\n";
+
+        html += "<body>";
+        html += &self.body;
+        html += "</body>\n";
+
+        html
+    }
+}
+
+impl FragmentPostLayout {
+    /// Flatten the `Fragment` to HTML, producing a `HtmlSnippet`.
+    //
+    // FIXME(eddyb) provide a non-allocating version.
+    pub fn render_to_html(&self) -> HtmlSnippet {
+        // HACK(eddyb) using an UUID as a class name in lieu of "scoped <style>".
+        const ROOT_CLASS_NAME: &str = "spirt-90c2056d-5b38-4644-824a-b4be1c82f14d";
+
+        // FIXME(eddyb) consider interning styles into CSS classes, to avoid
+        // using inline `style="..."` attributes.
+        let style_elem = "
+<style>
+    SCOPE {
+        /* HACK(eddyb) avoid unnecessarily small or thin text. */
+        font-size: 15px;
+        font-weight: 450;
+    }
+    SCOPE a {
+        color: unset;
+        font-weight: 900;
+    }
+    SCOPE a:not(:hover) {
+        text-decoration: unset;
+    }
+</style>
+"
+        .replace("SCOPE", &format!("pre.{ROOT_CLASS_NAME}"));
+
+        let mut body = format!("<pre class=\"{ROOT_CLASS_NAME}\">");
+        self.0.render_to_line_ops(
+            &mut LineOp::interpret_with(|op| match op {
+                TextOp::PushStyles(styles) | TextOp::PopStyles(styles) => {
+                    body += "<";
+                    if let TextOp::PopStyles(_) = op {
+                        body += "/";
+                    }
+                    body += if styles.anchor.is_some() { "a" } else { "span" };
+
+                    if let TextOp::PushStyles(_) = op {
+                        let mut push_attr = |attr, value: &str| {
+                            // Quick sanity check.
+                            assert!(value.chars().all(|c| !(c == '"' || c == '&')));
+
+                            body.extend([" ", attr, "=\"", value, "\""]);
+                        };
+
+                        let Styles {
+                            ref anchor,
+                            anchor_is_def,
+                            color,
+                            opacity,
+                        } = *styles;
+
+                        if let Some(id) = anchor {
+                            if anchor_is_def {
+                                push_attr("id", id);
+                            }
+                            push_attr("href", &format!("#{id}"));
+                        }
+
+                        let mut css_style = String::new();
+                        if let Some([r, g, b]) = color {
+                            write!(css_style, "color:#{r:02x}{g:02x}{b:02x};").unwrap();
+                        }
+                        if let Some(opacity) = opacity {
+                            write!(css_style, "opacity:{opacity};").unwrap();
+                        }
+                        if !css_style.is_empty() {
+                            push_attr("style", &css_style);
+                        }
+                    }
+
+                    body += ">";
+                }
+                TextOp::Text(text) => {
+                    // Minimal escaping, just enough to produce valid HTML.
+                    let escape_from = ['&', '<'];
+                    let escape_to = ["&amp;", "&lt;"];
+                    for piece in text.split_inclusive(escape_from) {
+                        let mut chars = piece.chars();
+                        let maybe_needs_escape = chars.next_back();
+                        body += chars.as_str();
+
+                        if let Some(maybe_needs_escape) = maybe_needs_escape {
+                            match escape_from.iter().position(|&c| maybe_needs_escape == c) {
+                                Some(escape_idx) => body += escape_to[escape_idx],
+                                None => body.push(maybe_needs_escape),
+                            }
+                        }
+                    }
+                }
+            }),
+            false,
+        );
+        body += "</pre>";
+
+        HtmlSnippet {
+            head_deduplicatable_elements: [style_elem].into_iter().collect(),
+            body,
+        }
     }
 }
 
@@ -173,26 +359,30 @@ impl Node {
     /// That is, this accounts for the parts of the `Node` that don't depend on
     /// contextual sizing, i.e. `MaxWidths` (see also `approx_flex_layout`).
     fn approx_rigid_layout(&self) -> ApproxLayout {
-        match self {
-            Self::Text(text) => {
-                if let Some((pre, non_pre)) = text.split_once('\n') {
-                    let (_, post) = non_pre.rsplit_once('\n').unwrap_or(("", non_pre));
+        // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
+        // to destructure through the `Box<(_, Cow<str>)>`.
+        let text_approx_rigid_layout = |text: &str| {
+            if let Some((pre, non_pre)) = text.split_once('\n') {
+                let (_, post) = non_pre.rsplit_once('\n').unwrap_or(("", non_pre));
 
-                    // FIXME(eddyb) use `unicode-width` crate for accurate column count.
-                    let pre_width = pre.len();
-                    let post_width = post.len();
+                // FIXME(eddyb) use `unicode-width` crate for accurate column count.
+                let pre_width = pre.len();
+                let post_width = post.len();
 
-                    ApproxLayout::BlockOrMixed {
-                        pre_worst_width: pre_width,
-                        post_worst_width: post_width,
-                    }
-                } else {
-                    // FIXME(eddyb) use `unicode-width` crate for accurate column count.
-                    let width = text.len();
-
-                    ApproxLayout::Inline { worst_width: width }
+                ApproxLayout::BlockOrMixed {
+                    pre_worst_width: pre_width,
+                    post_worst_width: post_width,
                 }
+            } else {
+                // FIXME(eddyb) use `unicode-width` crate for accurate column count.
+                let width = text.len();
+
+                ApproxLayout::Inline { worst_width: width }
             }
+        };
+        match self {
+            Self::Text(text) => text_approx_rigid_layout(text),
+            Self::StyledText(styles_and_text) => text_approx_rigid_layout(&styles_and_text.1),
 
             Self::IndentedBlock(_) => ApproxLayout::BlockOrMixed {
                 pre_worst_width: 0,
@@ -298,6 +488,7 @@ impl Node {
 
             // Layout computed only in `approx_rigid_layout`.
             Self::Text(_)
+            | Self::StyledText(_)
             | Self::BreakingOnlySpace
             | Self::ForceLineSeparation
             | Self::IfBlockLayout(_) => ApproxLayout::Inline { worst_width: 0 },
@@ -370,12 +561,14 @@ impl Fragment {
 /// Line-oriented operation (i.e. as if lines are stored separately).
 ///
 /// However, a representation that stores lines separately doesn't really exist,
-/// and instead `LineOp`s are (statefully) transformed into `&str`s on the fly
+/// and instead `LineOp`s are (statefully) transformed into `TextOp`s on the fly
 /// (see `LineOp::interpret_with`).
 #[derive(Copy, Clone)]
 enum LineOp<'a> {
     PushIndent,
     PopIndent,
+    PushStyles(&'a Styles),
+    PopStyles(&'a Styles),
 
     AppendToLine(&'a str),
     StartNewLine,
@@ -390,19 +583,33 @@ enum Break {
 
 impl Node {
     /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
-    fn render_to_line_ops(
-        &self,
-        each_line_op: &mut impl FnMut(LineOp<'_>),
+    fn render_to_line_ops<'a>(
+        &'a self,
+        each_line_op: &mut impl FnMut(LineOp<'a>),
         directly_in_block: bool,
     ) {
+        // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
+        // to destructure through the `Box<(_, Cow<str>)>`.
+        let mut text_render_to_line_ops = |styles: Option<&'a Styles>, text: &'a str| {
+            if let Some(styles) = styles {
+                each_line_op(LineOp::PushStyles(styles));
+            }
+            let mut lines = text.split('\n');
+            each_line_op(LineOp::AppendToLine(lines.next().unwrap()));
+            for line in lines {
+                each_line_op(LineOp::StartNewLine);
+                each_line_op(LineOp::AppendToLine(line));
+            }
+            if let Some(styles) = styles {
+                each_line_op(LineOp::PopStyles(styles));
+            }
+        };
         match self {
             Self::Text(text) => {
-                let mut lines = text.split('\n');
-                each_line_op(LineOp::AppendToLine(lines.next().unwrap()));
-                for line in lines {
-                    each_line_op(LineOp::StartNewLine);
-                    each_line_op(LineOp::AppendToLine(line));
-                }
+                text_render_to_line_ops(None, text);
+            }
+            Self::StyledText(styles_and_text) => {
+                text_render_to_line_ops(Some(&styles_and_text.0), &styles_and_text.1);
             }
 
             Self::IndentedBlock(fragments) => {
@@ -425,7 +632,7 @@ impl Node {
             Self::ForceLineSeparation => each_line_op(LineOp::BreakIfWithinLine(Break::NewLine)),
             &Self::IfBlockLayout(text) => {
                 if directly_in_block {
-                    Self::Text(text.into()).render_to_line_ops(each_line_op, true);
+                    text_render_to_line_ops(None, text);
                 }
             }
         }
@@ -434,9 +641,9 @@ impl Node {
 
 impl Fragment {
     /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
-    fn render_to_line_ops(
-        &self,
-        each_line_op: &mut impl FnMut(LineOp<'_>),
+    fn render_to_line_ops<'a>(
+        &'a self,
+        each_line_op: &mut impl FnMut(LineOp<'a>),
         directly_in_block: bool,
     ) {
         for node in &self.nodes {
@@ -445,13 +652,21 @@ impl Fragment {
     }
 }
 
-impl LineOp<'_> {
-    /// Expand `LineOp`s passed to the returned `impl FnMut(LineOp<'_>)` closure,
-    /// forwarding the expanded `&str` pieces to `each_str_piece`.
+/// Text-oriented operation (plain text snippets interleaved with style push/pop).
+enum TextOp<'a> {
+    PushStyles(&'a Styles),
+    PopStyles(&'a Styles),
+
+    Text(&'a str),
+}
+
+impl<'a> LineOp<'a> {
+    /// Expand `LineOp`s passed to the returned `impl FnMut(LineOp<'a>)` closure,
+    /// forwarding the expanded `TextOp`s to `each_text_op`.
     //
     // FIXME(eddyb) this'd be nicer if instead of returning a closure, it could
-    // be passed to an `impl for<F: FnMut(LineOp<'_>)> FnOnce(F)` callback.
-    fn interpret_with(mut each_str_piece: impl FnMut(&str)) -> impl FnMut(LineOp<'_>) {
+    // be passed to an `impl for<F: FnMut(LineOp<'a>)> FnOnce(F)` callback.
+    fn interpret_with(mut each_text_op: impl FnMut(TextOp<'a>)) -> impl FnMut(LineOp<'a>) {
         let mut indent = 0;
 
         // When `on_empty_new_line` is `true`, a new line was started, but
@@ -468,6 +683,9 @@ impl LineOp<'_> {
         // (with non-empty `text`), that (would) share the same line.
         let mut pending_break_if_within_line = None;
 
+        // Deferred `LineOp::PushStyles`.
+        let mut pending_push_styles = None;
+
         move |op| {
             // Do not allow (accidental) side-effects from no-op `op`s.
             if let LineOp::AppendToLine("") = op {
@@ -477,19 +695,26 @@ impl LineOp<'_> {
             if let LineOp::AppendToLine(_) = op {
                 let need_indent = match pending_break_if_within_line {
                     Some(br) => {
-                        each_str_piece(match br {
+                        each_text_op(TextOp::Text(match br {
                             Break::Space => " ",
                             Break::NewLine => "\n",
-                        });
+                        }));
                         matches!(br, Break::NewLine)
                     }
                     None => on_empty_new_line,
                 };
                 if need_indent {
                     for _ in 0..indent {
-                        each_str_piece(INDENT);
+                        each_text_op(TextOp::Text(INDENT));
                     }
                 }
+            }
+
+            // FIXME(eddyb) this could be more comprehensive but for now it does
+            // avoid the issue of `PushStyles` followed by `AppendToLine` having
+            // indentation and/or breaks between `PushStyle` and the text.
+            if let Some(styles) = pending_push_styles.take() {
+                each_text_op(TextOp::PushStyles(styles));
             }
 
             match op {
@@ -502,15 +727,21 @@ impl LineOp<'_> {
                     indent -= 1;
                 }
 
+                LineOp::PushStyles(styles) => {
+                    assert!(pending_push_styles.is_none());
+                    pending_push_styles = Some(styles);
+                }
+                LineOp::PopStyles(styles) => each_text_op(TextOp::PopStyles(styles)),
+
                 LineOp::AppendToLine(text) => {
-                    each_str_piece(text);
+                    each_text_op(TextOp::Text(text));
 
                     on_empty_new_line = false;
                     pending_break_if_within_line = None;
                 }
 
                 LineOp::StartNewLine => {
-                    each_str_piece("\n");
+                    each_text_op(TextOp::Text("\n"));
 
                     on_empty_new_line = true;
                     pending_break_if_within_line = None;

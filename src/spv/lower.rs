@@ -751,6 +751,7 @@ impl Module {
                                 found: func_type_ret_type,
                             }
                         )
+                        .pretty_print()
                     )));
                 }
 
@@ -1471,6 +1472,7 @@ impl Module {
                                     found: param.ty,
                                 }
                             )
+                            .pretty_print()
                         )));
                     }
                 }

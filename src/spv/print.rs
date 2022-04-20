@@ -284,11 +284,6 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForO
     printer.out
 }
 
-/// Print a single SPIR-V (short) immediate (e.g. an enumerand).
-pub fn imm(kind: spec::OperandKind, word: u32) -> String {
-    operand_from_imms([spv::Imm::Short(kind, word)]).concat_to_plain_text()
-}
-
 /// Group (ordered according to `opcode`) `imms` and `ids` into logical operands
 /// (i.e. long immediates are unflattened) and produce one `TokensForOperand` by
 /// printing each of them.

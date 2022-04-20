@@ -7,6 +7,18 @@ fn main() -> std::io::Result<()> {
         [_, in_file] => {
             let in_file_path = Path::new(in_file);
 
+            let dump_after = |pass, module: &spirt::Module| {
+                let pretty = spirt::print::Plan::for_module(&module).pretty_print();
+                let ext = format!("after.{}.spirt", pass);
+
+                // FIXME(eddyb) don't allocate whole `String`s here.
+                fs::write(in_file_path.with_extension(&ext), pretty.to_string())?;
+                fs::write(
+                    in_file_path.with_extension(ext + ".html"),
+                    pretty.render_to_html().to_html_doc(),
+                )
+            };
+
             // FIXME(eddyb) adapt the other examples to this style.
 
             fn eprint_duration<R>(f: impl FnOnce() -> R) -> R {
@@ -36,17 +48,11 @@ fn main() -> std::io::Result<()> {
                 original_export_count,
                 module.exports.len()
             );
-            fs::write(
-                in_file_path.with_extension("after.minimize_exports.spirt"),
-                spirt::print::Plan::for_module(&module).to_string(),
-            )?;
+            dump_after("minimize_exports", &module)?;
 
             eprint_duration(|| spirt::passes::link::resolve_imports(&mut module));
             eprintln!("link::resolve_imports");
-            fs::write(
-                in_file_path.with_extension("after.resolve_imports.spirt"),
-                spirt::print::Plan::for_module(&module).to_string(),
-            )?;
+            dump_after("resolve_imports", &module)?;
 
             Ok(())
         }
