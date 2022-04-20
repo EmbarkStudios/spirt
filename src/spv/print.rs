@@ -2,56 +2,70 @@
 
 use crate::spv::{self, spec};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::fmt::Write;
-use std::{fmt, iter, mem, str};
+use std::{iter, mem, str};
 
-/// One component in a `PrintOutParts` (see its documentation for details).
-pub enum PrintOutPart<ID> {
-    /// Fully printed (into a `String`) part.
-    Printed(String),
+/// The smallest unit produced by printing a ("logical") SPIR-V operand.
+///
+/// All variants other than `Id` contain a fully formatted string, and the
+/// distinction between variants can be erased to obtain a plain-text version.
+//
+// FIXME(eddyb) should there be a `TokenKind` enum and then `Cow<'static, str>`
+// paired with a `TokenKind` in place of all of these individual variants?
+pub enum Token<ID> {
+    /// An inconsistency was detected in the operands to be printed.
+    /// For stylistic consistency, the error message is always found wrapped in
+    /// a block comment (i.e. the `String` is always of the form `"/* ... */"`).
+    Error(String),
 
-    /// Unprinted part, of its original type (allowing post-processing).
+    // FIXME(eddyb) perhaps encode the hierarchical structure of e.g. enumerand
+    // parameters, so that the SPIR-T printer can do layout for them.
+    Punctuation(&'static str),
+
+    OperandKindName(&'static str),
+    EnumerandName(&'static str),
+
+    NumericLiteral(String),
+    StringLiteral(String),
+
+    /// Unprinted ID operand, of its original type (allowing post-processing).
     Id(ID),
 }
 
-/// The components outputted by printing a ("logical") SPIR-V operand, which
-/// have to be concatenated (after separately processing `ID`s) to obtain the
-/// complete printed operand.
-///
-/// With some rare exceptions (enumerand immediates, with `IdRef` parameters),
-/// most `PrintOutParts` will only have one `PrintOutPart`.
-pub struct PrintOutParts<ID> {
-    pub parts: SmallVec<[PrintOutPart<ID>; 1]>,
+/// All the `Token`s outputted by printing one single ("logical") SPIR-V operand,
+/// which may be concatenated (after separately processing `ID`s) to obtain a
+/// complete plain-text version of the printed operand.
+pub struct TokensForOperand<ID> {
+    pub tokens: SmallVec<[Token<ID>; 3]>,
 }
 
-impl<ID> Default for PrintOutParts<ID> {
+impl<ID> Default for TokensForOperand<ID> {
     fn default() -> Self {
         Self {
-            parts: SmallVec::new(),
+            tokens: SmallVec::new(),
         }
     }
 }
 
-impl PrintOutParts<String> {
-    pub fn concat(self) -> String {
-        self.parts
+impl TokensForOperand<String> {
+    pub fn concat_to_plain_text(self) -> String {
+        self.tokens
             .into_iter()
-            .map(|part| match part {
-                PrintOutPart::Printed(s) | PrintOutPart::Id(s) => s,
+            .map(|token| -> Cow<str> {
+                match token {
+                    Token::Punctuation(s) | Token::OperandKindName(s) | Token::EnumerandName(s) => {
+                        s.into()
+                    }
+                    Token::Error(s)
+                    | Token::NumericLiteral(s)
+                    | Token::StringLiteral(s)
+                    | Token::Id(s) => s.into(),
+                }
             })
-            .reduce(|out, extra| out + &extra)
+            .reduce(|out, extra| (out.into_owned() + &extra).into())
             .unwrap_or_default()
-    }
-}
-
-impl<ID> fmt::Write for PrintOutParts<ID> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if let Some(PrintOutPart::Printed(part)) = self.parts.last_mut() {
-            *part += s;
-        } else {
-            self.parts.push(PrintOutPart::Printed(s.to_string()));
-        }
-        Ok(())
+            .into_owned()
     }
 }
 
@@ -64,7 +78,7 @@ struct OperandPrinter<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = 
     ids: iter::Peekable<IDS>,
 
     /// Output for the current operand (drained by the `inst_operands` method).
-    out: PrintOutParts<ID>,
+    out: TokensForOperand<ID>,
 }
 
 impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrinter<IMMS, ID, IDS> {
@@ -72,7 +86,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         self.imms.peek().is_none() && self.ids.peek().is_none()
     }
 
-    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> fmt::Result {
+    fn enumerant_params(&mut self, enumerant: &spec::Enumerant) {
         let mut first = true;
         for (mode, kind) in enumerant.all_params() {
             if mode == spec::OperandMode::Optional {
@@ -81,23 +95,19 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 }
             }
 
-            if first {
-                write!(self.out, "(")?;
-            } else {
-                write!(self.out, ", ")?;
-            }
+            self.out
+                .tokens
+                .push(Token::Punctuation(if first { "(" } else { ", " }));
             first = false;
 
-            self.operand(kind)?;
+            self.operand(kind);
         }
         if !first {
-            write!(self.out, ")")?;
+            self.out.tokens.push(Token::Punctuation(")"));
         }
-
-        Ok(())
     }
 
-    fn literal(&mut self, kind: spec::OperandKind, first_word: u32) -> fmt::Result {
+    fn literal(&mut self, kind: spec::OperandKind, first_word: u32) {
         // HACK(eddyb) easier to buffer these than to deal with iterators.
         let mut words = SmallVec::<[u32; 16]>::new();
         words.push(first_word);
@@ -110,14 +120,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         let (name, def) = kind.name_and_def();
         assert!(matches!(def, spec::OperandKindDef::Literal { .. }));
 
-        // FIXME(eddyb) decide when it's useful to show the kind of literal.
-        let explicit_kind = false;
-
-        if explicit_kind {
-            write!(self.out, "{}(", name)?;
-        }
-
-        if kind == spec::Spec::get().well_known.LiteralString {
+        let literal_token = if kind == spec::Spec::get().well_known.LiteralString {
             // FIXME(eddyb) deduplicate with `spv::extract_literal_string`.
             let bytes: SmallVec<[u8; 64]> = words
                 .into_iter()
@@ -125,30 +128,54 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 .take_while(|&byte| byte != 0)
                 .collect();
             match str::from_utf8(&bytes) {
-                Ok(s) => write!(self.out, "{:?}", s)?,
-                Err(e) => write!(self.out, "{} in {:?}", e, bytes)?,
+                Ok(s) => Token::StringLiteral(format!("{:?}", s)),
+                Err(e) => Token::Error(format!("/* {} in {:?} */", e, bytes)),
             }
-        } else if let [word @ 0..=0xffff] = words[..] {
-            write!(self.out, "{}", word)?;
         } else {
-            write!(self.out, "0x")?;
-            for word in words.into_iter().rev() {
-                write!(self.out, "{:08x}", word)?;
+            let mut words_msb_to_lsb = words
+                .into_iter()
+                .rev()
+                .skip_while(|&word| word == 0)
+                .peekable();
+            let most_significant_word = words_msb_to_lsb.next().unwrap_or(0);
+
+            // FIXME(eddyb) use a more advanced decision procedure for picking
+            // how to print integer(?) literals.
+            let mut s;
+            if words_msb_to_lsb.peek().is_none() && most_significant_word <= 0xffff {
+                s = format!("{}", most_significant_word);
+            } else {
+                s = format!("0x{:x}", most_significant_word);
+                for word in words_msb_to_lsb {
+                    write!(s, "_{:08x}", word).unwrap();
+                }
             }
-        }
+            Token::NumericLiteral(s)
+        };
+
+        // FIXME(eddyb) decide when it's useful to show the kind of literal.
+        let explicit_kind = false;
 
         if explicit_kind {
-            write!(self.out, ")")?;
+            self.out
+                .tokens
+                .extend([Token::OperandKindName(name), Token::Punctuation("(")]);
         }
-
-        Ok(())
+        self.out.tokens.push(literal_token);
+        if explicit_kind {
+            self.out.tokens.push(Token::Punctuation(")"));
+        }
     }
 
-    fn operand(&mut self, kind: spec::OperandKind) -> fmt::Result {
+    fn operand(&mut self, kind: spec::OperandKind) {
         let (name, def) = kind.name_and_def();
 
         // FIXME(eddyb) should this be a hard error?
-        let write_missing = |this: &mut Self| write!(this.out, "/* missing {} */", name);
+        let emit_missing_error = |this: &mut Self| {
+            this.out
+                .tokens
+                .push(Token::Error(format!("/* missing {} */", name)))
+        };
 
         let mut maybe_get_enum_word = || match self.imms.next() {
             Some(spv::Imm::Short(found_kind, word)) => {
@@ -163,45 +190,52 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
             spec::OperandKindDef::BitEnum { empty_name, bits } => {
                 let word = match maybe_get_enum_word() {
                     Some(word) => word,
-                    None => return write_missing(self),
+                    None => return emit_missing_error(self),
                 };
 
-                write!(self.out, "{}", name)?;
+                self.out.tokens.push(Token::OperandKindName(name));
                 if word == 0 {
-                    write!(self.out, ".{}", empty_name)
+                    self.out
+                        .tokens
+                        .extend([Token::Punctuation("."), Token::EnumerandName(empty_name)]);
                 } else {
-                    write!(self.out, ".(")?;
+                    self.out.tokens.push(Token::Punctuation(".("));
                     let mut first = true;
                     for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                         if !first {
-                            write!(self.out, " | ")?;
+                            self.out.tokens.push(Token::Punctuation(" | "));
                         }
                         first = false;
 
                         let (bit_name, bit_def) = bits.get_named(bit_idx).unwrap();
-                        write!(self.out, ".{}", bit_name)?;
-                        self.enumerant_params(bit_def)?;
+                        self.out
+                            .tokens
+                            .extend([Token::Punctuation("."), Token::EnumerandName(bit_name)]);
+                        self.enumerant_params(bit_def);
                     }
-                    write!(self.out, ")")
+                    self.out.tokens.push(Token::Punctuation(")"));
                 }
             }
             spec::OperandKindDef::ValueEnum { variants } => {
                 let word = match maybe_get_enum_word() {
                     Some(word) => word,
-                    None => return write_missing(self),
+                    None => return emit_missing_error(self),
                 };
 
                 let (variant_name, variant_def) =
                     variants.get_named(word.try_into().unwrap()).unwrap();
-                write!(self.out, "{}.{}", name, variant_name)?;
-                self.enumerant_params(variant_def)
+                self.out.tokens.extend([
+                    Token::OperandKindName(name),
+                    Token::Punctuation("."),
+                    Token::EnumerandName(variant_name),
+                ]);
+                self.enumerant_params(variant_def);
             }
             spec::OperandKindDef::Id => match self.ids.next() {
                 Some(id) => {
-                    self.out.parts.push(PrintOutPart::Id(id));
-                    Ok(())
+                    self.out.tokens.push(Token::Id(id));
                 }
-                None => write_missing(self),
+                None => emit_missing_error(self),
             },
             spec::OperandKindDef::Literal { .. } => {
                 // FIXME(eddyb) there's no reason to take the first word now,
@@ -210,23 +244,23 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                     Some(spv::Imm::Short(found_kind, word))
                     | Some(spv::Imm::LongStart(found_kind, word)) => {
                         assert!(kind == found_kind);
-                        self.literal(kind, word)
+                        self.literal(kind, word);
                     }
                     Some(spv::Imm::LongCont(..)) => unreachable!(),
-                    None => write_missing(self),
+                    None => emit_missing_error(self),
                 }
             }
         }
     }
 
-    fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = PrintOutParts<ID>> {
+    fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = TokensForOperand<ID>> {
         opcode.def().all_operands().map_while(move |(mode, kind)| {
             if mode == spec::OperandMode::Optional {
                 if self.is_exhausted() {
                     return None;
                 }
             }
-            self.operand(kind).unwrap();
+            self.operand(kind);
             Some(mem::take(&mut self.out))
         })
     }
@@ -234,38 +268,39 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
 /// Print a single SPIR-V operand from only immediates, potentially composed of
 /// an enumerand with parameters (which consumes more immediates).
-pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> String {
+// FIXME(eddyb) the return type should likely be `TokensForOperand<!>`.
+pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForOperand<String> {
     let mut printer = OperandPrinter {
         imms: imms.into_iter().peekable(),
         ids: iter::empty().peekable(),
-        out: PrintOutParts::default(),
+        out: TokensForOperand::default(),
     };
     let &kind = match printer.imms.peek().unwrap() {
         spv::Imm::Short(kind, _) | spv::Imm::LongStart(kind, _) => kind,
         _ => unreachable!(),
     };
-    printer.operand(kind).unwrap();
+    printer.operand(kind);
     assert!(printer.imms.next().is_none());
-    printer.out.concat()
+    printer.out
 }
 
 /// Print a single SPIR-V (short) immediate (e.g. an enumerand).
 pub fn imm(kind: spec::OperandKind, word: u32) -> String {
-    operand_from_imms([spv::Imm::Short(kind, word)])
+    operand_from_imms([spv::Imm::Short(kind, word)]).concat_to_plain_text()
 }
 
 /// Group (ordered according to `opcode`) `imms` and `ids` into logical operands
-/// (i.e. long immediates are unflattened) and produce one output `String`
-/// by printing each of them.
+/// (i.e. long immediates are unflattened) and produce one `TokensForOperand` by
+/// printing each of them.
 pub fn inst_operands<ID>(
     opcode: spec::Opcode,
     imms: impl IntoIterator<Item = spv::Imm>,
     ids: impl IntoIterator<Item = ID>,
-) -> impl Iterator<Item = PrintOutParts<ID>> {
+) -> impl Iterator<Item = TokensForOperand<ID>> {
     OperandPrinter {
         imms: imms.into_iter().peekable(),
         ids: ids.into_iter().peekable(),
-        out: PrintOutParts::default(),
+        out: TokensForOperand::default(),
     }
     .inst_operands(opcode)
 }

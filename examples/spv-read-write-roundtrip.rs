@@ -29,7 +29,7 @@ fn main() -> std::io::Result<()> {
                     inst.imms.iter().copied(),
                     inst.ids.iter().map(|id| format!("%{}", id)),
                 )
-                .for_each(|operand_parts| eprint!(" {}", operand_parts.concat()));
+                .for_each(|operand_parts| eprint!(" {}", operand_parts.concat_to_plain_text()));
 
                 eprintln!();
 

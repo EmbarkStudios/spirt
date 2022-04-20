@@ -584,32 +584,31 @@ impl<'a, 'b> Printer<'a, 'b> {
         let mut angle_bracket_operands =
             spv::print::inst_operands(opcode, imms.iter().copied(), ids)
                 .filter_map(|operand| {
-                    if let [spv::print::PrintOutPart::Id(id)] = operand.parts[..] {
+                    if let [spv::print::Token::Id(id)] = operand.tokens[..] {
                         paren_operands.extend(print_id(id, self).into());
                         None
                     } else {
-                        Some(
-                            operand
-                                .parts
-                                .into_iter()
-                                .map(|part| match part {
-                                    spv::print::PrintOutPart::Printed(s) => s,
-                                    spv::print::PrintOutPart::Id(id) => {
-                                        let comment = format!("/* #{} */", next_extra_idx);
-                                        next_extra_idx += 1;
+                        Some(pretty::Fragment::new(operand.tokens.into_iter().map(
+                            |token| match token {
+                                spv::print::Token::Error(s) => s.into(),
+                                spv::print::Token::Punctuation(s) => s.into(),
+                                spv::print::Token::OperandKindName(s) => s.into(),
+                                spv::print::Token::EnumerandName(s) => s.into(),
+                                spv::print::Token::NumericLiteral(s) => s.into(),
+                                spv::print::Token::StringLiteral(s) => s.into(),
+                                spv::print::Token::Id(id) => {
+                                    let comment = format!("/* #{} */", next_extra_idx);
+                                    next_extra_idx += 1;
 
-                                        let id = print_id(id, self)
-                                            .into()
-                                            .unwrap_or_else(|| "/* implicit ID */".into());
-                                        paren_operands
-                                            .push(pretty::join_space(comment.clone(), [id]));
+                                    let id = print_id(id, self)
+                                        .into()
+                                        .unwrap_or_else(|| "/* implicit ID */".into());
+                                    paren_operands.push(pretty::join_space(comment.clone(), [id]));
 
-                                        comment
-                                    }
-                                })
-                                .reduce(|out, extra| out + &extra)
-                                .unwrap_or_default(),
-                        )
+                                    comment
+                                }
+                            },
+                        )))
                     }
                 })
                 .peekable();
@@ -1133,7 +1132,9 @@ impl Print for Attr {
             }
             &Attr::SpvBitflagsOperand(imm) => (
                 AttrStyle::NonComment,
-                spv::print::operand_from_imms([imm]).into(),
+                spv::print::operand_from_imms([imm])
+                    .concat_to_plain_text()
+                    .into(),
             ),
         }
     }
