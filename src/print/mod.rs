@@ -38,7 +38,10 @@ pub struct Plan<'a> {
     global_var_decl_cache: FxHashMap<GlobalVar, &'a GlobalVarDecl>,
     func_decl_cache: FxHashMap<Func, &'a FuncDecl>,
 
-    nodes: Vec<Node<'a>>,
+    // FIXME(eddyb) this "interned" vs "non-interned" split should probably
+    // be better encoded in types (i.e. `Node::Interned` shouldn't exist).
+    interned_nodes: Vec<InternedNode>,
+    non_interned_nodes: Vec<Node<'a>>,
     use_counts: FxIndexMap<Use, usize>,
 }
 
@@ -124,7 +127,8 @@ impl<'a> Plan<'a> {
             current_module: Some(module),
             global_var_decl_cache: FxHashMap::default(),
             func_decl_cache: FxHashMap::default(),
-            nodes: vec![],
+            interned_nodes: vec![],
+            non_interned_nodes: vec![],
             use_counts: FxIndexMap::default(),
         }
     }
@@ -136,7 +140,8 @@ impl<'a> Plan<'a> {
             current_module: None,
             global_var_decl_cache: FxHashMap::default(),
             func_decl_cache: FxHashMap::default(),
-            nodes: vec![],
+            interned_nodes: vec![],
+            non_interned_nodes: vec![],
             use_counts: FxIndexMap::default(),
         }
     }
@@ -218,7 +223,11 @@ impl<'a> Plan<'a> {
             Node::Dyn(node) => node.dyn_inner_visit_with(self),
         }
 
-        self.nodes.push(node);
+        if let Node::Interned(interned) = node {
+            self.interned_nodes.push(interned);
+        } else {
+            self.non_interned_nodes.push(node);
+        }
 
         if let Some(visit_once_use) = visit_once_use {
             *self.use_counts.entry(visit_once_use).or_default() += 1;
@@ -890,8 +899,17 @@ impl Print for Plan<'_> {
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
         let mut out = pretty::Fragment::default();
 
+        // FIXME(eddyb) this "interned" vs "non-interned" split should probably
+        // be better encoded in types (i.e. `Node::Interned` shouldn't exist).
+        let all_nodes = self
+            .interned_nodes
+            .iter()
+            .copied()
+            .map(Node::Interned)
+            .chain(self.non_interned_nodes.iter().copied());
+
         let mut first = true;
-        for &node in &self.nodes {
+        for node in all_nodes {
             let AttrsAndDef { mut attrs, mut def } = node.print(printer);
 
             // HACK(eddyb) move an anchor def at the start of `def` to an empty
