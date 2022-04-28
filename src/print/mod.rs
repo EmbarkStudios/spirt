@@ -890,26 +890,16 @@ impl Print for Plan<'_> {
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
         let mut out = pretty::Fragment::default();
 
-        let mut ended_with_empty_line = false;
+        let mut first = true;
         for &node in &self.nodes {
             let AttrsAndDef { mut attrs, mut def } = node.print(printer);
-
-            let has_attrs = !attrs.nodes.is_empty();
-
-            // Visually isolate definitions with attributes.
-            let empty_lines_before_and_after = has_attrs;
-            if empty_lines_before_and_after && !ended_with_empty_line {
-                // FIXME(eddyb) have an explicit `pretty::Node`
-                // for "vertical gap" instead.
-                out.nodes.push("\n\n".into());
-            }
 
             // HACK(eddyb) move an anchor def at the start of `def` to an empty
             // anchor just before attributes, so that navigating to the anchor
             // does not "hide" those attributes.
             if let [pretty::Node::StyledText(ref mut styles_and_text), ..] = def.nodes[..] {
                 let styles = &mut styles_and_text.0;
-                if has_attrs && mem::take(&mut styles.anchor_is_def) {
+                if !attrs.nodes.is_empty() && mem::take(&mut styles.anchor_is_def) {
                     attrs.nodes.insert(
                         0,
                         pretty::Styles {
@@ -924,19 +914,17 @@ impl Print for Plan<'_> {
 
             let def = pretty::Fragment::new([attrs, def.into()]);
             if !def.nodes.is_empty() {
-                // FIXME(eddyb) this should probably be `out += def;`.
-                out.nodes.extend(def.nodes);
-                out.nodes.push(pretty::Node::ForceLineSeparation.into());
-
-                ended_with_empty_line = if empty_lines_before_and_after {
+                // Visually separate top-level definitions.
+                if !first {
                     // FIXME(eddyb) have an explicit `pretty::Node`
                     // for "vertical gap" instead.
                     out.nodes.push("\n\n".into());
+                }
+                first = false;
 
-                    true
-                } else {
-                    false
-                };
+                // FIXME(eddyb) this should probably be `out += def;`.
+                out.nodes.extend(def.nodes);
+                out.nodes.push(pretty::Node::ForceLineSeparation.into());
             }
         }
 
