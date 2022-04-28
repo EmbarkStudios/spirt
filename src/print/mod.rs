@@ -349,7 +349,7 @@ impl Plan<'_> {
         let pretty = self.print(&Printer::new(self));
 
         // FIXME(eddyb) make max line width configurable.
-        let max_line_width = 100;
+        let max_line_width = 120;
 
         pretty.layout_with_max_line_width(max_line_width)
     }
