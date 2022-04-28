@@ -446,7 +446,8 @@ impl<'a, 'b> Printer<'a, 'b> {
                                         .contains(&inst.opcode),
                                     };
 
-                                    has_compact_print || ty_def.ctor_args.is_empty()
+                                    ty_def.attrs == AttrSet::default()
+                                        && (has_compact_print || ty_def.ctor_args.is_empty())
                                 }
                                 InternedNode::Const(ct) => {
                                     let ct_def = &cx[ct];
@@ -461,7 +462,8 @@ impl<'a, 'b> Printer<'a, 'b> {
                                         _ => false,
                                     };
 
-                                    has_compact_print || ct_def.ctor_args.is_empty()
+                                    ct_def.attrs == AttrSet::default()
+                                        && (has_compact_print || ct_def.ctor_args.is_empty())
                                 }
                             }
                     }
