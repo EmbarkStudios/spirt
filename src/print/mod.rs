@@ -592,6 +592,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     fn comment_style(&self) -> pretty::Styles {
         pretty::Styles {
             opacity: Some(0.2),
+            thickness: Some(-3),
             ..Default::default()
         }
     }
@@ -605,12 +606,16 @@ impl<'a, 'b> Printer<'a, 'b> {
         pretty::Styles::color(pretty::palettes::simple::BLUE)
     }
     fn imperative_keyword_style(&self) -> pretty::Styles {
-        pretty::Styles::color(pretty::palettes::simple::MAGENTA)
+        pretty::Styles {
+            thickness: Some(2),
+            ..pretty::Styles::color(pretty::palettes::simple::MAGENTA)
+        }
     }
     fn spv_operand_kind_name_style(&self) -> pretty::Styles {
         // HACK(eddyb) effectively this is almost always redundant.
         pretty::Styles {
             opacity: Some(0.4),
+            thickness: Some(-3),
             ..self.declarative_keyword_style()
         }
     }
@@ -621,6 +626,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         pretty::Styles {
             color: Some(pretty::palettes::simple::GREEN),
             opacity: Some(0.6),
+            thickness: Some(-2),
             ..Default::default()
         }
     }

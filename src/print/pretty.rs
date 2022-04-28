@@ -51,8 +51,18 @@ pub enum Node {
 pub struct Styles {
     pub anchor: Option<String>,
     pub anchor_is_def: bool,
+
+    /// RGB color.
     pub color: Option<[u8; 3]>,
+
+    /// `0.0` is fully transparent, `1.0` is fully opaque.
     pub opacity: Option<f32>,
+
+    /// `0` corresponds to the default, with positive values meaning thicker,
+    /// and negative values thinner text, respectively.
+    ///
+    /// For HTML output, each unit is equivalent to `±100` in CSS `font-weight`.
+    pub thickness: Option<i8>,
 }
 
 impl Styles {
@@ -186,7 +196,7 @@ impl FragmentPostLayout {
     SCOPE {
         /* HACK(eddyb) avoid unnecessarily small or thin text. */
         font-size: 15px;
-        font-weight: 450;
+        font-weight: 500;
     }
     SCOPE a {
         color: unset;
@@ -222,6 +232,7 @@ impl FragmentPostLayout {
                             anchor_is_def,
                             color,
                             opacity,
+                            thickness,
                         } = *styles;
 
                         if let Some(id) = anchor {
@@ -237,6 +248,10 @@ impl FragmentPostLayout {
                         }
                         if let Some(opacity) = opacity {
                             write!(css_style, "opacity:{opacity};").unwrap();
+                        }
+                        if let Some(thickness) = thickness {
+                            write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
+                                .unwrap();
                         }
                         if !css_style.is_empty() {
                             push_attr("style", &css_style);
