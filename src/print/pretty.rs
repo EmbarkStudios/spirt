@@ -63,6 +63,9 @@ pub struct Styles {
     ///
     /// For HTML output, each unit is equivalent to `±100` in CSS `font-weight`.
     pub thickness: Option<i8>,
+
+    pub subscript: bool,
+    pub superscript: bool,
 }
 
 impl Styles {
@@ -213,11 +216,25 @@ impl FragmentPostLayout {
         self.0.render_to_line_ops(
             &mut LineOp::interpret_with(|op| match op {
                 TextOp::PushStyles(styles) | TextOp::PopStyles(styles) => {
+                    let mut special_tags = [
+                        ("a", styles.anchor.is_some()),
+                        ("sub", styles.subscript),
+                        ("super", styles.superscript),
+                    ]
+                    .into_iter()
+                    .filter(|&(_, cond)| cond)
+                    .map(|(tag, _)| tag);
+                    let tag = special_tags.next().unwrap_or("span");
+                    if let Some(other_tag) = special_tags.next() {
+                        // FIXME(eddyb) support by opening/closing multiple tags.
+                        unimplemented!("`<{tag}>` conflicts with `<{other_tag}>`");
+                    }
+
                     body += "<";
                     if let TextOp::PopStyles(_) = op {
                         body += "/";
                     }
-                    body += if styles.anchor.is_some() { "a" } else { "span" };
+                    body += tag;
 
                     if let TextOp::PushStyles(_) = op {
                         let mut push_attr = |attr, value: &str| {
@@ -233,6 +250,8 @@ impl FragmentPostLayout {
                             color,
                             opacity,
                             thickness,
+                            subscript: _,
+                            superscript: _,
                         } = *styles;
 
                         if let Some(id) = anchor {

@@ -1468,6 +1468,15 @@ impl Print for ConstDef {
         let wk = &spv::spec::Spec::get().well_known;
 
         let kw = |kw| printer.declarative_keyword_style().apply(kw).into();
+        let literal_ty_suffix = |ty| {
+            pretty::Styles {
+                // HACK(eddyb) the exact type detracts from the value.
+                opacity: Some(0.4),
+                subscript: true,
+                ..printer.declarative_keyword_style()
+            }
+            .apply(ty)
+        };
         let compact_def = if let &ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) = ctor {
             if opcode == wk.OpConstantFalse {
                 Some(kw("false"))
@@ -1501,13 +1510,17 @@ impl Print for ConstDef {
                         };
 
                         if width <= 64 {
-                            Some(printer.numeric_literal_style().apply(if signed {
+                            let (printed_value, ty) = if signed {
                                 let sext_raw_bits =
                                     (raw_bits as u128 as i128) << (128 - width) >> (128 - width);
-                                format!("{}s{}", sext_raw_bits, width)
+                                (format!("{sext_raw_bits}"), format!("s{width}"))
                             } else {
-                                format!("{}u{}", raw_bits, width)
-                            }))
+                                (format!("{raw_bits}"), format!("u{width}"))
+                            };
+                            Some(pretty::Fragment::new([
+                                printer.numeric_literal_style().apply(printed_value),
+                                literal_ty_suffix(ty),
+                            ]))
                         } else {
                             None
                         }
@@ -1550,9 +1563,10 @@ impl Print for ConstDef {
                             _ => None,
                         };
                         printed_value.map(|s| {
-                            printer
-                                .numeric_literal_style()
-                                .apply(format!("{}f{}", s, width))
+                            pretty::Fragment::new([
+                                printer.numeric_literal_style().apply(s),
+                                literal_ty_suffix(format!("f{width}")),
+                            ])
                         })
                     } else {
                         None
