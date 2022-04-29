@@ -32,15 +32,14 @@ mod pretty;
 pub struct Plan<'a> {
     cx: &'a Context,
 
-    /// When visiting anything module-stored (global vars and funcs), the module
-    /// is needed to go from the index to the definition, which is then cached.
+    /// When visiting module-stored nodes, the `Module` is needed to go from the
+    /// `ModDeclNode` key to the declaration/definition, which is then cached.
     current_module: Option<&'a Module>,
-    global_var_decl_cache: FxHashMap<GlobalVar, &'a GlobalVarDecl>,
-    func_decl_cache: FxHashMap<Func, &'a FuncDecl>,
+    mod_decl_cache: FxHashMap<ModDeclNode, ModDecl<'a>>,
 
     // FIXME(eddyb) this "interned" vs "non-interned" split should probably
     // be better encoded in types (i.e. `Node::Interned` shouldn't exist).
-    interned_nodes: Vec<InternedNode>,
+    interned_nodes: Vec<CxInternedNode>,
     non_interned_nodes: Vec<Node<'a>>,
     use_counts: FxIndexMap<Use, usize>,
 }
@@ -55,12 +54,8 @@ pub struct ExpectedVsFound<E, F> {
 /// Printing `Plan` entry, an effective reification of SPIR-T's implicit DAG.
 #[derive(Copy, Clone)]
 enum Node<'a> {
-    /// Nodes that involve interning and require extra processing to print
-    /// (see also `InternedNode`).
-    Interned(InternedNode),
-
-    GlobalVar(GlobalVar),
-    Func(Func),
+    CxInterned(CxInternedNode),
+    ModDecl(ModDeclNode),
 
     /// Other nodes, which only need to provide a way to collect dependencies
     /// (via `InnerVisit`) and then print the node itself.
@@ -70,16 +65,15 @@ enum Node<'a> {
     Dyn(&'a dyn DynNode<'a>),
 }
 
-/// Subset of `Node` representing only nodes that involve interning, and which
-/// get assigned "names" on the fly during printing.
+/// Subset of `Node` representing only nodes that are interned in `Context`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-enum InternedNode {
+enum CxInternedNode {
     AttrSet(AttrSet),
     Type(Type),
     Const(Const),
 }
 
-impl InternedNode {
+impl CxInternedNode {
     fn category(self) -> &'static str {
         match self {
             Self::AttrSet(_) => "attrs",
@@ -89,15 +83,36 @@ impl InternedNode {
     }
 }
 
+/// Subset of `Node` representing only nodes that are stored in a `Module`.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum ModDeclNode {
+    GlobalVar(GlobalVar),
+    Func(Func),
+}
+
+impl ModDeclNode {
+    fn category(self) -> &'static str {
+        match self {
+            Self::GlobalVar(_) => "global_var",
+            Self::Func(_) => "func",
+        }
+    }
+}
+
+/// The complete declaration/definition referred to by a `ModDeclNode`.
+#[derive(Copy, Clone)]
+enum ModDecl<'a> {
+    GlobalVar(&'a GlobalVarDecl),
+    Func(&'a FuncDecl),
+}
+
 trait DynNode<'a>: DynInnerVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment> {}
 impl<'a, T: DynInnerVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>> DynNode<'a> for T {}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Use {
-    Interned(InternedNode),
-
-    GlobalVar(GlobalVar),
-    Func(Func),
+    CxInterned(CxInternedNode),
+    ModDecl(ModDeclNode),
 
     ControlPointLabel(cfg::ControlPoint),
 
@@ -111,9 +126,8 @@ enum Use {
 impl Use {
     fn category(self) -> &'static str {
         match self {
-            Self::Interned(node) => node.category(),
-            Self::GlobalVar(_) => "global_var",
-            Self::Func(_) => "func",
+            Self::CxInterned(node) => node.category(),
+            Self::ModDecl(node) => node.category(),
             Self::ControlPointLabel(_) => "label",
             Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => "v",
         }
@@ -125,8 +139,7 @@ impl<'a> Plan<'a> {
         Self {
             cx: module.cx_ref(),
             current_module: Some(module),
-            global_var_decl_cache: FxHashMap::default(),
-            func_decl_cache: FxHashMap::default(),
+            mod_decl_cache: FxHashMap::default(),
             interned_nodes: vec![],
             non_interned_nodes: vec![],
             use_counts: FxIndexMap::default(),
@@ -138,8 +151,7 @@ impl<'a> Plan<'a> {
         Self {
             cx,
             current_module: None,
-            global_var_decl_cache: FxHashMap::default(),
-            func_decl_cache: FxHashMap::default(),
+            mod_decl_cache: FxHashMap::default(),
             interned_nodes: vec![],
             non_interned_nodes: vec![],
             use_counts: FxIndexMap::default(),
@@ -175,14 +187,13 @@ impl<'a> Plan<'a> {
 
     /// Add `node` to the plan, after all of its dependencies.
     ///
-    /// For `Node::Interned` (and the `Node` variants that are module-stored),
-    /// only the first call recurses into the definition, subsequent calls only
-    /// update its (internally tracked) "use count".
+    /// For `Node::Interned` and `Node::ModDecl`, only the first call recurses
+    /// into the declaration/definition, subsequent calls only update its
+    /// (internally tracked) "use count".
     fn use_node(&mut self, node: Node<'a>) {
         let visit_once_use = match node {
-            Node::Interned(node) => Some(Use::Interned(node)),
-            Node::GlobalVar(gv) => Some(Use::GlobalVar(gv)),
-            Node::Func(func) => Some(Use::Func(func)),
+            Node::CxInterned(node) => Some(Use::CxInterned(node)),
+            Node::ModDecl(node) => Some(Use::ModDecl(node)),
             Node::Dyn(_) => None,
         };
         if let Some(visit_once_use) = visit_once_use {
@@ -194,25 +205,19 @@ impl<'a> Plan<'a> {
 
         // FIXME(eddyb) should this be a generic `inner_visit` method on `Node`?
         match node {
-            Node::Interned(InternedNode::AttrSet(attrs)) => {
+            Node::CxInterned(CxInternedNode::AttrSet(attrs)) => {
                 self.visit_attr_set_def(&self.cx[attrs]);
             }
-            Node::Interned(InternedNode::Type(ty)) => {
+            Node::CxInterned(CxInternedNode::Type(ty)) => {
                 self.visit_type_def(&self.cx[ty]);
             }
-            Node::Interned(InternedNode::Const(ct)) => {
+            Node::CxInterned(CxInternedNode::Const(ct)) => {
                 self.visit_const_def(&self.cx[ct]);
             }
 
-            Node::GlobalVar(gv) => match self.global_var_decl_cache.get(&gv).copied() {
-                Some(gv_decl) => self.visit_global_var_decl(gv_decl),
-
-                // FIXME(eddyb) should this be a hard error?
-                None => {}
-            },
-
-            Node::Func(func) => match self.func_decl_cache.get(&func).copied() {
-                Some(func_decl) => self.visit_func_decl(func_decl),
+            Node::ModDecl(node) => match self.mod_decl_cache.get(&node).copied() {
+                Some(ModDecl::GlobalVar(gv_decl)) => self.visit_global_var_decl(gv_decl),
+                Some(ModDecl::Func(func_decl)) => self.visit_func_decl(func_decl),
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
@@ -223,7 +228,7 @@ impl<'a> Plan<'a> {
             Node::Dyn(node) => node.dyn_inner_visit_with(self),
         }
 
-        if let Node::Interned(interned) = node {
+        if let Node::CxInterned(interned) = node {
             self.interned_nodes.push(interned);
         } else {
             self.non_interned_nodes.push(node);
@@ -237,40 +242,42 @@ impl<'a> Plan<'a> {
 
 impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
-        self.use_node(Node::Interned(InternedNode::AttrSet(attrs)));
+        self.use_node(Node::CxInterned(CxInternedNode::AttrSet(attrs)));
     }
     fn visit_type_use(&mut self, ty: Type) {
-        self.use_node(Node::Interned(InternedNode::Type(ty)));
+        self.use_node(Node::CxInterned(CxInternedNode::Type(ty)));
     }
     fn visit_const_use(&mut self, ct: Const) {
-        self.use_node(Node::Interned(InternedNode::Const(ct)));
+        self.use_node(Node::CxInterned(CxInternedNode::Const(ct)));
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
+        let node = ModDeclNode::GlobalVar(gv);
         match self.current_module {
             Some(module) => {
-                self.global_var_decl_cache
-                    .insert(gv, &module.global_vars[gv]);
+                self.mod_decl_cache
+                    .insert(node, ModDecl::GlobalVar(&module.global_vars[gv]));
             }
 
             // FIXME(eddyb) should this be a hard error?
             None => {}
         }
-        self.use_node(Node::GlobalVar(gv));
+        self.use_node(Node::ModDecl(node));
     }
 
     fn visit_func_use(&mut self, func: Func) {
+        let node = ModDeclNode::Func(func);
         match self.current_module {
             Some(module) => {
                 use std::collections::hash_map::Entry;
 
-                match self.func_decl_cache.entry(func) {
+                match self.mod_decl_cache.entry(node) {
                     Entry::Occupied(_) => {
                         // Avoid infinite recursion for recursive functions.
                         return;
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(&module.funcs[func]);
+                        entry.insert(ModDecl::Func(&module.funcs[func]));
                     }
                 }
             }
@@ -278,7 +285,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
             // FIXME(eddyb) should this be a hard error?
             None => {}
         }
-        self.use_node(Node::Func(func));
+        self.use_node(Node::ModDecl(node));
     }
 
     fn visit_module(&mut self, module: &'a Module) {
@@ -368,8 +375,7 @@ pub struct Printer<'a, 'b> {
     cx: &'a Context,
     use_styles: FxHashMap<Use, UseStyle>,
 
-    global_var_decl_cache: &'b FxHashMap<GlobalVar, &'a GlobalVarDecl>,
-    func_decl_cache: &'b FxHashMap<Func, &'a FuncDecl>,
+    mod_decl_cache: &'b FxHashMap<ModDeclNode, ModDecl<'a>>,
 }
 
 /// How an use of a node should be printed.
@@ -417,10 +423,10 @@ impl<'a, 'b> Printer<'a, 'b> {
                 }
 
                 let inline = match use_kind {
-                    Use::Interned(node) => {
+                    Use::CxInterned(node) => {
                         use_count == 1
                             || match node {
-                                InternedNode::AttrSet(attrs) => {
+                                CxInternedNode::AttrSet(attrs) => {
                                     let AttrSetDef { attrs } = &cx[attrs];
                                     attrs.len() <= 1
                                         || attrs.iter().any(|attr| {
@@ -431,7 +437,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                             matches!(attr, Attr::SpvDebugLine { .. })
                                         })
                                 }
-                                InternedNode::Type(ty) => {
+                                CxInternedNode::Type(ty) => {
                                     let ty_def = &cx[ty];
 
                                     // FIXME(eddyb) remove the duplication between
@@ -449,7 +455,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                     ty_def.attrs == AttrSet::default()
                                         && (has_compact_print || ty_def.ctor_args.is_empty())
                                 }
-                                InternedNode::Const(ct) => {
+                                CxInternedNode::Const(ct) => {
                                     let ct_def = &cx[ct];
 
                                     // FIXME(eddyb) remove the duplication between
@@ -467,7 +473,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                 }
                             }
                     }
-                    Use::GlobalVar(_) | Use::Func(_) => false,
+                    Use::ModDecl(_) => false,
                     Use::ControlPointLabel(_)
                     | Use::ControlNodeOutput { .. }
                     | Use::DataInstOutput(_) => {
@@ -479,11 +485,11 @@ impl<'a, 'b> Printer<'a, 'b> {
                 } else {
                     let ac = &mut anon_counters;
                     let counter = match use_kind {
-                        Use::Interned(InternedNode::AttrSet(_)) => &mut ac.attr_sets,
-                        Use::Interned(InternedNode::Type(_)) => &mut ac.types,
-                        Use::Interned(InternedNode::Const(_)) => &mut ac.consts,
-                        Use::GlobalVar(_) => &mut ac.global_vars,
-                        Use::Func(_) => &mut ac.funcs,
+                        Use::CxInterned(CxInternedNode::AttrSet(_)) => &mut ac.attr_sets,
+                        Use::CxInterned(CxInternedNode::Type(_)) => &mut ac.types,
+                        Use::CxInterned(CxInternedNode::Const(_)) => &mut ac.consts,
+                        Use::ModDecl(ModDeclNode::GlobalVar(_)) => &mut ac.global_vars,
+                        Use::ModDecl(ModDeclNode::Func(_)) => &mut ac.funcs,
                         Use::ControlPointLabel(_)
                         | Use::ControlNodeOutput { .. }
                         | Use::DataInstOutput(_) => {
@@ -501,71 +507,85 @@ impl<'a, 'b> Printer<'a, 'b> {
             })
             .collect();
 
-        for (&func, &func_decl) in &plan.func_decl_cache {
-            if let DeclDef::Present(func_def_body) = &func_decl.def {
-                assert!(matches!(
-                    use_styles.get(&Use::Func(func)),
-                    Some(UseStyle::Anon { .. })
-                ));
+        let func_defs =
+            plan.mod_decl_cache
+                .iter()
+                .filter_map(|(&node, &decl)| match (node, decl) {
+                    (
+                        ModDeclNode::Func(func),
+                        ModDecl::Func(FuncDecl {
+                            def: DeclDef::Present(func_def_body),
+                            ..
+                        }),
+                    ) => Some((func, func_def_body)),
 
-                let mut control_pointer_label_counter = 0;
-                let mut value_counter = 0;
+                    _ => None,
+                });
 
-                for point in func_def_body.cfg.rev_post_order(func_def_body) {
-                    if let Some(use_style) = use_styles.get_mut(&Use::ControlPointLabel(point)) {
-                        let idx = control_pointer_label_counter;
-                        control_pointer_label_counter += 1;
+        for (func, func_def_body) in func_defs {
+            assert!(matches!(
+                use_styles.get(&Use::ModDecl(ModDeclNode::Func(func))),
+                Some(UseStyle::Anon { .. })
+            ));
+
+            let mut control_pointer_label_counter = 0;
+            let mut value_counter = 0;
+
+            for point in func_def_body.cfg.rev_post_order(func_def_body) {
+                if let Some(use_style) = use_styles.get_mut(&Use::ControlPointLabel(point)) {
+                    let idx = control_pointer_label_counter;
+                    control_pointer_label_counter += 1;
+                    *use_style = UseStyle::Anon {
+                        parent_func: Some(func),
+                        idx,
+                    };
+                }
+
+                // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
+                // instead of `Entry`, because they don't have have `Entry`s.
+                let can_uniquely_visit =
+                    match func_def_body.control_nodes[point.control_node()].kind {
+                        ControlNodeKind::UnstructuredMerge => {
+                            assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                            true
+                        }
+                        _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                    };
+
+                if !can_uniquely_visit {
+                    continue;
+                }
+
+                let control_node = point.control_node();
+                let ControlNodeDef { kind, outputs } = &*func_def_body.control_nodes[control_node];
+
+                let block_insts = match *kind {
+                    ControlNodeKind::UnstructuredMerge => None,
+                    ControlNodeKind::Block { insts } => insts,
+                };
+
+                let defined_values = func_def_body
+                    .at(block_insts)
+                    .into_iter()
+                    .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
+                    .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
+                    .chain(
+                        outputs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| Use::ControlNodeOutput {
+                                control_node,
+                                output_idx: i.try_into().unwrap(),
+                            }),
+                    );
+                for use_kind in defined_values {
+                    if let Some(use_style) = use_styles.get_mut(&use_kind) {
+                        let idx = value_counter;
+                        value_counter += 1;
                         *use_style = UseStyle::Anon {
                             parent_func: Some(func),
                             idx,
                         };
-                    }
-
-                    // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
-                    // instead of `Entry`, because they don't have have `Entry`s.
-                    let can_uniquely_visit =
-                        match func_def_body.control_nodes[point.control_node()].kind {
-                            ControlNodeKind::UnstructuredMerge => {
-                                assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                                true
-                            }
-                            _ => matches!(point, cfg::ControlPoint::Entry(_)),
-                        };
-
-                    if !can_uniquely_visit {
-                        continue;
-                    }
-
-                    let control_node = point.control_node();
-                    let ControlNodeDef { kind, outputs } =
-                        &*func_def_body.control_nodes[control_node];
-
-                    let block_insts = match *kind {
-                        ControlNodeKind::UnstructuredMerge => None,
-                        ControlNodeKind::Block { insts } => insts,
-                    };
-
-                    let defined_values =
-                        func_def_body
-                            .at(block_insts)
-                            .into_iter()
-                            .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
-                            .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
-                            .chain(outputs.iter().enumerate().map(|(i, _)| {
-                                Use::ControlNodeOutput {
-                                    control_node,
-                                    output_idx: i.try_into().unwrap(),
-                                }
-                            }));
-                    for use_kind in defined_values {
-                        if let Some(use_style) = use_styles.get_mut(&use_kind) {
-                            let idx = value_counter;
-                            value_counter += 1;
-                            *use_style = UseStyle::Anon {
-                                parent_func: Some(func),
-                                idx,
-                            };
-                        }
                     }
                 }
             }
@@ -574,8 +594,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         Self {
             cx,
             use_styles,
-            global_var_decl_cache: &plan.global_var_decl_cache,
-            func_decl_cache: &plan.func_decl_cache,
+            mod_decl_cache: &plan.mod_decl_cache,
         }
     }
 
@@ -808,7 +827,7 @@ impl Use {
                 let anchor = if let Some(func) = parent_func {
                     // Disambiguate intra-function anchors (labels/values) by
                     // prepending a prefix of the form `func123_`.
-                    let func = Use::Func(func);
+                    let func = Use::ModDecl(ModDeclNode::Func(func));
                     let func_idx = match printer.use_styles[&func] {
                         UseStyle::Anon { idx, .. } => idx,
                         _ => unreachable!(),
@@ -819,7 +838,7 @@ impl Use {
                     name.clone()
                 };
                 let (name, name_style) = match self {
-                    Self::Interned(InternedNode::AttrSet(_)) => {
+                    Self::CxInterned(CxInternedNode::AttrSet(_)) => {
                         (format!("#{name}"), printer.attr_style())
                     }
                     _ => (name, Default::default()),
@@ -831,7 +850,7 @@ impl Use {
                 }
                 .apply(name);
                 match self {
-                    Self::Interned(InternedNode::AttrSet(_)) => {
+                    Self::CxInterned(CxInternedNode::AttrSet(_)) => {
                         // HACK(eddyb) separate `AttrSet` uses from their target.
                         pretty::Fragment::new([name, pretty::Node::ForceLineSeparation])
                     }
@@ -839,15 +858,17 @@ impl Use {
                 }
             }
             UseStyle::Inline => match *self {
-                Self::Interned(node) => {
+                Self::CxInterned(node) => {
                     let AttrsAndDef {
                         attrs: attrs_of_def,
                         def,
                     } = node.print(printer);
                     pretty::Fragment::new([attrs_of_def, def])
                 }
-                Self::GlobalVar(_) => "/* unused global_var */_".into(),
-                Self::Func(_) => "/* unused func */_".into(),
+                Self::ModDecl(node) => printer
+                    .error_style()
+                    .apply(format!("/* unused {} */_", node.category()))
+                    .into(),
                 Self::ControlPointLabel(_)
                 | Self::ControlNodeOutput { .. }
                 | Self::DataInstOutput(_) => "_".into(),
@@ -871,31 +892,31 @@ impl Print for Use {
 impl Print for AttrSet {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::Interned(InternedNode::AttrSet(*self)).print(printer)
+        Use::CxInterned(CxInternedNode::AttrSet(*self)).print(printer)
     }
 }
 impl Print for Type {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::Interned(InternedNode::Type(*self)).print(printer)
+        Use::CxInterned(CxInternedNode::Type(*self)).print(printer)
     }
 }
 impl Print for Const {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::Interned(InternedNode::Const(*self)).print(printer)
+        Use::CxInterned(CxInternedNode::Const(*self)).print(printer)
     }
 }
 impl Print for GlobalVar {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::GlobalVar(*self).print(printer)
+        Use::ModDecl(ModDeclNode::GlobalVar(*self)).print(printer)
     }
 }
 impl Print for Func {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::Func(*self).print(printer)
+        Use::ModDecl(ModDeclNode::Func(*self)).print(printer)
     }
 }
 
@@ -913,7 +934,7 @@ impl Print for Plan<'_> {
             .interned_nodes
             .iter()
             .copied()
-            .map(Node::Interned)
+            .map(Node::CxInterned)
             .chain(self.non_interned_nodes.iter().copied());
 
         let mut first = true;
@@ -962,7 +983,8 @@ impl Print for Node<'_> {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         match *self {
-            Self::Interned(node) => match printer.use_styles.get(&Use::Interned(node)).copied() {
+            Self::CxInterned(node) => match printer.use_styles.get(&Use::CxInterned(node)).copied()
+            {
                 Some(UseStyle::Anon {
                     parent_func: _,
                     idx,
@@ -989,32 +1011,38 @@ impl Print for Node<'_> {
                 _ => AttrsAndDef::default(),
             },
 
-            Self::GlobalVar(gv) => match printer.global_var_decl_cache.get(&gv) {
-                Some(gv_decl) => {
-                    let AttrsAndDef { attrs, def } = gv_decl.print(printer);
-                    AttrsAndDef {
-                        attrs,
-                        def: pretty::Fragment::new([Use::GlobalVar(gv).print_as_def(printer), def]),
-                    }
-                }
-                None => AttrsAndDef::default(),
-            },
-
-            Self::Func(func) => match printer.func_decl_cache.get(&func) {
-                Some(func_decl) => {
-                    let AttrsAndDef { attrs, def } = func_decl.print(printer);
-                    AttrsAndDef {
-                        attrs,
-                        def: pretty::Fragment::new([Use::Func(func).print_as_def(printer), def]),
-                    }
-                }
-                None => AttrsAndDef::default(),
-            },
+            Self::ModDecl(node) => node.print(printer),
 
             Self::Dyn(node) => AttrsAndDef {
                 attrs: pretty::Fragment::default(),
                 def: node.print(printer),
             },
+        }
+    }
+}
+
+impl Print for ModDeclNode {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+        match printer.mod_decl_cache.get(self) {
+            Some(decl) => {
+                let AttrsAndDef { attrs, def } = decl.print(printer);
+                AttrsAndDef {
+                    attrs,
+                    def: pretty::Fragment::new([Use::ModDecl(*self).print_as_def(printer), def]),
+                }
+            }
+            None => AttrsAndDef::default(),
+        }
+    }
+}
+
+impl Print for ModDecl<'_> {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+        match *self {
+            Self::GlobalVar(gv_decl) => gv_decl.print(printer),
+            Self::Func(func_decl) => func_decl.print(printer),
         }
     }
 }
@@ -1255,7 +1283,7 @@ impl Print for Exportee {
     }
 }
 
-impl Print for InternedNode {
+impl Print for CxInternedNode {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         match *self {
@@ -2103,7 +2131,7 @@ impl Value {
     /// Common implementation for `Value::print` and `Value::print_as_def`.
     fn print_as_ref_or_def(&self, printer: &Printer<'_, '_>, is_def: bool) -> pretty::Fragment {
         let value_use = match *self {
-            Self::Const(ct) => Use::Interned(InternedNode::Const(ct)),
+            Self::Const(ct) => Use::CxInterned(CxInternedNode::Const(ct)),
             Self::FuncParam { idx } => return format!("param{}", idx).into(),
             Self::ControlNodeOutput {
                 control_node,
