@@ -35,7 +35,7 @@ pub struct Plan<'a> {
     /// When visiting module-stored nodes, the `Module` is needed to go from the
     /// `ModDeclNode` key to the declaration/definition, which is then cached.
     current_module: Option<&'a Module>,
-    mod_decl_cache: FxHashMap<ModDeclNode, ModDecl<'a>>,
+    mod_decl_cache: FxHashMap<ModDeclNode, &'a dyn DynNodeDef<'a>>,
 
     // FIXME(eddyb) this isn't very nice, maybe make `nodes` an `FxIndexSet`?
     has_all_cx_interned_node_placeholder: bool,
@@ -64,7 +64,10 @@ enum Node<'a> {
     ///
     /// The `dyn Trait` approach allows supporting custom user types "for free",
     /// as well as deduplicating repetitive handling of the base node types.
-    Dyn(&'a dyn DynNode<'a>),
+    Dyn {
+        name: Option<&'static str>,
+        def: &'a dyn DynNodeDef<'a>,
+    },
 }
 
 /// Nodes that are interned in `Context`.
@@ -101,15 +104,16 @@ impl ModDeclNode {
     }
 }
 
-/// The complete declaration/definition referred to by a `ModDeclNode`.
-#[derive(Copy, Clone)]
-enum ModDecl<'a> {
-    GlobalVar(&'a GlobalVarDecl),
-    Func(&'a FuncDecl),
+/// A `Print` `Output` type that splits the attributes from the main body of the
+/// definition, allowing additional processing before they get concatenated.
+#[derive(Default)]
+pub struct AttrsAndDef {
+    pub attrs: pretty::Fragment,
+    pub def: pretty::Fragment,
 }
 
-trait DynNode<'a>: DynVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment> {}
-impl<'a, T: DynVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>> DynNode<'a> for T {}
+trait DynNodeDef<'a>: DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef> {}
+impl<'a, T: DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>> DynNodeDef<'a> for T {}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Use {
@@ -151,10 +155,13 @@ impl<'a> Plan<'a> {
     /// Create a `Plan` with all of `root`'s dependencies, followed by `root` itself.
     pub fn for_root(
         cx: &'a Context,
-        root: &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>),
+        root: &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>),
     ) -> Self {
         let mut plan = Self::empty(cx);
-        plan.use_node(Node::Dyn(root));
+        plan.use_node(Node::Dyn {
+            name: None,
+            def: root,
+        });
         plan
     }
 
@@ -205,7 +212,7 @@ impl<'a> Plan<'a> {
         let visit_once_use = match node {
             Node::AllCxInterned => unreachable!(),
             Node::ModDecl(node) => Some(Use::ModDecl(node)),
-            Node::Dyn(_) => None,
+            Node::Dyn { .. } => None,
         };
         if let Some(visit_once_use) = visit_once_use {
             if let Some(use_count) = self.use_counts.get_mut(&visit_once_use) {
@@ -218,14 +225,13 @@ impl<'a> Plan<'a> {
             Node::AllCxInterned => unreachable!(),
 
             Node::ModDecl(node) => match self.mod_decl_cache.get(&node).copied() {
-                Some(ModDecl::GlobalVar(gv_decl)) => self.visit_global_var_decl(gv_decl),
-                Some(ModDecl::Func(func_decl)) => self.visit_func_decl(func_decl),
+                Some(decl) => decl.dyn_visit_with(self),
 
                 // FIXME(eddyb) should this be a hard error?
                 None => {}
             },
 
-            Node::Dyn(node) => node.dyn_visit_with(self),
+            Node::Dyn { name: _, def } => def.dyn_visit_with(self),
         }
 
         self.nodes.push(node);
@@ -251,8 +257,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
         let node = ModDeclNode::GlobalVar(gv);
         match self.current_module {
             Some(module) => {
-                self.mod_decl_cache
-                    .insert(node, ModDecl::GlobalVar(&module.global_vars[gv]));
+                self.mod_decl_cache.insert(node, &module.global_vars[gv]);
             }
 
             // FIXME(eddyb) should this be a hard error?
@@ -273,7 +278,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
                         return;
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(ModDecl::Func(&module.funcs[func]));
+                        entry.insert(&module.funcs[func]);
                     }
                 }
             }
@@ -291,8 +296,14 @@ impl<'a> Visitor<'a> for Plan<'a> {
         // `visit_module_{dialect,debug_info}`, because `Node::Dyn` ends up
         // recursing back into those same `visit_` methods. This is not an
         // issue for most other nodes because they have an "use vs def" split.
-        self.use_node(Node::Dyn(&module.dialect));
-        self.use_node(Node::Dyn(&module.debug_info));
+        self.use_node(Node::Dyn {
+            name: Some("module.dialect"),
+            def: &module.dialect,
+        });
+        self.use_node(Node::Dyn {
+            name: Some("module.debug_info"),
+            def: &module.debug_info,
+        });
 
         module.inner_visit_with(self);
 
@@ -378,7 +389,7 @@ pub struct Printer<'a, 'b> {
     cx: &'a Context,
     use_styles: FxIndexMap<Use, UseStyle>,
 
-    mod_decl_cache: &'b FxHashMap<ModDeclNode, ModDecl<'a>>,
+    mod_decl_cache: &'b FxHashMap<ModDeclNode, &'a dyn DynNodeDef<'a>>,
 }
 
 /// How an use of a node should be printed.
@@ -510,20 +521,19 @@ impl<'a, 'b> Printer<'a, 'b> {
             })
             .collect();
 
-        let func_defs =
-            plan.mod_decl_cache
-                .iter()
-                .filter_map(|(&node, &decl)| match (node, decl) {
-                    (
-                        ModDeclNode::Func(func),
-                        ModDecl::Func(FuncDecl {
-                            def: DeclDef::Present(func_def_body),
-                            ..
-                        }),
-                    ) => Some((func, func_def_body)),
+        let func_defs = plan.mod_decl_cache.iter().filter_map(|(&node, &decl)| {
+            match (node, decl.downcast_as_func_decl()) {
+                (
+                    ModDeclNode::Func(func),
+                    Some(FuncDecl {
+                        def: DeclDef::Present(func_def_body),
+                        ..
+                    }),
+                ) => Some((func, func_def_body)),
 
-                    _ => None,
-                });
+                _ => None,
+            }
+        });
 
         for (func, func_def_body) in func_defs {
             assert!(matches!(
@@ -789,31 +799,33 @@ impl<'a, 'b> Printer<'a, 'b> {
 pub trait Print {
     type Output;
     fn print(&self, printer: &Printer<'_, '_>) -> Self::Output;
+
+    // HACK(eddyb) this is only ever implemented by `FuncDecl`, to allow for
+    // `Printer::new` to compute its per-function indices. A better replacement
+    // could eventually be `fn setup_printer(&self, printer: &mut Printer)`.
+    fn downcast_as_func_decl(&self) -> Option<&FuncDecl> {
+        None
+    }
 }
 
 impl<E: Print<Output = pretty::Fragment>, F: Print<Output = pretty::Fragment>> Print
     for ExpectedVsFound<E, F>
 {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let Self { expected, found } = self;
 
-        pretty::Fragment::new([
-            "expected: ".into(),
-            expected.print(printer),
-            pretty::Node::ForceLineSeparation.into(),
-            "found: ".into(),
-            found.print(printer),
-        ])
+        AttrsAndDef {
+            attrs: pretty::Fragment::default(),
+            def: pretty::Fragment::new([
+                "expected: ".into(),
+                expected.print(printer),
+                pretty::Node::ForceLineSeparation.into(),
+                "found: ".into(),
+                found.print(printer),
+            ]),
+        }
     }
-}
-
-/// A `Print` `Output` type that splits the attributes from the main body of the
-/// definition, allowing additional processing before they get concatenated.
-#[derive(Default)]
-pub struct AttrsAndDef {
-    pub attrs: pretty::Fragment,
-    pub def: pretty::Fragment,
 }
 
 impl Use {
@@ -1012,52 +1024,50 @@ impl Print for Node<'_> {
                 })
                 .collect(),
 
-            Self::ModDecl(node) => [node.print(printer)].into_iter().collect(),
+            Self::ModDecl(node) => printer
+                .mod_decl_cache
+                .get(&node)
+                .into_iter()
+                .map(|decl| {
+                    let AttrsAndDef { attrs, def } = decl.print(printer);
+                    AttrsAndDef {
+                        attrs,
+                        def: pretty::Fragment::new([Use::ModDecl(node).print_as_def(printer), def]),
+                    }
+                })
+                .collect(),
 
-            Self::Dyn(node) => [AttrsAndDef {
-                attrs: pretty::Fragment::default(),
-                def: node.print(printer),
-            }]
-            .into_iter()
-            .collect(),
-        }
-    }
-}
+            Self::Dyn { name, def } => {
+                let maybe_anchor = name.into_iter().map(|name| {
+                    pretty::Styles {
+                        anchor: Some(name.into()),
+                        anchor_is_def: true,
+                        ..Default::default()
+                    }
+                    .apply(name)
+                    .into()
+                });
 
-impl Print for ModDeclNode {
-    type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
-        match printer.mod_decl_cache.get(self) {
-            Some(decl) => {
-                let AttrsAndDef { attrs, def } = decl.print(printer);
-                AttrsAndDef {
+                let AttrsAndDef { attrs, def } = def.print(printer);
+                [AttrsAndDef {
                     attrs,
-                    def: pretty::Fragment::new([Use::ModDecl(*self).print_as_def(printer), def]),
-                }
+                    def: pretty::Fragment::new(maybe_anchor.into_iter().chain([def])),
+                }]
+                .into_iter()
+                .collect()
             }
-            None => AttrsAndDef::default(),
-        }
-    }
-}
-
-impl Print for ModDecl<'_> {
-    type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
-        match *self {
-            Self::GlobalVar(gv_decl) => gv_decl.print(printer),
-            Self::Func(func_decl) => func_decl.print(printer),
         }
     }
 }
 
 impl Print for Module {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         if self.exports.is_empty() {
-            return pretty::Fragment::default();
+            return AttrsAndDef::default();
         }
 
-        pretty::Fragment::new([
+        let exports = pretty::Fragment::new([
             printer.declarative_keyword_style().apply("export").into(),
             " ".into(),
             pretty::join_comma_sep(
@@ -1076,13 +1086,18 @@ impl Print for Module {
                     }),
                 "}",
             ),
-        ])
+        ]);
+
+        AttrsAndDef {
+            attrs: pretty::Fragment::default(),
+            def: exports,
+        }
     }
 }
 
 impl Print for ModuleDialect {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let dialect = match self {
             Self::Spv(spv::Dialect {
                 version_major,
@@ -1134,20 +1149,17 @@ impl Print for ModuleDialect {
                 )
             }
         };
-        pretty::Fragment::new([
-            printer
-                .declarative_keyword_style()
-                .apply("module.dialect")
-                .into(),
-            " = ".into(),
-            dialect,
-        ])
+
+        AttrsAndDef {
+            attrs: pretty::Fragment::default(),
+            def: pretty::Fragment::new([" = ".into(), dialect]),
+        }
     }
 }
 
 impl Print for ModuleDebugInfo {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         let debug_info = match self {
             Self::Spv(spv::ModuleDebugInfo {
                 original_generator_magic,
@@ -1233,14 +1245,11 @@ impl Print for ModuleDebugInfo {
                 )
             }
         };
-        pretty::Fragment::new([
-            printer
-                .declarative_keyword_style()
-                .apply("module.debug_info")
-                .into(),
-            " = ".into(),
-            debug_info,
-        ])
+
+        AttrsAndDef {
+            attrs: pretty::Fragment::default(),
+            def: pretty::Fragment::new([" = ".into(), debug_info]),
+        }
     }
 }
 
@@ -1830,6 +1839,10 @@ impl Print for FuncDecl {
             attrs: attrs.print(printer),
             def,
         }
+    }
+
+    fn downcast_as_func_decl(&self) -> Option<&FuncDecl> {
+        Some(self)
     }
 }
 
