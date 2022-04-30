@@ -62,8 +62,76 @@ pub trait Visitor<'a>: Sized {
     }
 }
 
-/// Trait implemented on "visitable" types, to further "explore" a type by
-/// visiting its "interior" (i.e. variants and/or fields).
+/// Trait implemented on "visitable" types (shallowly visitable, at least).
+///
+/// That is, an `impl Visit for X` will call the relevant `Visitor` method for
+/// `X`, typically named `Visitor::visit_X` or `Visitor::visit_X_use`.
+//
+// FIXME(eddyb) use this more (e.g. in implementing `InnerVisit`).
+pub trait Visit {
+    fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>);
+}
+
+macro_rules! impl_visit {
+    (
+        by_val { $($by_val_method:ident($by_val_ty:ty)),* $(,)? }
+        by_ref { $($by_ref_method:ident($by_ref_ty:ty)),* $(,)? }
+    ) => {
+        $(impl Visit for $by_val_ty {
+            fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+                visitor.$by_val_method(*self);
+            }
+        })*
+        $(impl Visit for $by_ref_ty {
+            fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+                visitor.$by_ref_method(self);
+            }
+        })*
+    };
+}
+
+impl_visit! {
+    by_val {
+        visit_attr_set_use(AttrSet),
+        visit_type_use(Type),
+        visit_const_use(Const),
+        visit_global_var_use(GlobalVar),
+        visit_func_use(Func),
+    }
+    by_ref {
+        visit_spv_dialect(spv::Dialect),
+        visit_spv_module_debug_info(spv::ModuleDebugInfo),
+        visit_attr(Attr),
+        visit_import(Import),
+        visit_module(Module),
+        visit_module_dialect(ModuleDialect),
+        visit_module_debug_info(ModuleDebugInfo),
+        visit_attr_set_def(AttrSetDef),
+        visit_type_def(TypeDef),
+        visit_const_def(ConstDef),
+        visit_global_var_decl(GlobalVarDecl),
+        visit_func_decl(FuncDecl),
+        visit_data_inst_def(DataInstDef),
+        visit_value_use(Value),
+    }
+}
+
+/// Dynamic dispatch version of `Visit`.
+///
+/// `dyn DynVisit<'a, V>` is possible, unlike `dyn Visit`, because of the
+/// `trait`-level type parameter `V`, which replaces the method parameter.
+pub trait DynVisit<'a, V> {
+    fn dyn_visit_with(&'a self, visitor: &mut V);
+}
+
+impl<'a, T: Visit, V: Visitor<'a>> DynVisit<'a, V> for T {
+    fn dyn_visit_with(&'a self, visitor: &mut V) {
+        self.visit_with(visitor);
+    }
+}
+
+/// Trait implemented on "deeply visitable" types, to further "explore" a type
+/// by visiting its "interior" (i.e. variants and/or fields).
 ///
 /// That is, an `impl InnerVisit for X` will call the relevant `Visitor` method
 /// for each `X` field, effectively performing a single level of a deep visit.

@@ -744,7 +744,7 @@ impl Module {
                         "in %{}, return type differs between `OpFunction` (expected) \
                          and `OpTypeFunction` (found):\n\n{}",
                         func_id,
-                        print::Plan::for_root_outside_module(
+                        print::Plan::for_root(
                             &cx,
                             &print::ExpectedVsFound {
                                 expected: func_ret_type,
@@ -1465,7 +1465,7 @@ impl Module {
                              `OpFunctionParameter` (found):\n\n{}",
                             func_id,
                             i,
-                            print::Plan::for_root_outside_module(
+                            print::Plan::for_root(
                                 &cx,
                                 &print::ExpectedVsFound {
                                     expected: func_type_param.ty,

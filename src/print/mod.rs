@@ -3,7 +3,7 @@
 #![allow(unstable_name_collisions)]
 use itertools::Itertools as _;
 
-use crate::visit::{DynInnerVisit, InnerVisit, Visitor};
+use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInst, DataInstDef,
@@ -60,7 +60,7 @@ enum Node<'a> {
     ModDecl(ModDeclNode),
 
     /// Other nodes, which only need to provide a way to collect dependencies
-    /// (via `InnerVisit`) and then print the node itself.
+    /// (via `Visit`) and then print the node itself.
     ///
     /// The `dyn Trait` approach allows supporting custom user types "for free",
     /// as well as deduplicating repetitive handling of the base node types.
@@ -108,8 +108,8 @@ enum ModDecl<'a> {
     Func(&'a FuncDecl),
 }
 
-trait DynNode<'a>: DynInnerVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment> {}
-impl<'a, T: DynInnerVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>> DynNode<'a> for T {}
+trait DynNode<'a>: DynVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment> {}
+impl<'a, T: DynVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>> DynNode<'a> for T {}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Use {
@@ -137,19 +137,7 @@ impl Use {
 }
 
 impl<'a> Plan<'a> {
-    pub fn empty(module: &'a Module) -> Self {
-        Self {
-            cx: module.cx_ref(),
-            current_module: Some(module),
-            mod_decl_cache: FxHashMap::default(),
-            has_all_cx_interned_node_placeholder: false,
-            nodes: vec![],
-            use_counts: FxIndexMap::default(),
-        }
-    }
-
-    /// Like `empty`, but without supporting anything module-stored (like global vars).
-    pub fn empty_outside_module(cx: &'a Context) -> Self {
+    pub fn empty(cx: &'a Context) -> Self {
         Self {
             cx,
             current_module: None,
@@ -162,29 +150,19 @@ impl<'a> Plan<'a> {
 
     /// Create a `Plan` with all of `root`'s dependencies, followed by `root` itself.
     pub fn for_root(
-        module: &'a Module,
-        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>),
-    ) -> Self {
-        let mut plan = Self::empty(module);
-        plan.use_node(Node::Dyn(root));
-        plan
-    }
-
-    /// Like `for_root`, but without supporting anything module-stored (like global vars).
-    pub fn for_root_outside_module(
         cx: &'a Context,
-        root: &'a (impl DynInnerVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>),
+        root: &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = pretty::Fragment>),
     ) -> Self {
-        let mut plan = Self::empty_outside_module(cx);
+        let mut plan = Self::empty(cx);
         plan.use_node(Node::Dyn(root));
         plan
     }
 
     /// Create a `Plan` with all of `module`'s contents.
     ///
-    /// Shorthand for `Plan::for_root(module, module)`.
+    /// Shorthand for `Plan::for_root(module.cx_ref(), module)`.
     pub fn for_module(module: &'a Module) -> Self {
-        Self::for_root(module, module)
+        Self::for_root(module.cx_ref(), module)
     }
 
     /// Add `node` to the plan, after all of its dependencies.
@@ -198,7 +176,6 @@ impl<'a> Plan<'a> {
             return;
         }
 
-        // FIXME(eddyb) should this be a generic `inner_visit` method on `CxInternedNode`?
         match node {
             CxInternedNode::AttrSet(attrs) => {
                 self.visit_attr_set_def(&self.cx[attrs]);
@@ -237,7 +214,6 @@ impl<'a> Plan<'a> {
             }
         }
 
-        // FIXME(eddyb) should this be a generic `inner_visit` method on `Node`?
         match node {
             Node::AllCxInterned => unreachable!(),
 
@@ -249,9 +225,7 @@ impl<'a> Plan<'a> {
                 None => {}
             },
 
-            // FIXME(eddyb) this could be an issue if `Visitor::visit_...` should
-            // be intercepting this before the `inner_visit_with` part.
-            Node::Dyn(node) => node.dyn_inner_visit_with(self),
+            Node::Dyn(node) => node.dyn_visit_with(self),
         }
 
         self.nodes.push(node);
@@ -312,14 +286,17 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_module(&mut self, module: &'a Module) {
         let old_module = self.current_module.replace(module);
-        self.use_node(Node::Dyn(module));
+
+        // FIXME(eddyb) these are special-cased here, instead of as part of
+        // `visit_module_{dialect,debug_info}`, because `Node::Dyn` ends up
+        // recursing back into those same `visit_` methods. This is not an
+        // issue for most other nodes because they have an "use vs def" split.
+        self.use_node(Node::Dyn(&module.dialect));
+        self.use_node(Node::Dyn(&module.debug_info));
+
+        module.inner_visit_with(self);
+
         self.current_module = old_module;
-    }
-    fn visit_module_dialect(&mut self, dialect: &'a ModuleDialect) {
-        self.use_node(Node::Dyn(dialect));
-    }
-    fn visit_module_debug_info(&mut self, debug_info: &'a ModuleDebugInfo) {
-        self.use_node(Node::Dyn(debug_info));
     }
 
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
@@ -367,14 +344,18 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
 }
 
-// FIXME(eddyb) this should be more general but we lack a `Visit` trait, and
-// `Type` doesn't implement `InnerVisit` (which would be the wrong trait anyway).
-impl InnerVisit for ExpectedVsFound<Type, Type> {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { expected, found } = *self;
+impl<E: Visit, F: Visit> Visit for ExpectedVsFound<E, F> {
+    fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        self.inner_visit_with(visitor);
+    }
+}
 
-        visitor.visit_type_use(expected);
-        visitor.visit_type_use(found);
+impl<E: Visit, F: Visit> InnerVisit for ExpectedVsFound<E, F> {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { expected, found } = self;
+
+        expected.visit_with(visitor);
+        found.visit_with(visitor);
     }
 }
 
