@@ -37,10 +37,10 @@ pub struct Plan<'a> {
     current_module: Option<&'a Module>,
     mod_decl_cache: FxHashMap<ModDeclNode, ModDecl<'a>>,
 
-    // FIXME(eddyb) this "interned" vs "non-interned" split should probably
-    // be better encoded in types (i.e. `Node::Interned` shouldn't exist).
-    interned_nodes: Vec<CxInternedNode>,
-    non_interned_nodes: Vec<Node<'a>>,
+    // FIXME(eddyb) this isn't very nice, maybe make `nodes` an `FxIndexSet`?
+    has_all_cx_interned_node_placeholder: bool,
+
+    nodes: Vec<Node<'a>>,
     use_counts: FxIndexMap<Use, usize>,
 }
 
@@ -54,7 +54,9 @@ pub struct ExpectedVsFound<E, F> {
 /// Printing `Plan` entry, an effective reification of SPIR-T's implicit DAG.
 #[derive(Copy, Clone)]
 enum Node<'a> {
-    CxInterned(CxInternedNode),
+    /// Placeholder for all `CxInterned`.
+    AllCxInterned,
+
     ModDecl(ModDeclNode),
 
     /// Other nodes, which only need to provide a way to collect dependencies
@@ -65,7 +67,7 @@ enum Node<'a> {
     Dyn(&'a dyn DynNode<'a>),
 }
 
-/// Subset of `Node` representing only nodes that are interned in `Context`.
+/// Nodes that are interned in `Context`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum CxInternedNode {
     AttrSet(AttrSet),
@@ -83,7 +85,7 @@ impl CxInternedNode {
     }
 }
 
-/// Subset of `Node` representing only nodes that are stored in a `Module`.
+/// Nodes that are stored in a `Module`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum ModDeclNode {
     GlobalVar(GlobalVar),
@@ -140,8 +142,8 @@ impl<'a> Plan<'a> {
             cx: module.cx_ref(),
             current_module: Some(module),
             mod_decl_cache: FxHashMap::default(),
-            interned_nodes: vec![],
-            non_interned_nodes: vec![],
+            has_all_cx_interned_node_placeholder: false,
+            nodes: vec![],
             use_counts: FxIndexMap::default(),
         }
     }
@@ -152,8 +154,8 @@ impl<'a> Plan<'a> {
             cx,
             current_module: None,
             mod_decl_cache: FxHashMap::default(),
-            interned_nodes: vec![],
-            non_interned_nodes: vec![],
+            has_all_cx_interned_node_placeholder: false,
+            nodes: vec![],
             use_counts: FxIndexMap::default(),
         }
     }
@@ -187,12 +189,44 @@ impl<'a> Plan<'a> {
 
     /// Add `node` to the plan, after all of its dependencies.
     ///
-    /// For `Node::Interned` and `Node::ModDecl`, only the first call recurses
-    /// into the declaration/definition, subsequent calls only update its
-    /// (internally tracked) "use count".
+    /// Only the first call recurses into the definition, subsequent calls only
+    /// update its (internally tracked) "use count".
+    fn use_interned_node(&mut self, node: CxInternedNode) {
+        let use_kind = Use::CxInterned(node);
+        if let Some(use_count) = self.use_counts.get_mut(&use_kind) {
+            *use_count += 1;
+            return;
+        }
+
+        // FIXME(eddyb) should this be a generic `inner_visit` method on `CxInternedNode`?
+        match node {
+            CxInternedNode::AttrSet(attrs) => {
+                self.visit_attr_set_def(&self.cx[attrs]);
+            }
+            CxInternedNode::Type(ty) => {
+                self.visit_type_def(&self.cx[ty]);
+            }
+            CxInternedNode::Const(ct) => {
+                self.visit_const_def(&self.cx[ct]);
+            }
+        }
+
+        // Place all interned nodes in a single top-level `Node`.
+        if !self.has_all_cx_interned_node_placeholder {
+            self.nodes.push(Node::AllCxInterned);
+            self.has_all_cx_interned_node_placeholder = true;
+        }
+
+        *self.use_counts.entry(use_kind).or_default() += 1;
+    }
+
+    /// Add `node` to the plan, after all of its dependencies.
+    ///
+    /// For `Node::ModDecl`, only the first call recurses into the declaration,
+    /// subsequent calls only update its (internally tracked) "use count".
     fn use_node(&mut self, node: Node<'a>) {
         let visit_once_use = match node {
-            Node::CxInterned(node) => Some(Use::CxInterned(node)),
+            Node::AllCxInterned => unreachable!(),
             Node::ModDecl(node) => Some(Use::ModDecl(node)),
             Node::Dyn(_) => None,
         };
@@ -205,15 +239,7 @@ impl<'a> Plan<'a> {
 
         // FIXME(eddyb) should this be a generic `inner_visit` method on `Node`?
         match node {
-            Node::CxInterned(CxInternedNode::AttrSet(attrs)) => {
-                self.visit_attr_set_def(&self.cx[attrs]);
-            }
-            Node::CxInterned(CxInternedNode::Type(ty)) => {
-                self.visit_type_def(&self.cx[ty]);
-            }
-            Node::CxInterned(CxInternedNode::Const(ct)) => {
-                self.visit_const_def(&self.cx[ct]);
-            }
+            Node::AllCxInterned => unreachable!(),
 
             Node::ModDecl(node) => match self.mod_decl_cache.get(&node).copied() {
                 Some(ModDecl::GlobalVar(gv_decl)) => self.visit_global_var_decl(gv_decl),
@@ -228,11 +254,7 @@ impl<'a> Plan<'a> {
             Node::Dyn(node) => node.dyn_inner_visit_with(self),
         }
 
-        if let Node::CxInterned(interned) = node {
-            self.interned_nodes.push(interned);
-        } else {
-            self.non_interned_nodes.push(node);
-        }
+        self.nodes.push(node);
 
         if let Some(visit_once_use) = visit_once_use {
             *self.use_counts.entry(visit_once_use).or_default() += 1;
@@ -242,13 +264,13 @@ impl<'a> Plan<'a> {
 
 impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
-        self.use_node(Node::CxInterned(CxInternedNode::AttrSet(attrs)));
+        self.use_interned_node(CxInternedNode::AttrSet(attrs));
     }
     fn visit_type_use(&mut self, ty: Type) {
-        self.use_node(Node::CxInterned(CxInternedNode::Type(ty)));
+        self.use_interned_node(CxInternedNode::Type(ty));
     }
     fn visit_const_use(&mut self, ct: Const) {
-        self.use_node(Node::CxInterned(CxInternedNode::Const(ct)));
+        self.use_interned_node(CxInternedNode::Const(ct));
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
@@ -373,7 +395,7 @@ impl Plan<'_> {
 
 pub struct Printer<'a, 'b> {
     cx: &'a Context,
-    use_styles: FxHashMap<Use, UseStyle>,
+    use_styles: FxIndexMap<Use, UseStyle>,
 
     mod_decl_cache: &'b FxHashMap<ModDeclNode, ModDecl<'a>>,
 }
@@ -410,7 +432,7 @@ impl<'a, 'b> Printer<'a, 'b> {
         }
         let mut anon_counters = AnonCounters::default();
 
-        let mut use_styles: FxHashMap<_, _> = plan
+        let mut use_styles: FxIndexMap<_, _> = plan
             .use_counts
             .iter()
             .map(|(&use_kind, &use_count)| {
@@ -928,19 +950,10 @@ impl Print for Plan<'_> {
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
         let mut out = pretty::Fragment::default();
 
-        // FIXME(eddyb) this "interned" vs "non-interned" split should probably
-        // be better encoded in types (i.e. `Node::Interned` shouldn't exist).
-        let all_nodes = self
-            .interned_nodes
-            .iter()
-            .copied()
-            .map(Node::CxInterned)
-            .chain(self.non_interned_nodes.iter().copied());
+        let all_printed_nodes = self.nodes.iter().flat_map(|node| node.print(printer));
 
         let mut first = true;
-        for node in all_nodes {
-            let AttrsAndDef { mut attrs, mut def } = node.print(printer);
-
+        for AttrsAndDef { mut attrs, mut def } in all_printed_nodes {
             // HACK(eddyb) move an anchor def at the start of `def` to an empty
             // anchor just before attributes, so that navigating to the anchor
             // does not "hide" those attributes.
@@ -980,21 +993,29 @@ impl Print for Plan<'_> {
 }
 
 impl Print for Node<'_> {
-    type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    type Output = SmallVec<[AttrsAndDef; 1]>;
+    fn print(&self, printer: &Printer<'_, '_>) -> SmallVec<[AttrsAndDef; 1]> {
         match *self {
-            Self::CxInterned(node) => match printer.use_styles.get(&Use::CxInterned(node)).copied()
-            {
-                Some(UseStyle::Anon {
-                    parent_func: _,
-                    idx,
-                }) => {
+            Self::AllCxInterned => printer
+                .use_styles
+                .iter()
+                .filter_map(|(&use_kind, &use_style)| match (use_kind, use_style) {
+                    (
+                        Use::CxInterned(node),
+                        UseStyle::Anon {
+                            parent_func: _,
+                            idx,
+                        },
+                    ) => Some((node, idx)),
+                    _ => None,
+                })
+                .map(|(node, anon_idx)| {
                     let AttrsAndDef {
                         attrs: attrs_of_def,
                         def,
                     } = node.print(printer);
 
-                    let name = format!("{}{}", node.category(), idx);
+                    let name = format!("{}{}", node.category(), anon_idx);
                     let name = pretty::Styles {
                         // FIXME(eddyb) avoid having to clone `String`s here.
                         anchor: Some(name.clone()),
@@ -1007,16 +1028,17 @@ impl Print for Node<'_> {
                         attrs: attrs_of_def,
                         def: pretty::Fragment::new([name.into(), " = ".into(), def]),
                     }
-                }
-                _ => AttrsAndDef::default(),
-            },
+                })
+                .collect(),
 
-            Self::ModDecl(node) => node.print(printer),
+            Self::ModDecl(node) => [node.print(printer)].into_iter().collect(),
 
-            Self::Dyn(node) => AttrsAndDef {
+            Self::Dyn(node) => [AttrsAndDef {
                 attrs: pretty::Fragment::default(),
                 def: node.print(printer),
-            },
+            }]
+            .into_iter()
+            .collect(),
         }
     }
 }
