@@ -64,15 +64,16 @@ enum Node<'a> {
     DynRoot(&'a dyn DynNodeDef<'a>),
 }
 
-/// Nodes that are interned in `Context`.
+/// Everything interned in `Context`, that might need to be printed once
+/// (as part of `Node::AllCxInterned`) and referenced multiple times.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-enum CxInternedNode {
+enum CxInterned {
     AttrSet(AttrSet),
     Type(Type),
     Const(Const),
 }
 
-impl CxInternedNode {
+impl CxInterned {
     fn category(self) -> &'static str {
         match self {
             Self::AttrSet(_) => "attrs",
@@ -121,7 +122,7 @@ impl<'a, T: DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>> DynNodeDef<'a>
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Use {
-    CxInterned(CxInternedNode),
+    CxInterned(CxInterned),
     ModDecl(ModDeclNode),
 
     ControlPointLabel(cfg::ControlPoint),
@@ -136,7 +137,7 @@ enum Use {
 impl Use {
     fn category(self) -> &'static str {
         match self {
-            Self::CxInterned(node) => node.category(),
+            Self::CxInterned(interned) => interned.category(),
             Self::ModDecl(node) => node.category(),
             Self::ControlPointLabel(_) => "label",
             Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => "v",
@@ -173,30 +174,30 @@ impl<'a> Plan<'a> {
         Self::for_root(module.cx_ref(), module)
     }
 
-    /// Add `node` to the plan, after all of its dependencies.
+    /// Add `interned` to the plan, after all of its dependencies.
     ///
     /// Only the first call recurses into the definition, subsequent calls only
     /// update its (internally tracked) "use count".
-    fn use_interned_node(&mut self, node: CxInternedNode) {
-        let use_kind = Use::CxInterned(node);
+    fn use_interned(&mut self, interned: CxInterned) {
+        let use_kind = Use::CxInterned(interned);
         if let Some(use_count) = self.use_counts.get_mut(&use_kind) {
             *use_count += 1;
             return;
         }
 
-        match node {
-            CxInternedNode::AttrSet(attrs) => {
+        match interned {
+            CxInterned::AttrSet(attrs) => {
                 self.visit_attr_set_def(&self.cx[attrs]);
             }
-            CxInternedNode::Type(ty) => {
+            CxInterned::Type(ty) => {
                 self.visit_type_def(&self.cx[ty]);
             }
-            CxInternedNode::Const(ct) => {
+            CxInterned::Const(ct) => {
                 self.visit_const_def(&self.cx[ct]);
             }
         }
 
-        // Place all interned nodes in a single top-level `Node`.
+        // Group all `CxInterned`s in a single top-level `Node`.
         if !self.has_all_cx_interned_node_placeholder {
             self.nodes.push(Node::AllCxInterned);
             self.has_all_cx_interned_node_placeholder = true;
@@ -245,13 +246,13 @@ impl<'a> Plan<'a> {
 
 impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
-        self.use_interned_node(CxInternedNode::AttrSet(attrs));
+        self.use_interned(CxInterned::AttrSet(attrs));
     }
     fn visit_type_use(&mut self, ty: Type) {
-        self.use_interned_node(CxInternedNode::Type(ty));
+        self.use_interned(CxInterned::Type(ty));
     }
     fn visit_const_use(&mut self, ct: Const) {
-        self.use_interned_node(CxInternedNode::Const(ct));
+        self.use_interned(CxInterned::Const(ct));
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
@@ -395,10 +396,10 @@ pub struct Printer<'a, 'b> {
     mod_decl_cache: &'b FxHashMap<ModDeclNode, &'a dyn DynNodeDef<'a>>,
 }
 
-/// How an use of a node should be printed.
+/// How an `Use` of a definition should be printed.
 #[derive(Copy, Clone)]
 enum UseStyle {
-    /// Refer to this node by its category and an `idx` (e.g. `"attrs123"`).
+    /// Refer to the definition by its category and an `idx` (e.g. `"type123"`).
     Anon {
         /// For intra-function `Use`s (i.e. `Use::ControlPointLabel` and values),
         /// this disambiguates the parent function (for e.g. anchors).
@@ -407,7 +408,7 @@ enum UseStyle {
         idx: usize,
     },
 
-    /// Print this node inline at the use site.
+    /// Print the definition inline at the use site.
     Inline,
 }
 
@@ -453,10 +454,10 @@ impl<'a, 'b> Printer<'a, 'b> {
                 }
 
                 let inline = match use_kind {
-                    Use::CxInterned(node) => {
+                    Use::CxInterned(interned) => {
                         use_count == 1
-                            || match node {
-                                CxInternedNode::AttrSet(attrs) => {
+                            || match interned {
+                                CxInterned::AttrSet(attrs) => {
                                     let AttrSetDef { attrs } = &cx[attrs];
                                     attrs.len() <= 1
                                         || attrs.iter().any(|attr| {
@@ -467,7 +468,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                             matches!(attr, Attr::SpvDebugLine { .. })
                                         })
                                 }
-                                CxInternedNode::Type(ty) => {
+                                CxInterned::Type(ty) => {
                                     let ty_def = &cx[ty];
 
                                     // FIXME(eddyb) remove the duplication between
@@ -485,7 +486,7 @@ impl<'a, 'b> Printer<'a, 'b> {
                                     ty_def.attrs == AttrSet::default()
                                         && (has_compact_print || ty_def.ctor_args.is_empty())
                                 }
-                                CxInternedNode::Const(ct) => {
+                                CxInterned::Const(ct) => {
                                     let ct_def = &cx[ct];
 
                                     // FIXME(eddyb) remove the duplication between
@@ -515,9 +516,9 @@ impl<'a, 'b> Printer<'a, 'b> {
                 } else {
                     let ac = &mut anon_counters;
                     let counter = match use_kind {
-                        Use::CxInterned(CxInternedNode::AttrSet(_)) => &mut ac.attr_sets,
-                        Use::CxInterned(CxInternedNode::Type(_)) => &mut ac.types,
-                        Use::CxInterned(CxInternedNode::Const(_)) => &mut ac.consts,
+                        Use::CxInterned(CxInterned::AttrSet(_)) => &mut ac.attr_sets,
+                        Use::CxInterned(CxInterned::Type(_)) => &mut ac.types,
+                        Use::CxInterned(CxInterned::Const(_)) => &mut ac.consts,
                         Use::ModDecl(ModDeclNode::GlobalVar(_)) => &mut ac.global_vars,
                         Use::ModDecl(ModDeclNode::Func(_)) => &mut ac.funcs,
                         Use::ModDecl(ModDeclNode::ModuleDialect | ModDeclNode::ModuleDebugInfo)
@@ -880,7 +881,7 @@ impl Use {
                     name.clone()
                 };
                 let (name, name_style) = match self {
-                    Self::CxInterned(CxInternedNode::AttrSet(_)) => {
+                    Self::CxInterned(CxInterned::AttrSet(_)) => {
                         (format!("#{name}"), printer.attr_style())
                     }
                     _ => (name, Default::default()),
@@ -892,7 +893,7 @@ impl Use {
                 }
                 .apply(name);
                 match self {
-                    Self::CxInterned(CxInternedNode::AttrSet(_)) => {
+                    Self::CxInterned(CxInterned::AttrSet(_)) => {
                         // HACK(eddyb) separate `AttrSet` uses from their target.
                         pretty::Fragment::new([name, pretty::Node::ForceLineSeparation])
                     }
@@ -900,11 +901,11 @@ impl Use {
                 }
             }
             UseStyle::Inline => match *self {
-                Self::CxInterned(node) => {
+                Self::CxInterned(interned) => {
                     let AttrsAndDef {
                         attrs: attrs_of_def,
                         def,
-                    } = node.print(printer);
+                    } = interned.print(printer);
                     pretty::Fragment::new([attrs_of_def, def])
                 }
                 Self::ModDecl(node) => printer
@@ -934,19 +935,19 @@ impl Print for Use {
 impl Print for AttrSet {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::CxInterned(CxInternedNode::AttrSet(*self)).print(printer)
+        Use::CxInterned(CxInterned::AttrSet(*self)).print(printer)
     }
 }
 impl Print for Type {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::CxInterned(CxInternedNode::Type(*self)).print(printer)
+        Use::CxInterned(CxInterned::Type(*self)).print(printer)
     }
 }
 impl Print for Const {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        Use::CxInterned(CxInternedNode::Const(*self)).print(printer)
+        Use::CxInterned(CxInterned::Const(*self)).print(printer)
     }
 }
 impl Print for GlobalVar {
@@ -1021,21 +1022,21 @@ impl Print for Node<'_> {
                 .iter()
                 .filter_map(|(&use_kind, &use_style)| match (use_kind, use_style) {
                     (
-                        Use::CxInterned(node),
+                        Use::CxInterned(interned),
                         UseStyle::Anon {
                             parent_func: _,
                             idx,
                         },
-                    ) => Some((node, idx)),
+                    ) => Some((interned, idx)),
                     _ => None,
                 })
-                .map(|(node, anon_idx)| {
+                .map(|(interned, anon_idx)| {
                     let AttrsAndDef {
                         attrs: attrs_of_def,
                         def,
-                    } = node.print(printer);
+                    } = interned.print(printer);
 
-                    let name = format!("{}{}", node.category(), anon_idx);
+                    let name = format!("{}{}", interned.category(), anon_idx);
                     let name = pretty::Styles {
                         // FIXME(eddyb) avoid having to clone `String`s here.
                         anchor: Some(name.clone()),
@@ -1304,7 +1305,7 @@ impl Print for Exportee {
     }
 }
 
-impl Print for CxInternedNode {
+impl Print for CxInterned {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
         match *self {
@@ -2156,7 +2157,7 @@ impl Value {
     /// Common implementation for `Value::print` and `Value::print_as_def`.
     fn print_as_ref_or_def(&self, printer: &Printer<'_, '_>, is_def: bool) -> pretty::Fragment {
         let value_use = match *self {
-            Self::Const(ct) => Use::CxInterned(CxInternedNode::Const(ct)),
+            Self::Const(ct) => Use::CxInterned(CxInterned::Const(ct)),
             Self::FuncParam { idx } => return format!("param{}", idx).into(),
             Self::ControlNodeOutput {
                 control_node,
