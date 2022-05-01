@@ -59,15 +59,9 @@ enum Node<'a> {
 
     ModDecl(ModDeclNode),
 
-    /// Other nodes, which only need to provide a way to collect dependencies
+    /// Root node, which onlys need to provide a way to collect dependencies
     /// (via `Visit`) and then print the node itself.
-    ///
-    /// The `dyn Trait` approach allows supporting custom user types "for free",
-    /// as well as deduplicating repetitive handling of the base node types.
-    Dyn {
-        name: Option<&'static str>,
-        def: &'a dyn DynNodeDef<'a>,
-    },
+    DynRoot(&'a dyn DynNodeDef<'a>),
 }
 
 /// Nodes that are interned in `Context`.
@@ -91,6 +85,11 @@ impl CxInternedNode {
 /// Nodes that are stored in a `Module`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum ModDeclNode {
+    // FIXME(eddyb) these do not support multiple `Module`s as they don't have
+    // any way to distinguish between instances of them from different `Module`s.
+    ModuleDialect,
+    ModuleDebugInfo,
+
     GlobalVar(GlobalVar),
     Func(Func),
 }
@@ -98,6 +97,11 @@ enum ModDeclNode {
 impl ModDeclNode {
     fn category(self) -> &'static str {
         match self {
+            // FIXME(eddyb) these don't have the same kind of `{category}{idx}`
+            // formatting, so maybe they don't belong in here to begin with?
+            Self::ModuleDialect => "module.dialect",
+            Self::ModuleDebugInfo => "module.debug_info",
+
             Self::GlobalVar(_) => "global_var",
             Self::Func(_) => "func",
         }
@@ -158,10 +162,7 @@ impl<'a> Plan<'a> {
         root: &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>),
     ) -> Self {
         let mut plan = Self::empty(cx);
-        plan.use_node(Node::Dyn {
-            name: None,
-            def: root,
-        });
+        plan.use_node(Node::DynRoot(root));
         plan
     }
 
@@ -212,7 +213,7 @@ impl<'a> Plan<'a> {
         let visit_once_use = match node {
             Node::AllCxInterned => unreachable!(),
             Node::ModDecl(node) => Some(Use::ModDecl(node)),
-            Node::Dyn { .. } => None,
+            Node::DynRoot(_) => None,
         };
         if let Some(visit_once_use) = visit_once_use {
             if let Some(use_count) = self.use_counts.get_mut(&visit_once_use) {
@@ -231,7 +232,7 @@ impl<'a> Plan<'a> {
                 None => {}
             },
 
-            Node::Dyn { name: _, def } => def.dyn_visit_with(self),
+            Node::DynRoot(def) => def.dyn_visit_with(self),
         }
 
         self.nodes.push(node);
@@ -293,17 +294,19 @@ impl<'a> Visitor<'a> for Plan<'a> {
         let old_module = self.current_module.replace(module);
 
         // FIXME(eddyb) these are special-cased here, instead of as part of
-        // `visit_module_{dialect,debug_info}`, because `Node::Dyn` ends up
+        // `visit_module_{dialect,debug_info}`, because `use_node` ends up
         // recursing back into those same `visit_` methods. This is not an
         // issue for most other nodes because they have an "use vs def" split.
-        self.use_node(Node::Dyn {
-            name: Some("module.dialect"),
-            def: &module.dialect,
-        });
-        self.use_node(Node::Dyn {
-            name: Some("module.debug_info"),
-            def: &module.debug_info,
-        });
+        let mut child_node = |node, def| {
+            assert!(
+                self.mod_decl_cache.insert(node, def).is_none(),
+                "multiple `{}` nodes in `print::Plan`",
+                node.category()
+            );
+            self.use_node(Node::ModDecl(node));
+        };
+        child_node(ModDeclNode::ModuleDialect, &module.dialect);
+        child_node(ModDeclNode::ModuleDebugInfo, &module.debug_info);
 
         module.inner_visit_with(self);
 
@@ -436,6 +439,19 @@ impl<'a, 'b> Printer<'a, 'b> {
                     return (use_kind, UseStyle::Inline);
                 }
 
+                // HACK(eddyb) these are "global" to the whole print `Plan`.
+                if let Use::ModDecl(ModDeclNode::ModuleDialect | ModDeclNode::ModuleDebugInfo) =
+                    use_kind
+                {
+                    return (
+                        use_kind,
+                        UseStyle::Anon {
+                            parent_func: None,
+                            idx: 0,
+                        },
+                    );
+                }
+
                 let inline = match use_kind {
                     Use::CxInterned(node) => {
                         use_count == 1
@@ -504,7 +520,8 @@ impl<'a, 'b> Printer<'a, 'b> {
                         Use::CxInterned(CxInternedNode::Const(_)) => &mut ac.consts,
                         Use::ModDecl(ModDeclNode::GlobalVar(_)) => &mut ac.global_vars,
                         Use::ModDecl(ModDeclNode::Func(_)) => &mut ac.funcs,
-                        Use::ControlPointLabel(_)
+                        Use::ModDecl(ModDeclNode::ModuleDialect | ModDeclNode::ModuleDebugInfo)
+                        | Use::ControlPointLabel(_)
                         | Use::ControlNodeOutput { .. }
                         | Use::DataInstOutput(_) => {
                             unreachable!()
@@ -838,7 +855,17 @@ impl Use {
             .unwrap_or(UseStyle::Inline);
         match style {
             UseStyle::Anon { parent_func, idx } => {
-                let name = format!("{}{}", self.category(), idx);
+                // HACK(eddyb) these are "global" to the whole print `Plan`.
+                let name = if let Use::ModDecl(
+                    ModDeclNode::ModuleDialect | ModDeclNode::ModuleDebugInfo,
+                ) = self
+                {
+                    assert_eq!(idx, 0);
+                    self.category().into()
+                } else {
+                    format!("{}{}", self.category(), idx)
+                };
+
                 let anchor = if let Some(func) = parent_func {
                     // Disambiguate intra-function anchors (labels/values) by
                     // prepending a prefix of the form `func123_`.
@@ -1037,25 +1064,7 @@ impl Print for Node<'_> {
                 })
                 .collect(),
 
-            Self::Dyn { name, def } => {
-                let maybe_anchor = name.into_iter().map(|name| {
-                    pretty::Styles {
-                        anchor: Some(name.into()),
-                        anchor_is_def: true,
-                        ..Default::default()
-                    }
-                    .apply(name)
-                    .into()
-                });
-
-                let AttrsAndDef { attrs, def } = def.print(printer);
-                [AttrsAndDef {
-                    attrs,
-                    def: pretty::Fragment::new(maybe_anchor.into_iter().chain([def])),
-                }]
-                .into_iter()
-                .collect()
-            }
+            Self::DynRoot(def) => [def.print(printer)].into_iter().collect(),
         }
     }
 }
