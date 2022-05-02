@@ -613,7 +613,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     }
     fn comment_style(&self) -> pretty::Styles {
         pretty::Styles {
-            opacity: Some(0.2),
+            color_opacity: Some(0.2),
             thickness: Some(-3),
             ..Default::default()
         }
@@ -636,7 +636,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     fn spv_operand_kind_name_style(&self) -> pretty::Styles {
         // HACK(eddyb) effectively this is almost always redundant.
         pretty::Styles {
-            opacity: Some(0.4),
+            color_opacity: Some(0.4),
             thickness: Some(-3),
             ..self.declarative_keyword_style()
         }
@@ -647,7 +647,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     fn attr_style(&self) -> pretty::Styles {
         pretty::Styles {
             color: Some(pretty::palettes::simple::GREEN),
-            opacity: Some(0.6),
+            color_opacity: Some(0.6),
             thickness: Some(-2),
             ..Default::default()
         }
@@ -1508,7 +1508,7 @@ impl Print for ConstDef {
         let literal_ty_suffix = |ty| {
             pretty::Styles {
                 // HACK(eddyb) the exact type detracts from the value.
-                opacity: Some(0.4),
+                color_opacity: Some(0.4),
                 subscript: true,
                 ..printer.declarative_keyword_style()
             }

@@ -56,7 +56,9 @@ pub struct Styles {
     pub color: Option<[u8; 3]>,
 
     /// `0.0` is fully transparent, `1.0` is fully opaque.
-    pub opacity: Option<f32>,
+    //
+    // FIXME(eddyb) move this into `color` (which would become RGBA).
+    pub color_opacity: Option<f32>,
 
     /// `0` corresponds to the default, with positive values meaning thicker,
     /// and negative values thinner text, respectively.
@@ -248,7 +250,7 @@ impl FragmentPostLayout {
                             ref anchor,
                             anchor_is_def,
                             color,
-                            opacity,
+                            color_opacity,
                             thickness,
                             subscript: _,
                             superscript: _,
@@ -262,11 +264,13 @@ impl FragmentPostLayout {
                         }
 
                         let mut css_style = String::new();
-                        if let Some([r, g, b]) = color {
+
+                        if let Some(a) = color_opacity {
+                            // FIXME(eddyb) this assumes `#00000` is the default.
+                            let [r, g, b] = color.unwrap_or([0, 0, 0]);
+                            write!(css_style, "color:rgba({r},{g},{b},{a});").unwrap();
+                        } else if let Some([r, g, b]) = color {
                             write!(css_style, "color:#{r:02x}{g:02x}{b:02x};").unwrap();
-                        }
-                        if let Some(opacity) = opacity {
-                            write!(css_style, "opacity:{opacity};").unwrap();
                         }
                         if let Some(thickness) = thickness {
                             write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
