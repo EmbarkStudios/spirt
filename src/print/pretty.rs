@@ -721,17 +721,14 @@ impl<'a> LineOp<'a> {
         // (with non-empty `text`), that (would) share the same line.
         let mut pending_break_if_within_line = None;
 
-        // Deferred `LineOp::PushStyles`.
-        let mut pending_push_styles = None;
-
         move |op| {
             // Do not allow (accidental) side-effects from no-op `op`s.
             if let LineOp::AppendToLine("") = op {
                 return;
             }
 
-            if let LineOp::AppendToLine(_) = op {
-                let need_indent = match pending_break_if_within_line {
+            if let LineOp::AppendToLine(_) | LineOp::PushStyles(_) = op {
+                let need_indent = match pending_break_if_within_line.take() {
                     Some(br) => {
                         each_text_op(TextOp::Text(match br {
                             Break::Space => " ",
@@ -745,14 +742,8 @@ impl<'a> LineOp<'a> {
                     for _ in 0..indent {
                         each_text_op(TextOp::Text(INDENT));
                     }
+                    on_empty_new_line = false;
                 }
-            }
-
-            // FIXME(eddyb) this could be more comprehensive but for now it does
-            // avoid the issue of `PushStyles` followed by `AppendToLine` having
-            // indentation and/or breaks between `PushStyle` and the text.
-            if let Some(styles) = pending_push_styles.take() {
-                each_text_op(TextOp::PushStyles(styles));
             }
 
             match op {
@@ -765,18 +756,10 @@ impl<'a> LineOp<'a> {
                     indent -= 1;
                 }
 
-                LineOp::PushStyles(styles) => {
-                    assert!(pending_push_styles.is_none());
-                    pending_push_styles = Some(styles);
-                }
+                LineOp::PushStyles(styles) => each_text_op(TextOp::PushStyles(styles)),
                 LineOp::PopStyles(styles) => each_text_op(TextOp::PopStyles(styles)),
 
-                LineOp::AppendToLine(text) => {
-                    each_text_op(TextOp::Text(text));
-
-                    on_empty_new_line = false;
-                    pending_break_if_within_line = None;
-                }
+                LineOp::AppendToLine(text) => each_text_op(TextOp::Text(text)),
 
                 LineOp::StartNewLine => {
                     each_text_op(TextOp::Text("\n"));

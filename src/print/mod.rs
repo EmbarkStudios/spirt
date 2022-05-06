@@ -106,12 +106,19 @@ impl CxInterned {
         }
     }
 }
+
 /// A `Print` `Output` type that splits the attributes from the main body of the
 /// definition, allowing additional processing before they get concatenated.
 #[derive(Default)]
 pub struct AttrsAndDef {
     pub attrs: pretty::Fragment,
-    pub def: pretty::Fragment,
+
+    /// Definition that typically looks like one of these cases:
+    /// * ` = ...` for `name = ...`
+    /// * `(...) {...}` for `name(...) {...}` (i.e. functions)
+    ///
+    /// Where `name` is added later
+    pub def_without_name: pretty::Fragment,
 }
 
 trait DynNodeDef<'a>: DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef> {}
@@ -355,11 +362,9 @@ impl Plan<'_> {
     }
 }
 
-pub struct Printer<'a, 'b> {
+pub struct Printer<'a> {
     cx: &'a Context,
     use_styles: FxIndexMap<Use, UseStyle>,
-
-    node_defs: &'b FxHashMap<Node, &'a dyn DynNodeDef<'a>>,
 }
 
 /// How an `Use` of a definition should be printed.
@@ -378,8 +383,8 @@ enum UseStyle {
     Inline,
 }
 
-impl<'a, 'b> Printer<'a, 'b> {
-    fn new(plan: &'b Plan<'a>) -> Self {
+impl<'a> Printer<'a> {
+    fn new(plan: &Plan<'a>) -> Self {
         let cx = plan.cx;
         let wk = &spv::spec::Spec::get().well_known;
 
@@ -594,11 +599,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             }
         }
 
-        Self {
-            cx,
-            use_styles,
-            node_defs: &plan.node_defs,
-        }
+        Self { cx, use_styles }
     }
 
     pub fn cx(&self) -> &'a Context {
@@ -786,9 +787,40 @@ impl<'a, 'b> Printer<'a, 'b> {
     }
 }
 
+impl AttrsAndDef {
+    /// Concat `attrs`, `name` and `def_without_name` into a `pretty::Fragment`,
+    /// effectively "filling in" the `name` missing from `def_without_name`.
+    ///
+    /// If `name` starts with an anchor definition, the definition of that anchor
+    /// gets hoised to before (some non-empty) `attrs`, so that navigating to that
+    /// anchor doesn't "hide" those attributes (requiring scrolling to see them).
+    fn insert_name_before_def(self, name: impl Into<pretty::Fragment>) -> pretty::Fragment {
+        let Self {
+            attrs,
+            def_without_name,
+        } = self;
+
+        let mut maybe_hoisted_anchor = pretty::Fragment::default();
+        let mut name = name.into();
+        if let [pretty::Node::StyledText(ref mut styles_and_text), ..] = name.nodes[..] {
+            let styles = &mut styles_and_text.0;
+            if !attrs.nodes.is_empty() && mem::take(&mut styles.anchor_is_def) {
+                maybe_hoisted_anchor = pretty::Styles {
+                    anchor: styles.anchor.clone(),
+                    anchor_is_def: true,
+                    ..Default::default()
+                }
+                .apply("")
+                .into();
+            }
+        }
+        pretty::Fragment::new([maybe_hoisted_anchor, attrs, name, def_without_name])
+    }
+}
+
 pub trait Print {
     type Output;
-    fn print(&self, printer: &Printer<'_, '_>) -> Self::Output;
+    fn print(&self, printer: &Printer<'_>) -> Self::Output;
 
     // HACK(eddyb) this is only ever implemented by `FuncDecl`, to allow for
     // `Printer::new` to compute its per-function indices. A better replacement
@@ -802,12 +834,12 @@ impl<E: Print<Output = pretty::Fragment>, F: Print<Output = pretty::Fragment>> P
     for ExpectedVsFound<E, F>
 {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self { expected, found } = self;
 
         AttrsAndDef {
             attrs: pretty::Fragment::default(),
-            def: pretty::Fragment::new([
+            def_without_name: pretty::Fragment::new([
                 "expected: ".into(),
                 expected.print(printer),
                 pretty::Node::ForceLineSeparation.into(),
@@ -820,7 +852,7 @@ impl<E: Print<Output = pretty::Fragment>, F: Print<Output = pretty::Fragment>> P
 
 impl Use {
     /// Common implementation for `Use::print` and `Use::print_as_def`.
-    fn print_as_ref_or_def(&self, printer: &Printer<'_, '_>, is_def: bool) -> pretty::Fragment {
+    fn print_as_ref_or_def(&self, printer: &Printer<'_>, is_def: bool) -> pretty::Fragment {
         let style = printer
             .use_styles
             .get(self)
@@ -870,13 +902,9 @@ impl Use {
                 }
             }
             UseStyle::Inline => match *self {
-                Self::CxInterned(interned) => {
-                    let AttrsAndDef {
-                        attrs: attrs_of_def,
-                        def,
-                    } = interned.print(printer);
-                    pretty::Fragment::new([attrs_of_def, def])
-                }
+                Self::CxInterned(interned) => interned
+                    .print(printer)
+                    .insert_name_before_def(pretty::Fragment::default()),
                 Self::Node(node) => printer
                     .error_style()
                     .apply(format!(
@@ -891,14 +919,14 @@ impl Use {
         }
     }
 
-    fn print_as_def(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print_as_def(&self, printer: &Printer<'_>) -> pretty::Fragment {
         self.print_as_ref_or_def(printer, true)
     }
 }
 
 impl Print for Use {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         self.print_as_ref_or_def(printer, false)
     }
 }
@@ -906,31 +934,31 @@ impl Print for Use {
 // Interned/module-stored nodes dispatch through the `Use` impl above.
 impl Print for AttrSet {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         Use::CxInterned(CxInterned::AttrSet(*self)).print(printer)
     }
 }
 impl Print for Type {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         Use::CxInterned(CxInterned::Type(*self)).print(printer)
     }
 }
 impl Print for Const {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         Use::CxInterned(CxInterned::Const(*self)).print(printer)
     }
 }
 impl Print for GlobalVar {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         Use::Node(Node::GlobalVar(*self)).print(printer)
     }
 }
 impl Print for Func {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         Use::Node(Node::Func(*self)).print(printer)
     }
 }
@@ -940,119 +968,38 @@ impl Print for Func {
 
 impl Print for Plan<'_> {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
-        let mut out = pretty::Fragment::default();
-
-        let all_printed_nodes = printer
-            .use_styles
-            .keys()
-            .filter_map(|use_kind| match use_kind {
-                Use::Node(node) => Some(node),
-                _ => None,
-            })
-            .flat_map(|node| node.print(printer));
-
-        let mut first = true;
-        for AttrsAndDef { mut attrs, mut def } in all_printed_nodes {
-            // HACK(eddyb) move an anchor def at the start of `def` to an empty
-            // anchor just before attributes, so that navigating to the anchor
-            // does not "hide" those attributes.
-            if let [pretty::Node::StyledText(ref mut styles_and_text), ..] = def.nodes[..] {
-                let styles = &mut styles_and_text.0;
-                if !attrs.nodes.is_empty() && mem::take(&mut styles.anchor_is_def) {
-                    attrs.nodes.insert(
-                        0,
-                        pretty::Styles {
-                            anchor: styles.anchor.clone(),
-                            anchor_is_def: true,
-                            ..Default::default()
-                        }
-                        .apply(""),
-                    );
-                }
-            }
-
-            let def = pretty::Fragment::new([attrs, def.into()]);
-            if !def.nodes.is_empty() {
-                // Visually separate top-level definitions.
-                if !first {
-                    // FIXME(eddyb) have an explicit `pretty::Node`
-                    // for "vertical gap" instead.
-                    out.nodes.push("\n\n".into());
-                }
-                first = false;
-
-                // FIXME(eddyb) this should probably be `out += def;`.
-                out.nodes.extend(def.nodes);
-                out.nodes.push(pretty::Node::ForceLineSeparation.into());
-            }
-        }
-
-        out
-    }
-}
-
-impl Print for Node {
-    type Output = SmallVec<[AttrsAndDef; 1]>;
-    fn print(&self, printer: &Printer<'_, '_>) -> SmallVec<[AttrsAndDef; 1]> {
-        if let Self::AllCxInterned = self {
-            // FIXME(eddyb) move this into `impl Print for AllCxInterned`, the
-            // main difficulty is the many returned `AttrsAndDef`, which are only
-            // combined into a single `pretty::Fragment` in `impl Print for Plan`.
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        pretty::Fragment::new(
             printer
                 .use_styles
-                .iter()
-                .filter_map(|(&use_kind, &use_style)| match (use_kind, use_style) {
-                    (
-                        Use::CxInterned(interned),
-                        UseStyle::Anon {
-                            parent_func: _,
-                            idx,
-                        },
-                    ) => Some((interned, idx)),
+                .keys()
+                .filter_map(|use_kind| match use_kind {
+                    Use::Node(node) => Some(node),
                     _ => None,
                 })
-                .map(|(interned, anon_idx)| {
-                    let AttrsAndDef {
-                        attrs: attrs_of_def,
-                        def,
-                    } = interned.print(printer);
-
-                    let name = format!("{}{}", interned.category(), anon_idx);
-                    let name = pretty::Styles {
-                        // FIXME(eddyb) avoid having to clone `String`s here.
-                        anchor: Some(name.clone()),
-                        anchor_is_def: true,
-                        ..Default::default()
-                    }
-                    .apply(name);
-
-                    AttrsAndDef {
-                        attrs: attrs_of_def,
-                        def: pretty::Fragment::new([name.into(), " = ".into(), def]),
-                    }
+                .map(|&node| {
+                    self.node_defs[&node].print(printer).insert_name_before_def(
+                        if node.category().is_err() {
+                            pretty::Fragment::default()
+                        } else {
+                            Use::Node(node).print_as_def(printer)
+                        },
+                    )
                 })
-                .collect()
-        } else {
-            let maybe_name = match *self {
-                Node::Root => None,
-                _ => Some(Use::Node(*self).print_as_def(printer)),
-            };
-
-            let AttrsAndDef { attrs, def } = printer.node_defs[self].print(printer);
-            [AttrsAndDef {
-                attrs,
-                def: pretty::Fragment::new(maybe_name.into_iter().chain([def])),
-            }]
-            .into_iter()
-            .collect()
-        }
+                .filter(|fragment| !fragment.nodes.is_empty())
+                .intersperse({
+                    // Separate top-level definitions with empty lines.
+                    // FIXME(eddyb) have an explicit `pretty::Node`
+                    // for "vertical gap" instead.
+                    "\n\n".into()
+                }),
+        )
     }
 }
 
 impl Print for Module {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         if self.exports.is_empty() {
             return AttrsAndDef::default();
         }
@@ -1080,14 +1027,14 @@ impl Print for Module {
 
         AttrsAndDef {
             attrs: pretty::Fragment::default(),
-            def: exports,
+            def_without_name: exports,
         }
     }
 }
 
 impl Print for ModuleDialect {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let dialect = match self {
             Self::Spv(spv::Dialect {
                 version_major,
@@ -1142,14 +1089,14 @@ impl Print for ModuleDialect {
 
         AttrsAndDef {
             attrs: pretty::Fragment::default(),
-            def: pretty::Fragment::new([" = ".into(), dialect]),
+            def_without_name: pretty::Fragment::new([" = ".into(), dialect]),
         }
     }
 }
 
 impl Print for ModuleDebugInfo {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let debug_info = match self {
             Self::Spv(spv::ModuleDebugInfo {
                 original_generator_magic,
@@ -1238,14 +1185,14 @@ impl Print for ModuleDebugInfo {
 
         AttrsAndDef {
             attrs: pretty::Fragment::default(),
-            def: pretty::Fragment::new([" = ".into(), debug_info]),
+            def_without_name: pretty::Fragment::new([" = ".into(), debug_info]),
         }
     }
 }
 
 impl Print for ExportKey {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
             &Self::LinkName(name) => printer
                 .string_literal_style()
@@ -1277,7 +1224,7 @@ impl Print for ExportKey {
 
 impl Print for Exportee {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match *self {
             Self::GlobalVar(gv) => gv.print(printer),
             Self::Func(func) => func.print(printer),
@@ -1287,18 +1234,55 @@ impl Print for Exportee {
 
 impl Print for AllCxInterned {
     type Output = AttrsAndDef;
-    fn print(&self, _printer: &Printer<'_, '_>) -> AttrsAndDef {
-        unimplemented!("`Node::AllCxInterned` is special-cased in `impl Print for Node`");
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+        let fragments = printer
+            .use_styles
+            .iter()
+            .filter_map(|(&use_kind, &use_style)| match (use_kind, use_style) {
+                (
+                    Use::CxInterned(interned),
+                    UseStyle::Anon {
+                        parent_func: _,
+                        idx,
+                    },
+                ) => Some((interned, idx)),
+                _ => None,
+            })
+            .map(|(interned, anon_idx)| {
+                let name = format!("{}{}", interned.category(), anon_idx);
+                let name = pretty::Styles {
+                    // FIXME(eddyb) avoid having to clone `String`s here.
+                    anchor: Some(name.clone()),
+                    anchor_is_def: true,
+                    ..Default::default()
+                }
+                .apply(name);
+
+                interned
+                    .print(printer)
+                    .insert_name_before_def(pretty::Fragment::new([name, " = ".into()]))
+            })
+            .intersperse({
+                // Separate top-level definitions with empty lines.
+                // FIXME(eddyb) have an explicit `pretty::Node`
+                // for "vertical gap" instead.
+                "\n\n".into()
+            });
+
+        AttrsAndDef {
+            attrs: pretty::Fragment::default(),
+            def_without_name: pretty::Fragment::new(fragments),
+        }
     }
 }
 
 impl Print for CxInterned {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         match *self {
             Self::AttrSet(attrs) => AttrsAndDef {
                 attrs: pretty::Fragment::default(),
-                def: printer.cx[attrs].print(printer),
+                def_without_name: printer.cx[attrs].print(printer),
             },
             Self::Type(ty) => printer.cx[ty].print(printer),
             Self::Const(ct) => printer.cx[ct].print(printer),
@@ -1308,7 +1292,7 @@ impl Print for CxInterned {
 
 impl Print for AttrSetDef {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         let Self { attrs } = self;
 
         let mut comments = SmallVec::<[_; 1]>::new();
@@ -1359,7 +1343,7 @@ pub enum AttrStyle {
 
 impl Print for Attr {
     type Output = (AttrStyle, pretty::Fragment);
-    fn print(&self, printer: &Printer<'_, '_>) -> (AttrStyle, pretty::Fragment) {
+    fn print(&self, printer: &Printer<'_>) -> (AttrStyle, pretty::Fragment) {
         match self {
             Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
                 struct ImplicitTargetId;
@@ -1411,7 +1395,7 @@ impl Print for Attr {
 
 impl Print for TypeDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
             attrs,
             ctor,
@@ -1471,7 +1455,7 @@ impl Print for TypeDef {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: if let Some(def) = compact_def {
+            def_without_name: if let Some(def) = compact_def {
                 def
             } else {
                 match *ctor {
@@ -1494,7 +1478,7 @@ impl Print for TypeDef {
 
 impl Print for ConstDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
             attrs,
             ty,
@@ -1620,7 +1604,7 @@ impl Print for ConstDef {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: if let Some(def) = compact_def {
+            def_without_name: if let Some(def) = compact_def {
                 def.into()
             } else {
                 match *ctor {
@@ -1643,7 +1627,7 @@ impl Print for ConstDef {
 
 impl Print for Import {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
             &Self::LinkName(name) => pretty::Fragment::new([
                 printer.declarative_keyword_style().apply("import"),
@@ -1658,7 +1642,7 @@ impl Print for Import {
 
 impl Print for GlobalVarDecl {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
             attrs,
             type_of_ptr_to,
@@ -1706,18 +1690,18 @@ impl Print for GlobalVarDecl {
             }
         };
 
-        let def = pretty::Fragment::new([header, pretty::join_space("", body)]);
+        let def_without_name = pretty::Fragment::new([header, pretty::join_space("", body)]);
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def,
+            def_without_name,
         }
     }
 }
 
 impl Print for FuncDecl {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
             attrs,
             ret_type,
@@ -1729,15 +1713,12 @@ impl Print for FuncDecl {
             pretty::join_comma_sep(
                 "(",
                 params.iter().enumerate().map(|(i, param)| {
-                    let AttrsAndDef { attrs, def } = param.print(printer);
-                    pretty::Fragment::new([
-                        attrs,
+                    param.print(printer).insert_name_before_def(
                         Value::FuncParam {
                             idx: i.try_into().unwrap(),
                         }
                         .print(printer),
-                        def.into(),
-                    ])
+                    )
                 }),
                 ")",
             ),
@@ -1745,7 +1726,7 @@ impl Print for FuncDecl {
             ret_type.print(printer),
         ]);
 
-        let def = match def {
+        let def_without_name = match def {
             DeclDef::Imported(import) => {
                 pretty::Fragment::new([sig, " = ".into(), import.print(printer).into()])
             }
@@ -1834,7 +1815,7 @@ impl Print for FuncDecl {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def,
+            def_without_name,
         }
     }
 
@@ -1845,34 +1826,31 @@ impl Print for FuncDecl {
 
 impl Print for FuncParam {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self { attrs, ty } = *self;
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_type_ascription_suffix(ty),
+            def_without_name: printer.pretty_type_ascription_suffix(ty),
         }
     }
 }
 
 impl Print for FuncAt<'_, ControlNode> {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         let control_node = self.position;
         let ControlNodeDef { kind, outputs } = self.def();
 
         let outputs_header = if !outputs.is_empty() {
             let mut outputs = outputs.iter().enumerate().map(|(output_idx, output)| {
-                let AttrsAndDef { attrs, def } = output.print(printer);
-                pretty::Fragment::new([
-                    attrs,
+                output.print(printer).insert_name_before_def(
                     Value::ControlNodeOutput {
                         control_node,
                         output_idx: output_idx.try_into().unwrap(),
                     }
                     .print_as_def(printer),
-                    def.into(),
-                ])
+                )
             });
             let outputs_lhs = if outputs.len() == 1 {
                 outputs.next().unwrap()
@@ -1897,27 +1875,17 @@ impl Print for FuncAt<'_, ControlNode> {
                         .into_iter()
                         .map(|func_at_inst| {
                             let data_inst_def = func_at_inst.def();
-                            let AttrsAndDef { attrs, mut def } = data_inst_def.print(printer);
-
-                            if data_inst_def.output_type.is_some() {
-                                let header = pretty::Fragment::new([
-                                    Use::DataInstOutput(func_at_inst.position)
-                                        .print_as_def(printer),
-                                    " =".into(),
-                                ]);
-                                // FIXME(eddyb) the reindenting here hurts more than
-                                // it helps, maybe it needs some heuristics?
-                                def = pretty::Fragment::new([
-                                    header,
-                                    if false {
-                                        pretty::join_space("", [def])
-                                    } else {
-                                        pretty::Fragment::new([" ".into(), def])
-                                    },
-                                ]);
-                            }
-
-                            pretty::Fragment::new([attrs, def.into()])
+                            data_inst_def.print(printer).insert_name_before_def(
+                                if data_inst_def.output_type.is_none() {
+                                    pretty::Fragment::default()
+                                } else {
+                                    pretty::Fragment::new([
+                                        Use::DataInstOutput(func_at_inst.position)
+                                            .print_as_def(printer),
+                                        " = ".into(),
+                                    ])
+                                },
+                            )
                         })
                         .flat_map(|entry| [pretty::Node::ForceLineSeparation.into(), entry]),
                 )
@@ -1929,19 +1897,19 @@ impl Print for FuncAt<'_, ControlNode> {
 
 impl Print for ControlNodeOutputDecl {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self { attrs, ty } = *self;
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def: printer.pretty_type_ascription_suffix(ty),
+            def_without_name: printer.pretty_type_ascription_suffix(ty),
         }
     }
 }
 
 impl Print for DataInstDef {
     type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_, '_>) -> AttrsAndDef {
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
             attrs,
             kind,
@@ -1960,7 +1928,7 @@ impl Print for DataInstDef {
             DataInstKind::SpvInst(spv::Inst { opcode, ref imms }) => {
                 return AttrsAndDef {
                     attrs,
-                    def: printer.pretty_spv_inst(
+                    def_without_name: printer.pretty_spv_inst(
                         printer.declarative_keyword_style(),
                         opcode,
                         imms,
@@ -1990,7 +1958,7 @@ impl Print for DataInstDef {
 
         // FIXME(eddyb) deduplicate the "parens + optional type ascription"
         // logic with `pretty_spv_inst`.
-        let def = pretty::Fragment::new([
+        let def_without_name = pretty::Fragment::new([
             header,
             pretty::join_comma_sep("(", inputs.iter().map(|v| v.print(printer)), ")"),
             output_type
@@ -1998,13 +1966,16 @@ impl Print for DataInstDef {
                 .unwrap_or_default(),
         ]);
 
-        AttrsAndDef { attrs, def }
+        AttrsAndDef {
+            attrs,
+            def_without_name,
+        }
     }
 }
 
 impl Print for cfg::ControlInst {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         let Self {
             attrs,
             kind,
@@ -2142,7 +2113,7 @@ impl Print for cfg::ControlInst {
 
 impl Value {
     /// Common implementation for `Value::print` and `Value::print_as_def`.
-    fn print_as_ref_or_def(&self, printer: &Printer<'_, '_>, is_def: bool) -> pretty::Fragment {
+    fn print_as_ref_or_def(&self, printer: &Printer<'_>, is_def: bool) -> pretty::Fragment {
         let value_use = match *self {
             Self::Const(ct) => Use::CxInterned(CxInterned::Const(ct)),
             Self::FuncParam { idx } => return format!("param{}", idx).into(),
@@ -2162,14 +2133,14 @@ impl Value {
         }
     }
 
-    fn print_as_def(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print_as_def(&self, printer: &Printer<'_>) -> pretty::Fragment {
         self.print_as_ref_or_def(printer, true)
     }
 }
 
 impl Print for Value {
     type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_, '_>) -> pretty::Fragment {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         self.print_as_ref_or_def(printer, false)
     }
 }
