@@ -7,9 +7,9 @@ fn main() -> std::io::Result<()> {
         [_, in_file] => {
             let in_file_path = Path::new(in_file);
 
-            let dump_after = |pass, module: &spirt::Module| {
-                let pretty = spirt::print::Plan::for_module(&module).pretty_print();
-                let ext = format!("after.{}.spirt", pass);
+            let save_print_plan = |suffix: &str, plan: spirt::print::Plan| {
+                let pretty = plan.pretty_print();
+                let ext = format!("{suffix}.spirt");
 
                 // FIXME(eddyb) don't allocate whole `String`s here.
                 fs::write(in_file_path.with_extension(&ext), pretty.to_string())?;
@@ -33,6 +33,20 @@ fn main() -> std::io::Result<()> {
 
             let cx = Rc::new(spirt::Context::new());
 
+            let multi_version_printing = true;
+            let mut per_pass_module = vec![];
+            let mut after_pass = |pass, module: &spirt::Module| {
+                if multi_version_printing {
+                    per_pass_module.push((pass, module.clone()));
+                    Ok(())
+                } else {
+                    save_print_plan(
+                        &format!("after.{pass}"),
+                        spirt::print::Plan::for_module(module),
+                    )
+                }
+            };
+
             let mut module =
                 eprint_duration(|| spirt::Module::lower_from_spv_file(cx.clone(), in_file_path))?;
             eprintln!("Module::lower_from_spv_file({})", in_file_path.display());
@@ -48,11 +62,24 @@ fn main() -> std::io::Result<()> {
                 original_export_count,
                 module.exports.len()
             );
-            dump_after("minimize_exports", &module)?;
+            after_pass("minimize_exports", &module)?;
 
             eprint_duration(|| spirt::passes::link::resolve_imports(&mut module));
             eprintln!("link::resolve_imports");
-            dump_after("resolve_imports", &module)?;
+            after_pass("resolve_imports", &module)?;
+
+            if multi_version_printing {
+                // FIXME(eddyb) use a better suffix than `link` (or none).
+                save_print_plan(
+                    "link",
+                    spirt::print::Plan::for_versions(
+                        &cx,
+                        per_pass_module
+                            .iter()
+                            .map(|(pass, module)| (format!("after {pass}"), module)),
+                    ),
+                )?;
+            }
 
             Ok(())
         }

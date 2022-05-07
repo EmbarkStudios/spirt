@@ -7,12 +7,12 @@ use std::fmt::Write as _;
 use std::{fmt, iter, mem};
 
 /// Part of a pretty document, made up of `Node`s.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Fragment {
     pub nodes: SmallVec<[Node; 8]>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Node {
     Text(Cow<'static, str>),
 
@@ -47,7 +47,7 @@ pub enum Node {
     IfBlockLayout(&'static str),
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Styles {
     pub anchor: Option<String>,
     pub anchor_is_def: bool,
@@ -157,6 +157,7 @@ impl fmt::Display for FragmentPostLayout {
     }
 }
 
+#[derive(Default)]
 pub struct HtmlSnippet {
     pub head_deduplicatable_elements: IndexSet<String>,
     pub body: String,
@@ -199,6 +200,9 @@ impl FragmentPostLayout {
         let style_elem = "
 <style>
     SCOPE {
+        /* HACK(eddyb) reset default margin to something reasonable. */
+        margin: 1ch;
+
         /* HACK(eddyb) avoid unnecessarily small or thin text. */
         font-size: 15px;
         font-weight: 500;

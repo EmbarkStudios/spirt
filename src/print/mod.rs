@@ -14,7 +14,8 @@ use crate::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
-use std::mem;
+use std::fmt::Write;
+use std::{fmt, mem};
 
 mod pretty;
 
@@ -34,10 +35,29 @@ pub struct Plan<'a> {
     cx: &'a Context,
 
     /// When visiting module-stored nodes, the `Module` is needed to map the
-    /// `Node` to the definition, which is then stored in `node_defs`.
+    /// `Node` to the (per-version) definition, which is then stored in the
+    /// (per-version) `FxHashMap` within `per_version_name_and_node_defs`.
     current_module: Option<&'a Module>,
 
-    node_defs: FxHashMap<Node, &'a dyn DynNodeDef<'a>>,
+    /// Versions allow comparing multiple copies of the same e.g. `Module`,
+    /// with definitions sharing a `Node` key being shown together.
+    ///
+    /// Each `per_version_name_and_node_defs` entry contains a "version" with:
+    /// * a descriptive name (e.g. the name of a pass that produced that version)
+    ///   * the name is left empty in the default single-version mode
+    /// * its `Node` definitions (dynamic via the `DynNodeDef` helper trait)
+    ///
+    /// Specific `Node`s may be present in only a subset of versions, and such
+    /// a distinction will be reflected in the output.
+    ///
+    /// For `Node` collection, the last entry consistutes the "active" version.
+    per_version_name_and_node_defs: Vec<(String, FxHashMap<Node, &'a dyn DynNodeDef<'a>>)>,
+
+    /// Merged per-`Use` counts across all versions.
+    ///
+    /// That is, each `Use` maps to the largest count of that `Use` in any version,
+    /// as opposed to their sum. This approach avoids pessimizing e.g. inline
+    /// printing of interned definitions, which may need the use count to be `1`.
     use_counts: FxIndexMap<Use, usize>,
 }
 
@@ -151,21 +171,19 @@ impl Use {
 }
 
 impl<'a> Plan<'a> {
-    pub fn empty(cx: &'a Context) -> Self {
-        Self {
-            cx,
-            current_module: None,
-            node_defs: FxHashMap::default(),
-            use_counts: FxIndexMap::default(),
-        }
-    }
-
     /// Create a `Plan` with all of `root`'s dependencies, followed by `root` itself.
+    //
+    // FIXME(eddyb) consider renaming this and removing the `for_module` shorthand.
     pub fn for_root(
         cx: &'a Context,
         root: &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>),
     ) -> Self {
-        let mut plan = Self::empty(cx);
+        let mut plan = Self {
+            cx,
+            current_module: None,
+            per_version_name_and_node_defs: vec![(String::new(), FxHashMap::default())],
+            use_counts: FxIndexMap::default(),
+        };
         plan.use_node(Node::Root, root);
         plan
     }
@@ -175,6 +193,59 @@ impl<'a> Plan<'a> {
     /// Shorthand for `Plan::for_root(module.cx_ref(), module)`.
     pub fn for_module(module: &'a Module) -> Self {
         Self::for_root(module.cx_ref(), module)
+    }
+
+    /// Create a `Plan` that combines `Plan::for_root` from each version.
+    ///
+    /// Each version has a string, which should contain a descriptive name
+    /// (e.g. the name of a pass that produced that version).
+    ///
+    /// While the roots (and their dependencies) can be entirely unrelated, the
+    /// output won't be very useful in that case. For ideal results, most of the
+    /// same entities (e.g. `GlobalVar` or `Func`) should be in most versions,
+    /// with most of the changes being limited to within their definitions.
+    pub fn for_versions(
+        cx: &'a Context,
+        versions: impl IntoIterator<
+            Item = (
+                impl Into<String>,
+                &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef> + 'a),
+            ),
+        >,
+    ) -> Self {
+        let mut plan = Self {
+            cx,
+            current_module: None,
+            per_version_name_and_node_defs: vec![],
+            use_counts: FxIndexMap::default(),
+        };
+        for (version_name, version_root) in versions {
+            let mut combined_use_counts = mem::take(&mut plan.use_counts);
+            plan.per_version_name_and_node_defs
+                .push((version_name.into(), FxHashMap::default()));
+
+            plan.use_node(Node::Root, version_root);
+
+            // Merge use counts (from second version onward).
+            if !combined_use_counts.is_empty() {
+                for (use_kind, new_count) in plan.use_counts.drain(..) {
+                    let count = combined_use_counts.entry(use_kind).or_default();
+                    *count = new_count.max(*count);
+                }
+                plan.use_counts = combined_use_counts;
+            }
+        }
+
+        // HACK(eddyb) avoid having `Node::Root` before any of its dependencies,
+        // but without having to go through the non-trivial approach of properly
+        // interleaving all the nodes, from each version, together.
+        {
+            let (map, k) = (&mut plan.use_counts, Use::Node(Node::Root));
+            // FIXME(eddyb) this is effectively a "rotate" operation.
+            map.shift_remove(&k).map(|v| map.insert(k, v));
+        }
+
+        plan
     }
 
     /// Add `interned` to the plan, after all of its dependencies.
@@ -216,7 +287,8 @@ impl<'a> Plan<'a> {
             return;
         }
 
-        match self.node_defs.entry(node) {
+        let (_, node_defs) = self.per_version_name_and_node_defs.last_mut().unwrap();
+        match node_defs.entry(node) {
             Entry::Occupied(entry) => {
                 assert!(
                     std::ptr::eq(*entry.get(), node_def),
@@ -272,6 +344,12 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
 
     fn visit_module(&mut self, module: &'a Module) {
+        assert!(
+            std::ptr::eq(self.cx, &**module.cx_ref()),
+            "print: `Plan::visit_module` does not support `Module`s from a \
+             different `Context` than the one it was initially created with",
+        );
+
         let old_module = self.current_module.replace(module);
         module.inner_visit_with(self);
         self.current_module = old_module;
@@ -347,18 +425,199 @@ impl Visit for AllCxInterned {
     fn visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {}
 }
 
-impl Plan<'_> {
-    /// Print the whole `Plan` to a `pretty::Fragment` and perform layout on it.
-    ///
-    /// The resulting `pretty::FragmentPostLayout` value supports `fmt::Display`
-    /// for convenience, but also more specific methods (e.g. HTML output).
-    pub fn pretty_print(&self) -> pretty::FragmentPostLayout {
-        let pretty = self.print(&Printer::new(self));
+/// Wrapper for handling the difference between single-version and multi-version
+/// output, which aren't expressible in `pretty::Fragment`.
+//
+// FIXME(eddyb) introduce a `pretty::Node` variant capable of handling this,
+// but that's complicated wrt non-HTML output, if they're to also be 2D tables.
+pub enum Versions<PF> {
+    Single(PF),
+    Multiple {
+        // FIXME(eddyb) avoid allocating this if possible.
+        version_names: Vec<String>,
 
+        /// Each node has definitions "tagged" with an `usize` indicating the
+        /// number of versions that share that definition, aka "repeat count"
+        /// (i.e. "repeat counts" larger than `1` indicate deduplication).
+        per_node_versions_with_repeat_count: Vec<SmallVec<[(PF, usize); 1]>>,
+    },
+}
+
+impl fmt::Display for Versions<pretty::FragmentPostLayout> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Single(fragment) => fragment.fmt(f),
+            Self::Multiple {
+                version_names,
+                per_node_versions_with_repeat_count,
+            } => {
+                let mut first = true;
+
+                // HACK(eddyb) this is not the nicest output, but multi-version
+                // is intended for HTML input primarily anyway.
+                for versions_with_repeat_count in per_node_versions_with_repeat_count {
+                    if !first {
+                        writeln!(f)?;
+                    }
+                    first = false;
+
+                    let mut next_version_idx = 0;
+                    let mut any_headings = false;
+                    for (fragment, repeat_count) in versions_with_repeat_count {
+                        // No headings for anything uniform across versions.
+                        if (next_version_idx, *repeat_count) != (0, version_names.len()) {
+                            any_headings = true;
+
+                            if next_version_idx == 0 {
+                                write!(f, "//#IF ")?;
+                            } else {
+                                write!(f, "//#ELSEIF ")?;
+                            }
+                            let mut first_name = true;
+                            for name in &version_names[next_version_idx..][..*repeat_count] {
+                                if !first_name {
+                                    write!(f, " | ")?;
+                                }
+                                first_name = false;
+
+                                write!(f, "`{name}`")?;
+                            }
+                            writeln!(f)?;
+                        }
+
+                        writeln!(f, "{fragment}")?;
+
+                        next_version_idx += repeat_count;
+                    }
+                    if any_headings {
+                        writeln!(f, "//#ENDIF")?;
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Versions<pretty::FragmentPostLayout> {
+    // FIXME(eddyb) provide a non-allocating version.
+    pub fn render_to_html(&self) -> pretty::HtmlSnippet {
+        match self {
+            Self::Single(fragment) => fragment.render_to_html(),
+            Self::Multiple {
+                version_names,
+                per_node_versions_with_repeat_count,
+            } => {
+                // HACK(eddyb) using an UUID as a class name in lieu of "scoped <style>".
+                const TABLE_CLASS_NAME: &str = "spirt-table-90c2056d-5b38-4644-824a-b4be1c82f14d";
+
+                let mut html = pretty::HtmlSnippet::default();
+                html.head_deduplicatable_elements.insert(
+                    "
+<style>
+    SCOPE {
+        border-collapse: collapse;
+    }
+    SCOPE>tbody>tr>*:not(:only-child) {
+        border: solid 1px;
+    }
+    SCOPE>tbody>tr>th {
+        /* HACK(eddyb) these are relative to `pretty`'s own HTML styles. */
+        font-size: 17px;
+        font-weight: 700;
+
+        font-style: italic;
+    }
+</style>
+        "
+                    .replace("SCOPE", &format!("table.{TABLE_CLASS_NAME}")),
+                );
+
+                let headings = {
+                    let mut h = "<tr>".to_string();
+                    for name in version_names {
+                        write!(h, "<th><code>{name}</code></th>").unwrap();
+                    }
+                    h + "</tr>\n"
+                };
+
+                html.body = format!("<table class=\"{TABLE_CLASS_NAME}\" style=\"\">\n");
+                let mut last_was_uniform = true;
+                for versions_with_repeat_count in per_node_versions_with_repeat_count {
+                    let is_uniform = match versions_with_repeat_count[..] {
+                        [(_, repeat_count)] => repeat_count == version_names.len(),
+                        _ => false,
+                    };
+
+                    if last_was_uniform && is_uniform {
+                        // Headings unnecessary, they would be between uniform
+                        // rows (or at the very start, before an uniform row).
+                    } else {
+                        // Repeat the headings often, where necessary.
+                        html.body += &headings;
+                    }
+                    last_was_uniform = is_uniform;
+
+                    html.body += "<tr>\n";
+                    for (fragment, repeat_count) in versions_with_repeat_count {
+                        writeln!(html.body, "<td colspan=\"{repeat_count}\">").unwrap();
+
+                        let pretty::HtmlSnippet {
+                            head_deduplicatable_elements: fragment_head,
+                            body: fragment_body,
+                        } = fragment.render_to_html();
+                        html.head_deduplicatable_elements.extend(fragment_head);
+                        html.body += &fragment_body;
+
+                        html.body += "</td>\n";
+                    }
+                    html.body += "</tr>\n";
+                }
+                html.body += "</table>";
+
+                html
+            }
+        }
+    }
+}
+
+impl<PF> Versions<PF> {
+    fn map_pretty_fragments<PF2>(self, f: impl Fn(PF) -> PF2) -> Versions<PF2> {
+        match self {
+            Versions::Single(fragment) => Versions::Single(f(fragment)),
+            Versions::Multiple {
+                version_names,
+                per_node_versions_with_repeat_count,
+            } => Versions::Multiple {
+                version_names,
+                per_node_versions_with_repeat_count: per_node_versions_with_repeat_count
+                    .into_iter()
+                    .map(|versions_with_repeat_count| {
+                        versions_with_repeat_count
+                            .into_iter()
+                            .map(|(fragment, repeat_count)| (f(fragment), repeat_count))
+                            .collect()
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+impl Plan<'_> {
+    /// Print the whole `Plan` to a `Versions<pretty::Fragment>` and perform
+    /// layout on its `pretty::Fragment`s.
+    ///
+    /// The resulting `Versions<pretty::FragmentPostLayout>` value supports
+    /// `fmt::Display` for convenience, but also more specific methods
+    /// (e.g. HTML output).
+    pub fn pretty_print(&self) -> Versions<pretty::FragmentPostLayout> {
         // FIXME(eddyb) make max line width configurable.
         let max_line_width = 120;
 
-        pretty.layout_with_max_line_width(max_line_width)
+        self.print(&Printer::new(self))
+            .map_pretty_fragments(|fragment| fragment.layout_with_max_line_width(max_line_width))
     }
 }
 
@@ -516,21 +775,14 @@ impl<'a> Printer<'a> {
             })
             .collect();
 
-        let func_defs = plan.node_defs.iter().filter_map(|(&node, &def)| {
-            match (node, def.downcast_as_func_decl()) {
-                (
-                    Node::Func(func),
-                    Some(FuncDecl {
-                        def: DeclDef::Present(func_def_body),
-                        ..
-                    }),
-                ) => Some((func, func_def_body)),
-
+        let all_funcs = plan
+            .use_counts
+            .keys()
+            .filter_map(|&use_kind| match use_kind {
+                Use::Node(Node::Func(func)) => Some(func),
                 _ => None,
-            }
-        });
-
-        for (func, func_def_body) in func_defs {
+            });
+        for func in all_funcs {
             assert!(matches!(
                 use_styles.get(&Use::Node(Node::Func(func))),
                 Some(UseStyle::Anon { .. })
@@ -539,61 +791,82 @@ impl<'a> Printer<'a> {
             let mut control_pointer_label_counter = 0;
             let mut value_counter = 0;
 
-            for point in func_def_body.cfg.rev_post_order(func_def_body) {
-                if let Some(use_style) = use_styles.get_mut(&Use::ControlPointLabel(point)) {
-                    let idx = control_pointer_label_counter;
-                    control_pointer_label_counter += 1;
-                    *use_style = UseStyle::Anon {
-                        parent_func: Some(func),
-                        idx,
-                    };
-                }
+            let func_def_bodies_across_versions = plan
+                .per_version_name_and_node_defs
+                .iter()
+                .filter_map(|(_, node_defs)| {
+                    match node_defs.get(&Node::Func(func))?.downcast_as_func_decl()? {
+                        FuncDecl {
+                            def: DeclDef::Present(func_def_body),
+                            ..
+                        } => Some(func_def_body),
 
-                // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
-                // instead of `Entry`, because they don't have have `Entry`s.
-                let can_uniquely_visit =
-                    match func_def_body.control_nodes[point.control_node()].kind {
-                        ControlNodeKind::UnstructuredMerge => {
-                            assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                            true
-                        }
-                        _ => matches!(point, cfg::ControlPoint::Entry(_)),
-                    };
+                        _ => None,
+                    }
+                });
 
-                if !can_uniquely_visit {
-                    continue;
-                }
-
-                let control_node = point.control_node();
-                let ControlNodeDef { kind, outputs } = &*func_def_body.control_nodes[control_node];
-
-                let block_insts = match *kind {
-                    ControlNodeKind::UnstructuredMerge => None,
-                    ControlNodeKind::Block { insts } => insts,
-                };
-
-                let defined_values = func_def_body
-                    .at(block_insts)
-                    .into_iter()
-                    .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
-                    .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
-                    .chain(
-                        outputs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, _)| Use::ControlNodeOutput {
-                                control_node,
-                                output_idx: i.try_into().unwrap(),
-                            }),
-                    );
-                for use_kind in defined_values {
-                    if let Some(use_style) = use_styles.get_mut(&use_kind) {
-                        let idx = value_counter;
-                        value_counter += 1;
+            for func_def_body in func_def_bodies_across_versions {
+                for point in func_def_body.cfg.rev_post_order(func_def_body) {
+                    // Only assign a new index if this `ControlPointLabel` is
+                    // new in this version (and absent from previous ones).
+                    if let Some(use_style @ UseStyle::Inline) =
+                        use_styles.get_mut(&Use::ControlPointLabel(point))
+                    {
+                        let idx = control_pointer_label_counter;
+                        control_pointer_label_counter += 1;
                         *use_style = UseStyle::Anon {
                             parent_func: Some(func),
                             idx,
                         };
+                    }
+
+                    // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
+                    // instead of `Entry`, because they don't have have `Entry`s.
+                    let can_uniquely_visit =
+                        match func_def_body.control_nodes[point.control_node()].kind {
+                            ControlNodeKind::UnstructuredMerge => {
+                                assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                                true
+                            }
+                            _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                        };
+
+                    if !can_uniquely_visit {
+                        continue;
+                    }
+
+                    let control_node = point.control_node();
+                    let ControlNodeDef { kind, outputs } =
+                        &*func_def_body.control_nodes[control_node];
+
+                    let block_insts = match *kind {
+                        ControlNodeKind::UnstructuredMerge => None,
+                        ControlNodeKind::Block { insts } => insts,
+                    };
+
+                    let defined_values =
+                        func_def_body
+                            .at(block_insts)
+                            .into_iter()
+                            .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
+                            .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
+                            .chain(outputs.iter().enumerate().map(|(i, _)| {
+                                Use::ControlNodeOutput {
+                                    control_node,
+                                    output_idx: i.try_into().unwrap(),
+                                }
+                            }));
+                    for use_kind in defined_values {
+                        // Only assign a new index if this `Value` definition is
+                        // new in this version (and absent from previous ones)
+                        if let Some(use_style @ UseStyle::Inline) = use_styles.get_mut(&use_kind) {
+                            let idx = value_counter;
+                            value_counter += 1;
+                            *use_style = UseStyle::Anon {
+                                parent_func: Some(func),
+                                idx,
+                            };
+                        }
                     }
                 }
             }
@@ -872,11 +1145,12 @@ impl Use {
                     // Disambiguate intra-function anchors (labels/values) by
                     // prepending a prefix of the form `func123_`.
                     let func = Use::Node(Node::Func(func));
+                    let func_category = func.category();
                     let func_idx = match printer.use_styles[&func] {
                         UseStyle::Anon { idx, .. } => idx,
                         _ => unreachable!(),
                     };
-                    format!("{}{}_{}", func.category(), func_idx, name)
+                    format!("{func_category}{func_idx}.{name}")
                 } else {
                     // FIXME(eddyb) avoid having to clone `String`s here.
                     name.clone()
@@ -967,33 +1241,85 @@ impl Print for Func {
 // *not* any uses (which go through the `Print` impls above).
 
 impl Print for Plan<'_> {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        pretty::Fragment::new(
-            printer
-                .use_styles
-                .keys()
-                .filter_map(|use_kind| match use_kind {
-                    Use::Node(node) => Some(node),
-                    _ => None,
-                })
-                .map(|&node| {
-                    self.node_defs[&node].print(printer).insert_name_before_def(
-                        if node.category().is_err() {
-                            pretty::Fragment::default()
-                        } else {
-                            Use::Node(node).print_as_def(printer)
-                        },
-                    )
-                })
-                .filter(|fragment| !fragment.nodes.is_empty())
-                .intersperse({
-                    // Separate top-level definitions with empty lines.
-                    // FIXME(eddyb) have an explicit `pretty::Node`
-                    // for "vertical gap" instead.
-                    "\n\n".into()
-                }),
-        )
+    type Output = Versions<pretty::Fragment>;
+    fn print(&self, printer: &Printer<'_>) -> Versions<pretty::Fragment> {
+        let num_versions = self.per_version_name_and_node_defs.len();
+        let per_node_versions_with_repeat_count = printer
+            .use_styles
+            .keys()
+            .filter_map(|&use_kind| match use_kind {
+                Use::Node(node) => Some(node),
+                _ => None,
+            })
+            .map(|node| -> SmallVec<[_; 1]> {
+                if num_versions == 0 {
+                    return [].into_iter().collect();
+                }
+
+                let name = if node.category().is_err() {
+                    pretty::Fragment::default()
+                } else {
+                    Use::Node(node).print_as_def(printer)
+                };
+
+                // Avoid printing `AllCxInterned` more than once, it doesn't
+                // really have per-version node definitions in the first place.
+                if let Node::AllCxInterned = node {
+                    // FIXME(eddyb) maybe make `DynNodeDef` `Any`-like, to be
+                    // able to assert that all per-version defs are identical.
+                    return [(
+                        AllCxInterned.print(printer).insert_name_before_def(name),
+                        num_versions,
+                    )]
+                    .into_iter()
+                    .collect();
+                }
+
+                self.per_version_name_and_node_defs
+                    .iter()
+                    .map(move |(_, node_defs)| {
+                        node_defs
+                            .get(&node)
+                            .map(|def| def.print(printer).insert_name_before_def(name.clone()))
+                            .unwrap_or_default()
+                    })
+                    .dedup_with_count()
+                    .map(|(repeat_count, fragment)| {
+                        // FIXME(eddyb) consider rewriting intra-func anchors
+                        // here, post-deduplication, to be unique per-version.
+                        // Additionally, a diff algorithm could be employed, to
+                        // annotate the changes between versions.
+
+                        (fragment, repeat_count)
+                    })
+                    .collect()
+            });
+
+        // Unversioned, flatten the nodes.
+        if num_versions == 1 && self.per_version_name_and_node_defs[0].0 == "" {
+            Versions::Single(pretty::Fragment::new(
+                per_node_versions_with_repeat_count
+                    .map(|mut versions_with_repeat_count| {
+                        versions_with_repeat_count.pop().unwrap().0
+                    })
+                    .filter(|fragment| !fragment.nodes.is_empty())
+                    .intersperse({
+                        // Separate top-level definitions with empty lines.
+                        // FIXME(eddyb) have an explicit `pretty::Node`
+                        // for "vertical gap" instead.
+                        "\n\n".into()
+                    }),
+            ))
+        } else {
+            Versions::Multiple {
+                version_names: self
+                    .per_version_name_and_node_defs
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+                per_node_versions_with_repeat_count: per_node_versions_with_repeat_count.collect(),
+            }
+        }
     }
 }
 

@@ -154,6 +154,7 @@ impl<I: sealed::Interned> std::ops::Index<I> for Context {
 ///
 /// By design there is no way to iterate the contents of an `EntityDefs`, or
 /// generate entity indices without defining the entity in an `EntityDefs`.
+#[derive(Clone)]
 pub struct EntityDefs<E: sealed::Entity> {
     /// Entities are grouped into chunks, with per-entity-type chunk sizes
     /// (powers of 2) specified via `entities!` below.
@@ -299,6 +300,7 @@ impl<E: sealed::Entity, V> EntityOrientedMapKey<V> for E {
 /// By design there is no way to iterate the entries in an `EntityOrientedDenseMap`.
 //
 // FIXME(eddyb) implement a "sparse" version as well, and maybe some bitsets?
+#[derive(Clone)]
 pub struct EntityOrientedDenseMap<K: EntityOrientedMapKey<V>, V> {
     /// Like in `EntityDefs`, entities are grouped into chunks, but there is no
     /// flattening, since arbitrary insertion orders have to be supported.
@@ -309,6 +311,7 @@ pub struct EntityOrientedDenseMap<K: EntityOrientedMapKey<V>, V> {
 // since the ideal state is one chunk per map, the slow case might never be hit,
 // unless one `EntityOrientedDenseMap` is used with more than one `EntityDefs`,
 // which could still maybe be implemented more efficiently than `FxHashMap`.
+#[derive(Clone)]
 enum SmallFxHashMap<K, V> {
     Empty,
     One(K, V),
@@ -560,6 +563,7 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityListIter<E> {
 //
 // FIXME(eddyb) `Deref`/`DerefMut` aren't the best API, could this be hidden
 // further by making `EntityDefs` hide the list links in the `Index` impl?
+#[derive(Clone)]
 pub struct EntityListNode<E: sealed::Entity<Def = Self>, D> {
     prev: Option<E>,
     next: Option<E>,

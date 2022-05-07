@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
 /// (`ControlInst`s) attached to `ControlNode`-relative CFG points (`ControlPoint`s).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ControlFlowGraph {
     pub control_insts: EntityOrientedDenseMap<ControlPoint, ControlInst>,
 }
@@ -61,6 +61,7 @@ impl<V> EntityOrientedMapKey<V> for ControlPoint {
     }
 }
 
+#[derive(Clone)]
 pub struct ControlInst {
     pub attrs: AttrSet,
 
@@ -77,6 +78,7 @@ pub struct ControlInst {
     pub target_merge_outputs: FxIndexMap<ControlNode, SmallVec<[Value; 2]>>,
 }
 
+#[derive(Clone)]
 pub enum ControlInstKind {
     /// Reaching this point in the control-flow is undefined behavior, e.g.:
     /// * a `SelectBranch` case that's known to be impossible
@@ -101,10 +103,12 @@ pub enum ControlInstKind {
     SelectBranch(SelectionKind),
 }
 
+#[derive(Clone)]
 pub enum ExitInvocationKind {
     SpvInst(spv::Inst),
 }
 
+#[derive(Clone)]
 pub enum SelectionKind {
     /// Conditional branch on boolean condition, i.e. `if`-`else`.
     BoolCond,

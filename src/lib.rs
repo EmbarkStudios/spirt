@@ -29,6 +29,7 @@ mod sealed {
     use super::*;
     use std::rc::Rc;
 
+    #[derive(Clone)]
     pub struct Module {
         /// Context used for everything interned, in this module.
         ///
@@ -75,10 +76,12 @@ mod sealed {
 }
 pub use sealed::Module;
 
+#[derive(Clone)]
 pub enum ModuleDialect {
     Spv(spv::Dialect),
 }
 
+#[derive(Clone)]
 pub enum ModuleDebugInfo {
     Spv(spv::ModuleDebugInfo),
 }
@@ -199,6 +202,7 @@ pub enum ConstCtor {
 
 /// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,
 /// or only be an import of a definition (e.g. from another module).
+#[derive(Clone)]
 pub enum DeclDef<D> {
     Imported(Import),
     Present(D),
@@ -210,6 +214,7 @@ pub enum Import {
     LinkName(InternedStr),
 }
 
+#[derive(Clone)]
 pub struct GlobalVarDecl {
     pub attrs: AttrSet,
 
@@ -228,11 +233,13 @@ pub enum AddrSpace {
     SpvStorageClass(u32),
 }
 
+#[derive(Clone)]
 pub struct GlobalVarDefBody {
     /// If `Some`, the global variable will start out with the specified value.
     pub initializer: Option<Const>,
 }
 
+#[derive(Clone)]
 pub struct FuncDecl {
     pub attrs: AttrSet,
 
@@ -243,12 +250,14 @@ pub struct FuncDecl {
     pub def: DeclDef<FuncDefBody>,
 }
 
+#[derive(Copy, Clone)]
 pub struct FuncParam {
     pub attrs: AttrSet,
 
     pub ty: Type,
 }
 
+#[derive(Clone)]
 pub struct FuncDefBody {
     pub data_insts: EntityDefs<DataInst>,
     pub control_nodes: EntityDefs<ControlNode>,
@@ -419,6 +428,7 @@ impl FuncDefBody {
 ///
 /// Also, regions could include `DataInst`s more directly (as simpler nodes),
 /// than merely having a `ControlNode` container for them (`ControlNodeKind::Block`).
+#[derive(Clone)]
 pub struct ControlRegion {
     pub children: EntityList<ControlNode>,
 
@@ -447,6 +457,7 @@ pub struct ControlRegion {
 /// mainly exists as an intermediary state during lowering to structured regions.
 //
 // FIXME(eddyb) fully implement CFG structurization.
+#[derive(Clone)]
 pub struct ControlNodeDef {
     pub kind: ControlNodeKind,
     pub outputs: SmallVec<[ControlNodeOutputDecl; 2]>,
@@ -459,6 +470,7 @@ pub struct ControlNodeOutputDecl {
     pub ty: Type,
 }
 
+#[derive(Clone)]
 pub enum ControlNodeKind {
     /// Helper `ControlNode` used for conversions between a CFG and structured regions,
     /// potentially having `ControlNodeOutputDecl`s with values provided externally.
@@ -476,6 +488,7 @@ pub enum ControlNodeKind {
     },
 }
 
+#[derive(Clone)]
 pub struct DataInstDef {
     pub attrs: AttrSet,
 
@@ -487,7 +500,7 @@ pub struct DataInstDef {
     pub inputs: SmallVec<[Value; 2]>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum DataInstKind {
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.

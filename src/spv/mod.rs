@@ -12,6 +12,7 @@ pub mod read;
 pub mod spec;
 pub mod write;
 
+#[derive(Clone)]
 pub struct Dialect {
     pub version_major: u8,
     pub version_minor: u8,
@@ -23,6 +24,7 @@ pub struct Dialect {
     pub memory_model: u32,
 }
 
+#[derive(Clone)]
 pub struct ModuleDebugInfo {
     pub original_generator_magic: Option<NonZeroU32>,
 
@@ -31,13 +33,13 @@ pub struct ModuleDebugInfo {
     pub module_processes: Vec<String>,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DebugSourceLang {
     pub lang: u32,
     pub version: u32,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DebugSources {
     pub file_contents: FxIndexMap<InternedStr, String>,
 }
