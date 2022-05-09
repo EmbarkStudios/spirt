@@ -517,6 +517,8 @@ impl Versions<pretty::FragmentPostLayout> {
                     "
 <style>
     SCOPE {
+        min-width: 100%;
+
         border-collapse: collapse;
     }
     SCOPE>tbody>tr>*:not(:only-child) {
@@ -528,6 +530,15 @@ impl Versions<pretty::FragmentPostLayout> {
         font-weight: 700;
 
         font-style: italic;
+    }
+    SCOPE>tbody>tr>td {
+        vertical-align: top;
+
+        /* HACK(eddyb) force local scroll when table isn't wide enough. */
+        max-width: 40ch;
+    }
+    SCOPE>tbody>tr>td>pre {
+        overflow-x: auto;
     }
 </style>
         "
