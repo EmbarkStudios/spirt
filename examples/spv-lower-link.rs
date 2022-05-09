@@ -64,6 +64,12 @@ fn main() -> std::io::Result<()> {
             );
             after_pass("minimize_exports", &module)?;
 
+            // HACK(eddyb) do this late enough to avoid spending time on unused
+            // functions, which `link::minimize_exports` makes unreachable.
+            eprint_duration(|| spirt::passes::legalize::structurize_func_cfgs(&mut module));
+            eprintln!("legalize::structurize_func_cfgs");
+            after_pass("structurize_func_cfgs", &module)?;
+
             eprint_duration(|| spirt::passes::link::resolve_imports(&mut module));
             eprintln!("link::resolve_imports");
             after_pass("resolve_imports", &module)?;

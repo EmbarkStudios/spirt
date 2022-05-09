@@ -1,7 +1,7 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityOrientedDenseMap,
+    spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityList, EntityOrientedDenseMap,
     EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, Value,
 };
 use smallvec::SmallVec;
@@ -137,14 +137,14 @@ impl ControlFlowGraph {
     ) -> impl DoubleEndedIterator<Item = ControlPoint> {
         let mut post_order = SmallVec::<[_; 8]>::new();
         {
-            let mut visited = EntityOrientedDenseMap::new();
+            let mut incoming_edge_counts = EntityOrientedDenseMap::new();
             self.post_order_step(
                 func_def_body.at(ControlPoint::Entry(
                     func_def_body.body.children.iter().first,
                 )),
                 &ControlRegionSuccessor::Return,
-                &mut visited,
-                &mut post_order,
+                &mut incoming_edge_counts,
+                &mut |point| post_order.push(point),
             );
         }
 
@@ -157,7 +157,7 @@ enum ControlRegionSuccessor<'a> {
     /// No structural exit allowed, only `ControlInst`.
     Unstructured,
 
-    /// Structural return implied by exiting a function body.
+    /// Structural return implied by leaving a function body.
     Return,
 
     /// The `ControlRegion` has a parent `ControlNode`, which must also be exited.
@@ -167,27 +167,59 @@ enum ControlRegionSuccessor<'a> {
     },
 }
 
+// HACK(eddyb) this only serves to disallow accessing `private_count` field of
+// `IncomingEdgeCount`.
+mod sealed {
+    /// Opaque newtype for the count of incoming edges (into a `ControlPoint`).
+    ///
+    /// The private field prevents direct mutation or construction, forcing the
+    /// use of `IncomingEdgeCount::ONE` and addition operations to produce some
+    /// specific count (which would require explicit workarounds for misuse).
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    pub(super) struct IncomingEdgeCount(usize);
+
+    impl IncomingEdgeCount {
+        pub(super) const ONE: Self = Self(1);
+    }
+
+    impl std::ops::Add for IncomingEdgeCount {
+        type Output = Self;
+        fn add(self, other: Self) -> Self {
+            Self(self.0 + other.0)
+        }
+    }
+
+    impl std::ops::AddAssign for IncomingEdgeCount {
+        fn add_assign(&mut self, other: Self) {
+            *self = *self + other;
+        }
+    }
+}
+use sealed::IncomingEdgeCount;
+
 impl ControlFlowGraph {
     fn post_order_step(
         &self,
         func_at_point: FuncAt<ControlPoint>,
         region_successor: &ControlRegionSuccessor<'_>,
-        // FIXME(eddyb) use a dense entity-oriented bitset here instead.
-        visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
-        post_order: &mut SmallVec<[ControlPoint; 8]>,
+        incoming_edge_counts: &mut EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
+        post_order_visit: &mut impl FnMut(ControlPoint),
     ) {
         let point = func_at_point.position;
-        let already_visited = visited.insert(point, ()).is_some();
-        if already_visited {
+
+        // FIXME(eddyb) `EntityOrientedDenseMap` should have an `entry` API.
+        if let Some(existing_count) = incoming_edge_counts.get_mut(point) {
+            *existing_count += IncomingEdgeCount::ONE;
             return;
         }
+        incoming_edge_counts.insert(point, IncomingEdgeCount::ONE);
 
         let mut visit_target = |target, new_region_successor: &_| {
             self.post_order_step(
                 func_at_point.at(target),
                 new_region_successor,
-                visited,
-                post_order,
+                incoming_edge_counts,
+                post_order_visit,
             );
         };
         if let Some(control_inst) = self.control_insts.get(point) {
@@ -260,6 +292,159 @@ impl ControlFlowGraph {
                 }
             }
         }
-        post_order.push(point);
+
+        post_order_visit(point);
+    }
+}
+
+pub struct Structurizer<'a> {
+    func_def_body: &'a mut FuncDefBody,
+    incoming_edge_counts: EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
+}
+
+/// An "(incoming) edge bundle" is a subset of the edges into a single `target`.
+///
+/// When `accumulated_count` reaches the total `IncomingEdgeCount` for `target`,
+/// that `IncomingEdgeBundle` is said to "effectively own" its `target` (akin to
+/// the more commonly used CFG domination relation, but more "incremental").
+#[derive(Copy, Clone)]
+struct IncomingEdgeBundle {
+    target: ControlPoint,
+    accumulated_count: IncomingEdgeCount,
+}
+
+/// Partially structurized `ControlRegion`.
+struct PartialControlRegion {
+    // FIXME(eddyb) maybe `EntityList` should really be able to be empty,
+    // but that messes with the ability of
+    children: Option<EntityList<ControlNode>>,
+
+    successor: PartialControlRegionSuccessor,
+}
+
+/// The logical continuation of a partially structurized `ControlRegion`.
+enum PartialControlRegionSuccessor {
+    /// Leave structural control-flow, using the `ControlInst`.
+    //
+    // FIXME(eddyb) fully implement CFG structurization, which shouldn't need this.
+    Unstructured(ControlInst),
+}
+
+impl<'a> Structurizer<'a> {
+    pub fn new(func_def_body: &'a mut FuncDefBody) -> Self {
+        let mut incoming_edge_counts = EntityOrientedDenseMap::new();
+        func_def_body.cfg.post_order_step(
+            func_def_body.at(ControlPoint::Entry(
+                func_def_body.body.children.iter().first,
+            )),
+            &ControlRegionSuccessor::Return,
+            &mut incoming_edge_counts,
+            &mut |_| {},
+        );
+        Self {
+            func_def_body,
+            incoming_edge_counts,
+        }
+    }
+
+    pub fn try_structurize_func(mut self) {
+        let entry_edge = IncomingEdgeBundle {
+            target: ControlPoint::Entry(self.func_def_body.body.children.iter().first),
+            accumulated_count: IncomingEdgeCount::ONE,
+        };
+        if let Ok(body_region) = self.try_claim_edge_bundle(entry_edge) {
+            let PartialControlRegion {
+                children,
+                successor,
+            } = body_region;
+
+            // FIXME(eddyb) make e.g. a dummy block when childless.
+            if let Some(children) = children {
+                self.func_def_body.body.children = children;
+                match successor {
+                    PartialControlRegionSuccessor::Unstructured(control_inst) => {
+                        self.func_def_body
+                            .cfg
+                            .control_insts
+                            .insert(ControlPoint::Exit(children.iter().last), control_inst);
+                    }
+                }
+            }
+        }
+    }
+
+    fn try_claim_edge_bundle(
+        &mut self,
+        edge_bundle: IncomingEdgeBundle,
+    ) -> Result<PartialControlRegion, ()> {
+        if self.incoming_edge_counts[edge_bundle.target] != edge_bundle.accumulated_count {
+            return Err(());
+        }
+
+        // Entering a block implies the block itself, and also exiting the block.
+        if let ControlPoint::Entry(control_node) = edge_bundle.target {
+            if let ControlNodeKind::Block { .. } =
+                self.func_def_body.control_nodes[control_node].kind
+            {
+                let mut region = self
+                    .try_claim_edge_bundle(IncomingEdgeBundle {
+                        target: ControlPoint::Exit(control_node),
+                        accumulated_count: IncomingEdgeCount::ONE,
+                    })
+                    .unwrap();
+
+                region.children = Some(EntityList::insert_first(
+                    region.children,
+                    control_node,
+                    &mut self.func_def_body.control_nodes,
+                ));
+
+                return Ok(region);
+            }
+        }
+
+        let control_inst = self
+            .func_def_body
+            .cfg
+            .control_insts
+            .remove(edge_bundle.target)
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "cfg::Structurizer::try_claim_edge_bundle: already claimed \
+                     or the CFG wasn't unstructured in the first place"
+                )
+            });
+
+        {
+            let ControlInst {
+                attrs,
+                kind,
+                inputs,
+                targets,
+                target_merge_outputs,
+            } = &control_inst;
+
+            // FIXME(eddyb) this loses `attrs`.
+            let _ = attrs;
+
+            // FIXME(eddyb) support more than merely linear control-flow.
+            if target_merge_outputs.is_empty() {
+                if let ControlInstKind::Branch = kind {
+                    assert!(inputs.is_empty() && targets.len() == 1);
+                    let branch_edge = IncomingEdgeBundle {
+                        target: targets[0],
+                        accumulated_count: IncomingEdgeCount::ONE,
+                    };
+                    if let Ok(region) = self.try_claim_edge_bundle(branch_edge) {
+                        return Ok(region);
+                    }
+                }
+            }
+        }
+
+        Ok(PartialControlRegion {
+            children: None,
+            successor: PartialControlRegionSuccessor::Unstructured(control_inst),
+        })
     }
 }

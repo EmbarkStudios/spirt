@@ -19,6 +19,7 @@ pub mod visit;
 pub mod passes {
     // NOTE(eddyb) inline `mod` to avoid adding APIs here, it's just namespacing.
 
+    pub mod legalize;
     pub mod link;
 }
 

@@ -414,13 +414,21 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
     }
 
     pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        self.get_slot_mut(key)?.as_mut()
+    }
+
+    pub fn remove(&mut self, key: K) -> Option<V> {
+        self.get_slot_mut(key)?.take()
+    }
+
+    fn get_slot_mut(&mut self, key: K) -> Option<&mut Option<V>> {
         let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
         let value_slots = self
             .chunk_start_to_value_slots
             .get_mut(chunk_start)?
             .get_mut(intra_chunk_idx)?;
-        K::get_dense_value_slot_mut(key, value_slots).as_mut()
+        Some(K::get_dense_value_slot_mut(key, value_slots))
     }
 }
 
@@ -458,6 +466,40 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
         EntityListIter {
             first: self.first,
             last: self.last,
+        }
+    }
+
+    /// Insert `new_node` (defined in `defs`) at the start of `old_list`, producing
+    /// a new list. This does not rely on `&mut self` because of the assymmetry
+    /// between `old_list` and the new list (which doesn't need `Option`).
+    //
+    // FIXME(eddyb) the awkwardness of this API could be alleviated by not
+    // requiring `EntityList` to be non-empty.
+    #[track_caller]
+    pub fn insert_first(old_list: Option<Self>, new_node: E, defs: &mut EntityDefs<E>) -> Self {
+        let new_node_def = &mut defs[new_node];
+        assert!(
+            new_node_def.prev.is_none() && new_node_def.next.is_none(),
+            "EntityList::insert_first: new node already linked into a (different?) list"
+        );
+
+        new_node_def.next = old_list.map(|ol| ol.first);
+        if let Some(old_first) = new_node_def.next {
+            let old_first_def = &mut defs[old_first];
+
+            // FIXME(eddyb) this situation should be impossible anyway, as it
+            // involves the `EntityListNode`s links, which should be unforgeable.
+            assert!(
+                old_first_def.prev.is_none(),
+                "invalid EntityList: `first->prev != None`"
+            );
+
+            old_first_def.prev = Some(new_node);
+        }
+
+        Self {
+            first: new_node,
+            last: old_list.map_or(new_node, |ol| ol.last),
         }
     }
 
