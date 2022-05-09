@@ -142,7 +142,7 @@ impl ControlFlowGraph {
                 func_def_body.at(ControlPoint::Entry(
                     func_def_body.body.children.iter().first,
                 )),
-                Ok(&RefList::Empty),
+                &ControlRegionSuccessor::Return,
                 &mut visited,
                 &mut post_order,
             );
@@ -152,20 +152,26 @@ impl ControlFlowGraph {
     }
 }
 
-/// Reference-based singly-linked list (used by `post_order_step` for ancestor nodes).
-enum RefList<'a, T> {
-    Empty,
-    Append(&'a RefList<'a, T>, T),
-}
+/// The logical continuation of a `ControlRegion` (used by `post_order_step`).
+enum ControlRegionSuccessor<'a> {
+    /// No structural exit allowed, only `ControlInst`.
+    Unstructured,
 
-/// Error marker type for `post_order_step` leaving structured control-flow.
-struct OutsideStructuredControlFlow;
+    /// Structural return implied by exiting a function body.
+    Return,
+
+    /// The `ControlRegion` has a parent `ControlNode`, which must also be exited.
+    ExitParent {
+        parent: ControlNode,
+        parent_region_successor: &'a ControlRegionSuccessor<'a>,
+    },
+}
 
 impl ControlFlowGraph {
     fn post_order_step(
         &self,
         func_at_point: FuncAt<ControlPoint>,
-        ancestors: Result<&RefList<ControlNode>, OutsideStructuredControlFlow>,
+        region_successor: &ControlRegionSuccessor<'_>,
         // FIXME(eddyb) use a dense entity-oriented bitset here instead.
         visited: &mut EntityOrientedDenseMap<ControlPoint, ()>,
         post_order: &mut SmallVec<[ControlPoint; 8]>,
@@ -176,13 +182,18 @@ impl ControlFlowGraph {
             return;
         }
 
-        let mut visit_target = |new_ancestors: Result<&_, _>, target| {
-            self.post_order_step(func_at_point.at(target), new_ancestors, visited, post_order);
+        let mut visit_target = |target, new_region_successor: &_| {
+            self.post_order_step(
+                func_at_point.at(target),
+                new_region_successor,
+                visited,
+                post_order,
+            );
         };
         if let Some(control_inst) = self.control_insts.get(point) {
             // With a `ControlInst`, it can be followed regardless of `ControlNodeKind`.
             for &target in &control_inst.targets {
-                visit_target(Err(OutsideStructuredControlFlow), target);
+                visit_target(target, &ControlRegionSuccessor::Unstructured);
             }
         } else {
             // Without a `ControlInst`, edges must be structural/implicit.
@@ -195,20 +206,8 @@ impl ControlFlowGraph {
                 // Blocks don't have `ControlInst`s attached to their `Entry`,
                 // only to their `Exit`, so we pretend here there is an edge
                 // between their `Entry` and `Exit` points.
-                visit_target(ancestors, ControlPoint::Exit(control_node));
+                visit_target(ControlPoint::Exit(control_node), region_successor);
             } else {
-                // FIXME(eddyb) is any of this machinery necessary? it might be
-                // best if the CFG wasn't used at all in the structured parts.
-
-                let ancestors = match ancestors {
-                    Ok(ancestors) => ancestors,
-                    Err(OutsideStructuredControlFlow) => {
-                        unreachable!(
-                            "cfg: missing `ControlInst`, despite having left structured control-flow"
-                        )
-                    }
-                };
-
                 match point {
                     // Entering a `ControlNode` depends entirely on the `ControlNodeKind`.
                     ControlPoint::Entry(_) => {
@@ -219,8 +218,11 @@ impl ControlFlowGraph {
                         };
                         for region in child_regions {
                             visit_target(
-                                Ok(&RefList::Append(ancestors, control_node)),
                                 ControlPoint::Entry(region.children.iter().first),
+                                &ControlRegionSuccessor::ExitParent {
+                                    parent: control_node,
+                                    parent_region_successor: region_successor,
+                                },
                             )
                         }
                     }
@@ -230,20 +232,28 @@ impl ControlFlowGraph {
                         match control_node_def.next_in_list() {
                             // Enter the next sibling in the `ControlRegion`, if one exists.
                             Some(next_control_node) => {
-                                visit_target(Ok(ancestors), ControlPoint::Entry(next_control_node));
+                                visit_target(
+                                    ControlPoint::Entry(next_control_node),
+                                    region_successor,
+                                );
                             }
 
-                            None => match ancestors {
-                                // Exit the parent `ControlNode`, if one exists.
-                                &RefList::Append(ancestors_of_parent, parent) => {
-                                    visit_target(
-                                        Ok(ancestors_of_parent),
-                                        ControlPoint::Exit(parent),
-                                    );
-                                }
+                            // Exit the parent `ControlNode`, if one exists.
+                            None => match region_successor {
+                                ControlRegionSuccessor::Unstructured => unreachable!(
+                                    "cfg: missing `ControlInst`, despite \
+                                     having left structured control-flow"
+                                ),
 
-                                // Exiting the whole function body, structurally, is a noop.
-                                RefList::Empty => {}
+                                ControlRegionSuccessor::Return => {}
+
+                                &ControlRegionSuccessor::ExitParent {
+                                    parent,
+                                    parent_region_successor,
+                                } => visit_target(
+                                    ControlPoint::Exit(parent),
+                                    parent_region_successor,
+                                ),
                             },
                         }
                     }
