@@ -85,15 +85,15 @@ impl Styles {
 
 /// Color palettes built-in for convenience (colors are RGB, as `[u8; 3]`).
 pub mod palettes {
-    /// Minimalist palette, chosen to work well on white background, but also
-    /// with "automatic dark mode" styles.
+    /// Minimalist palette, chosen to work with both light and dark backgrounds.
     pub mod simple {
-        pub const RED: [u8; 3] = [0xcc, 0x33, 0x33];
-        pub const GREEN: [u8; 3] = [0x33, 0x99, 0x33];
-        pub const BLUE: [u8; 3] = [0x33, 0x33, 0xcc];
-        pub const YELLOW: [u8; 3] = [0xcc, 0x99, 0x33];
-        pub const MAGENTA: [u8; 3] = [0xcc, 0x33, 0xcc];
-        pub const CYAN: [u8; 3] = [0x33, 0x99, 0xcc];
+        pub const DARK_GRAY: [u8; 3] = [0x44, 0x44, 0x44];
+        pub const RED: [u8; 3] = [0xcc, 0x55, 0x55];
+        pub const GREEN: [u8; 3] = [0x44, 0x99, 0x44];
+        pub const BLUE: [u8; 3] = [0x44, 0x66, 0xcc];
+        pub const YELLOW: [u8; 3] = [0xcc, 0x99, 0x44];
+        pub const MAGENTA: [u8; 3] = [0xcc, 0x44, 0xcc];
+        pub const CYAN: [u8; 3] = [0x44, 0x99, 0xcc];
     }
 }
 
@@ -164,6 +164,47 @@ pub struct HtmlSnippet {
 }
 
 impl HtmlSnippet {
+    /// Inject (using JavaScript) the ability to use `?dark` to choose a simple
+    /// "dark mode" (only different default background and foreground colors),
+    /// auto-detection using media queries, and `?light` to force-disable it.
+    pub fn with_dark_mode_support(&mut self) -> &mut Self {
+        self.head_deduplicatable_elements.insert(
+            r#"
+<script>
+    (function() {
+        var params = new URLSearchParams(document.location.search);
+        var dark = params.has("dark"), light = params.has("light");
+        if(dark || light) {
+            if(dark && !light)
+                document.documentElement.classList.add("simple-dark-theme");
+        } else if(matchMedia("(prefers-color-scheme: dark)").matches) {
+            // FIXME(eddyb) also use media queries in CSS directly, to ensure dark mode
+            // still works with JS disabled (sadly that likely requires CSS duplication).
+            document.location.search += (document.location.search ? "&" : "?") + "dark";
+        }
+    })();
+</script>
+
+<style>
+    /* HACK(eddyb) `[data-darkreader-scheme="dark"]` is for detecting Dark Reader,
+      as its own automatic detection of websites with built-in dark themes
+      (https://github.com/darkreader/darkreader/pull/7995) isn't on by default,
+      and the result is jarring when both dark modes combine. */
+
+    html.simple-dark-theme:not([data-darkreader-scheme="dark"]) {
+        background: #16181a;
+        color: #dbd8d6;
+
+        /* Request browser UI elements to be dark-themed if possible. */
+        color-scheme: dark;
+    }
+</style>
+        "#
+            .into(),
+        );
+        self
+    }
+
     /// Combine `head` and `body` into a complete HTML document, which starts
     /// with `<!doctype html>`. Ideal for writing out a whole `.html` file.
     //
@@ -171,6 +212,8 @@ impl HtmlSnippet {
     pub fn to_html_doc(&self) -> String {
         let mut html = String::new();
         html += "<!doctype html>\n";
+        html += "<html>\n";
+
         html += "<head>\n";
         html += "<meta charset=\"utf-8\">\n";
         for elem in &self.head_deduplicatable_elements {
@@ -182,6 +225,8 @@ impl HtmlSnippet {
         html += "<body>";
         html += &self.body;
         html += "</body>\n";
+
+        html += "</html>\n";
 
         html
     }
@@ -270,8 +315,7 @@ impl FragmentPostLayout {
                         let mut css_style = String::new();
 
                         if let Some(a) = color_opacity {
-                            // FIXME(eddyb) this assumes `#00000` is the default.
-                            let [r, g, b] = color.unwrap_or([0, 0, 0]);
+                            let [r, g, b] = color.expect("color_opacity without color");
                             write!(css_style, "color:rgba({r},{g},{b},{a});").unwrap();
                         } else if let Some([r, g, b]) = color {
                             write!(css_style, "color:#{r:02x}{g:02x}{b:02x};").unwrap();

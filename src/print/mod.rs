@@ -553,7 +553,7 @@ impl Versions<pretty::FragmentPostLayout> {
                     h + "</tr>\n"
                 };
 
-                html.body = format!("<table class=\"{TABLE_CLASS_NAME}\" style=\"\">\n");
+                html.body = format!("<table class=\"{TABLE_CLASS_NAME}\">\n");
                 let mut last_was_uniform = true;
                 for versions_with_repeat_count in per_node_versions_with_repeat_count {
                     let is_uniform = match versions_with_repeat_count[..] {
@@ -898,9 +898,9 @@ impl<'a> Printer<'a> {
     }
     fn comment_style(&self) -> pretty::Styles {
         pretty::Styles {
-            color_opacity: Some(0.2),
+            color_opacity: Some(0.3),
             thickness: Some(-3),
-            ..Default::default()
+            ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
         }
     }
     fn numeric_literal_style(&self) -> pretty::Styles {
