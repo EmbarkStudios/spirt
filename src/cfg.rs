@@ -126,41 +126,22 @@ impl ControlFlowGraph {
         &self,
         func_def_body: &FuncDefBody,
     ) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        self.post_order(func_def_body).rev()
-    }
-
-    /// Iterate over all `ControlPoint`s reachable through the CFG for `func_def_body`,
-    /// in post-order.
-    pub fn post_order(
-        &self,
-        func_def_body: &FuncDefBody,
-    ) -> impl DoubleEndedIterator<Item = ControlPoint> {
-        let body_children = func_def_body.body.children.iter();
-        let body_entry = ControlPoint::Entry(body_children.first);
-        let body_exit = ControlPoint::Exit(body_children.last);
-
-        let body_successor = if self.control_insts.get(body_exit).is_some() {
-            ControlRegionSuccessor::Unstructured
-        } else {
-            ControlRegionSuccessor::Return
-        };
-
         let mut post_order = SmallVec::<[_; 8]>::new();
         {
             let mut incoming_edge_counts = EntityOrientedDenseMap::new();
-            self.post_order_step(
-                func_def_body.at(body_entry),
-                &body_successor,
+            self.traverse_whole_func(
+                func_def_body,
                 &mut incoming_edge_counts,
+                &mut |_| {},
                 &mut |point| post_order.push(point),
             );
         }
 
-        post_order.into_iter()
+        post_order.into_iter().rev()
     }
 }
 
-/// The logical continuation of a `ControlRegion` (used by `post_order_step`).
+/// The logical continuation of a `ControlRegion` (used by `traverse`).
 enum ControlRegionSuccessor<'a> {
     /// No structural exit allowed, only `ControlInst`.
     Unstructured,
@@ -206,11 +187,38 @@ mod sealed {
 use sealed::IncomingEdgeCount;
 
 impl ControlFlowGraph {
-    fn post_order_step(
+    fn traverse_whole_func(
+        &self,
+        func_def_body: &FuncDefBody,
+        incoming_edge_counts: &mut EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
+        pre_order_visit: &mut impl FnMut(ControlPoint),
+        post_order_visit: &mut impl FnMut(ControlPoint),
+    ) {
+        let body_children = func_def_body.body.children.iter();
+        let body_entry = ControlPoint::Entry(body_children.first);
+        let body_exit = ControlPoint::Exit(body_children.last);
+
+        let body_successor = if self.control_insts.get(body_exit).is_some() {
+            ControlRegionSuccessor::Unstructured
+        } else {
+            ControlRegionSuccessor::Return
+        };
+
+        self.traverse(
+            func_def_body.at(body_entry),
+            &body_successor,
+            incoming_edge_counts,
+            pre_order_visit,
+            post_order_visit,
+        );
+    }
+
+    fn traverse(
         &self,
         func_at_point: FuncAt<ControlPoint>,
         region_successor: &ControlRegionSuccessor<'_>,
         incoming_edge_counts: &mut EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
+        pre_order_visit: &mut impl FnMut(ControlPoint),
         post_order_visit: &mut impl FnMut(ControlPoint),
     ) {
         let point = func_at_point.position;
@@ -222,11 +230,14 @@ impl ControlFlowGraph {
         }
         incoming_edge_counts.insert(point, IncomingEdgeCount::ONE);
 
+        pre_order_visit(point);
+
         let mut visit_target = |target, new_region_successor: &_| {
-            self.post_order_step(
+            self.traverse(
                 func_at_point.at(target),
                 new_region_successor,
                 incoming_edge_counts,
+                pre_order_visit,
                 post_order_visit,
             );
         };
@@ -342,21 +353,11 @@ enum PartialControlRegionSuccessor {
 
 impl<'a> Structurizer<'a> {
     pub fn new(func_def_body: &'a mut FuncDefBody) -> Self {
-        let body_children = func_def_body.body.children.iter();
-        let body_entry = ControlPoint::Entry(body_children.first);
-        let body_exit = ControlPoint::Exit(body_children.last);
-
-        let body_successor = if func_def_body.cfg.control_insts.get(body_exit).is_some() {
-            ControlRegionSuccessor::Unstructured
-        } else {
-            ControlRegionSuccessor::Return
-        };
-
         let mut incoming_edge_counts = EntityOrientedDenseMap::new();
-        func_def_body.cfg.post_order_step(
-            func_def_body.at(body_entry),
-            &body_successor,
+        func_def_body.cfg.traverse_whole_func(
+            func_def_body,
             &mut incoming_edge_counts,
+            &mut |_| {},
             &mut |_| {},
         );
         Self {
