@@ -1485,15 +1485,20 @@ impl Print for ModuleDebugInfo {
                                             file_contents
                                                 .iter()
                                                 .map(|(&file, contents)| {
-                                                    format!(
-                                                        "{:?}: {:?}",
-                                                        &printer.cx[file], contents
-                                                    )
+                                                    pretty::Fragment::new([
+                                                        printer.string_literal_style().apply(
+                                                            format!("{:?}", &printer.cx[file]),
+                                                        ),
+                                                        ": ".into(),
+                                                        printer
+                                                            .string_literal_style()
+                                                            .apply(format!("{contents:?}")),
+                                                    ])
                                                 })
                                                 .map(|entry| {
                                                     pretty::Fragment::new([
-                                                        pretty::Node::ForceLineSeparation,
-                                                        entry.into(),
+                                                        pretty::Node::ForceLineSeparation.into(),
+                                                        entry,
                                                     ])
                                                 }),
                                             "}",
@@ -1508,8 +1513,20 @@ impl Print for ModuleDebugInfo {
                                 }),
                             "}",
                         ),
-                        format!("source_extensions: {:?}", source_extensions).into(),
-                        format!("module_processes: {:?}", module_processes).into(),
+                        pretty::join_comma_sep(
+                            "source_extensions: [",
+                            source_extensions.iter().map(|ext| {
+                                printer.string_literal_style().apply(format!("{ext:?}"))
+                            }),
+                            "]",
+                        ),
+                        pretty::join_comma_sep(
+                            "module_processes: [",
+                            module_processes.iter().map(|proc| {
+                                printer.string_literal_style().apply(format!("{proc:?}"))
+                            }),
+                            "]",
+                        ),
                     ]
                     .into_iter()
                     .map(|entry| {
