@@ -280,68 +280,69 @@ impl<'a> FuncLifting<'a> {
         };
 
         // Create a SPIR-V block for every CFG point needing one.
-        let mut blocks: FxIndexMap<_, _> = func_def_body
-            .cfg
-            .rev_post_order(func_def_body)
-            .filter(
-                |point| match func_def_body.control_nodes[point.control_node()].kind {
-                    // Only create a block for the `Entry` point of a
-                    // `ControlNodeKind::Block`, not also its `Exit`.
-                    ControlNodeKind::Block { .. } => {
-                        matches!(point, cfg::ControlPoint::Entry(_))
-                    }
-                    _ => true,
-                },
-            )
-            .map(|point| {
-                let control_node_def = &func_def_body.control_nodes[point.control_node()];
-                let phis = if let cfg::ControlPoint::Exit(_) = point {
-                    control_node_def
-                        .outputs
-                        .iter()
-                        .map(|&output_decl| {
-                            Ok(Phi {
-                                result_id: alloc_id()?,
-                                cases: SmallVec::new(),
-                                output_decl,
-                            })
-                        })
-                        .collect::<Result<_, _>>()?
-                } else {
-                    SmallVec::new()
-                };
-                let (insts, terminator) = match control_node_def.kind {
-                    ControlNodeKind::Block { insts } => {
-                        // The terminator of a `ControlNodeKind::Block` is attached
-                        // to its `Exit` point, but as per the `filter` above,
-                        // the block itself is attached to the `Entry` point.
-                        let terminator = func_def_body
-                            .cfg
-                            .control_insts
-                            .get(cfg::ControlPoint::Exit(point.control_node()))
-                            .expect("missing terminator for `ControlNodeKind::Block`");
+        let mut blocks = FxIndexMap::default();
+        for point in func_def_body.cfg.rev_post_order(func_def_body) {
+            let control_node_def = &func_def_body.control_nodes[point.control_node()];
 
-                        (insts.into_iter().collect(), terminator)
+            match control_node_def.kind {
+                // Only create a block for the `Entry` point of a
+                // `ControlNodeKind::Block`, not also its `Exit`.
+                ControlNodeKind::Block { .. } => {
+                    if let cfg::ControlPoint::Exit(_) = point {
+                        continue;
                     }
-                    _ => (
-                        SmallVec::new(),
-                        func_def_body
-                            .cfg
-                            .control_insts
-                            .get(point)
-                            .expect("missing terminator"),
-                    ),
-                };
-                Ok((
-                    point,
-                    BlockLifting {
-                        phis,
-                        insts,
-                        terminator,
-                    },
-                ))
-            })
-            .collect::<Result<_, _>>()?;
+                }
+                _ => {}
+            }
+
+            let phis = if let cfg::ControlPoint::Exit(_) = point {
+                control_node_def
+                    .outputs
+                    .iter()
+                    .map(|&output_decl| {
+                        Ok(Phi {
+                            result_id: alloc_id()?,
+                            cases: SmallVec::new(),
+                            output_decl,
+                        })
+                    })
+                    .collect::<Result<_, _>>()?
+            } else {
+                SmallVec::new()
+            };
+
+            let (insts, terminator) = match control_node_def.kind {
+                ControlNodeKind::Block { insts } => {
+                    // The terminator of a `ControlNodeKind::Block` is attached
+                    // to its `Exit` point, but as per the `filter` above,
+                    // the block itself is attached to the `Entry` point.
+                    let terminator = func_def_body
+                        .cfg
+                        .control_insts
+                        .get(cfg::ControlPoint::Exit(point.control_node()))
+                        .expect("missing terminator for `ControlNodeKind::Block`");
+
+                    (insts.into_iter().collect(), terminator)
+                }
+                _ => (
+                    SmallVec::new(),
+                    func_def_body
+                        .cfg
+                        .control_insts
+                        .get(point)
+                        .expect("missing terminator"),
+                ),
+            };
+
+            blocks.insert(
+                point,
+                BlockLifting {
+                    phis,
+                    insts,
+                    terminator,
+                },
+            );
+        }
 
         // Count the number of "uses" of each block (each incoming edge, plus
         // `1` for the entry block), to help determine which blocks are part
