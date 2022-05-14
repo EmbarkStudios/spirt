@@ -259,17 +259,32 @@ impl<'a> FuncLifting<'a> {
         func_decl: &'a FuncDecl,
         mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
     ) -> Result<Self, E> {
+        let func_id = alloc_id()?;
+        let param_ids = func_decl
+            .params
+            .iter()
+            .map(|_| alloc_id())
+            .collect::<Result<_, _>>()?;
+
         let func_def_body = match &func_decl.def {
-            DeclDef::Imported(_) => None,
-            DeclDef::Present(def) => Some(def),
+            DeclDef::Imported(_) => {
+                return Ok(Self {
+                    func_id,
+                    param_ids,
+                    data_inst_output_ids: Default::default(),
+                    label_ids: Default::default(),
+                    blocks: Default::default(),
+                });
+            }
+            DeclDef::Present(def) => def,
         };
 
         // Create a SPIR-V block for every CFG point needing one.
         let mut blocks: FxIndexMap<_, _> = func_def_body
-            .into_iter()
-            .flat_map(|func_def_body| func_def_body.cfg.rev_post_order(func_def_body))
+            .cfg
+            .rev_post_order(func_def_body)
             .filter(
-                |point| match func_def_body.unwrap().control_nodes[point.control_node()].kind {
+                |point| match func_def_body.control_nodes[point.control_node()].kind {
                     // Only create a block for the `Entry` point of a
                     // `ControlNodeKind::Block`, not also its `Exit`.
                     ControlNodeKind::Block { .. } => {
@@ -279,7 +294,6 @@ impl<'a> FuncLifting<'a> {
                 },
             )
             .map(|point| {
-                let func_def_body = func_def_body.unwrap();
                 let control_node_def = &func_def_body.control_nodes[point.control_node()];
                 let phis = if let cfg::ControlPoint::Exit(_) = point {
                     control_node_def
@@ -426,17 +440,13 @@ impl<'a> FuncLifting<'a> {
         let all_insts_with_output = blocks
             .values()
             .flat_map(|block| block.insts.iter().copied())
-            .flat_map(|insts| func_def_body.unwrap().at(Some(insts)))
+            .flat_map(|insts| func_def_body.at(Some(insts)))
             .filter(|&func_at_inst| func_at_inst.def().output_type.is_some())
             .map(|func_at_inst| func_at_inst.position);
 
         Ok(Self {
-            func_id: alloc_id()?,
-            param_ids: func_decl
-                .params
-                .iter()
-                .map(|_| alloc_id())
-                .collect::<Result<_, _>>()?,
+            func_id,
+            param_ids,
             data_inst_output_ids: all_insts_with_output
                 .map(|inst| Ok((inst, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
