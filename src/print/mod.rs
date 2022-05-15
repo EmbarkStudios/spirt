@@ -9,7 +9,7 @@ use crate::{
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInst, DataInstDef,
     DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncParam, FxIndexMap,
     GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -2402,7 +2402,7 @@ impl Print for cfg::ControlInst {
                 pretty::Fragment::new([kw("branch"), " ".into(), targets.nth(0).unwrap()])
             }
 
-            cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond) => {
+            cfg::ControlInstKind::SelectBranch(SelectionKind::BoolCond) => {
                 assert_eq!((targets.len(), inputs.len()), (2, 1));
                 let [target_then, target_else] = {
                     // HACK(eddyb) work around the lack of `Into<[T; N]>` on `SmallVec`.
@@ -2422,7 +2422,7 @@ impl Print for cfg::ControlInst {
                     "}".into(),
                 ])
             }
-            cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(spv::Inst {
+            cfg::ControlInstKind::SelectBranch(SelectionKind::SpvInst(spv::Inst {
                 opcode,
                 ref imms,
             })) => {

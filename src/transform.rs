@@ -3,7 +3,7 @@ use crate::{
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef,
     EntityListIter, ExportKey, Exportee, Func, FuncAtMut, FuncDecl, FuncDefBody, FuncParam,
     GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -553,7 +553,7 @@ impl InnerInPlaceTransform for cfg::ControlInst {
             | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
             | cfg::ControlInstKind::Branch
             | cfg::ControlInstKind::SelectBranch(
-                cfg::SelectionKind::BoolCond | cfg::SelectionKind::SpvInst(_),
+                SelectionKind::BoolCond | SelectionKind::SpvInst(_),
             ) => {}
         }
         for v in inputs {

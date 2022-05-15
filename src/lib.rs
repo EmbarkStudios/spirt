@@ -526,6 +526,15 @@ pub enum ControlNodeKind {
 }
 
 #[derive(Clone)]
+pub enum SelectionKind {
+    /// Two-case selection based on boolean condition, i.e. `if`-`else`, with
+    /// the two cases being "then" and "else" (in that order).
+    BoolCond,
+
+    SpvInst(spv::Inst),
+}
+
+#[derive(Clone)]
 pub struct DataInstDef {
     pub attrs: AttrSet,
 

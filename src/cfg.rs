@@ -2,7 +2,8 @@
 
 use crate::{
     spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityList, EntityListIter,
-    EntityOrientedDenseMap, EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, Value,
+    EntityOrientedDenseMap, EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, SelectionKind,
+    Value,
 };
 use smallvec::SmallVec;
 
@@ -107,14 +108,6 @@ pub enum ControlInstKind {
 
 #[derive(Clone)]
 pub enum ExitInvocationKind {
-    SpvInst(spv::Inst),
-}
-
-#[derive(Clone)]
-pub enum SelectionKind {
-    /// Conditional branch on boolean condition, i.e. `if`-`else`.
-    BoolCond,
-
     SpvInst(spv::Inst),
 }
 

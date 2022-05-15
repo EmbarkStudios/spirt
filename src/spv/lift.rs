@@ -6,7 +6,8 @@ use crate::{
     cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeKind,
     ControlNodeOutputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, EntityList, ExportKey,
     Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -782,10 +783,10 @@ impl LazyInst<'_, '_> {
 
                     cfg::ControlInstKind::Branch => wk.OpBranch.into(),
 
-                    cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond) => {
+                    cfg::ControlInstKind::SelectBranch(SelectionKind::BoolCond) => {
                         wk.OpBranchConditional.into()
                     }
-                    cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(inst)) => {
+                    cfg::ControlInstKind::SelectBranch(SelectionKind::SpvInst(inst)) => {
                         inst.clone()
                     }
                 };

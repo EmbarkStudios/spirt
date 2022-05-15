@@ -7,7 +7,7 @@ use crate::{
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
     DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
-    Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -1281,9 +1281,9 @@ impl Module {
                         cfg::ControlInstKind::Branch
                     } else if opcode == wk.OpBranchConditional {
                         assert_eq!((targets.len(), inputs.len()), (2, 1));
-                        cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::BoolCond)
+                        cfg::ControlInstKind::SelectBranch(SelectionKind::BoolCond)
                     } else if opcode == wk.OpSwitch {
-                        cfg::ControlInstKind::SelectBranch(cfg::SelectionKind::SpvInst(
+                        cfg::ControlInstKind::SelectBranch(SelectionKind::SpvInst(
                             raw_inst.without_ids.clone(),
                         ))
                     } else {
