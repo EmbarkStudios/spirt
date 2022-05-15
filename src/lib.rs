@@ -260,6 +260,8 @@ pub struct FuncParam {
 
 #[derive(Clone)]
 pub struct FuncDefBody {
+    // FIXME(eddyb) either flip the order here, or reorder the definitions of
+    // `DataInstDef` vs `ControlNodeDef` (and related types) in this module.
     pub data_insts: EntityDefs<DataInst>,
     pub control_nodes: EntityDefs<ControlNode>,
 
@@ -319,6 +321,23 @@ impl<'a> FuncAt<'a, DataInst> {
     }
 }
 
+impl<'a> IntoIterator for FuncAt<'a, EntityList<ControlNode>> {
+    type IntoIter = FuncAt<'a, Option<EntityListIter<ControlNode>>>;
+    type Item = FuncAt<'a, ControlNode>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.at(Some(self.position.iter()))
+    }
+}
+
+impl<'a> Iterator for FuncAt<'a, Option<EntityListIter<ControlNode>>> {
+    type Item = FuncAt<'a, ControlNode>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (next, rest) = self.position?.split_first(&self.control_nodes);
+        self.position = rest;
+        Some(self.at(next))
+    }
+}
+
 impl<'a> FuncAt<'a, ControlNode> {
     pub fn def(self) -> &'a ControlNodeDef {
         &self.control_nodes[self.position]
@@ -347,7 +366,7 @@ impl<'a, P: Copy> FuncAtMut<'a, P> {
 
 // HACK(eddyb) can't implement `IntoIterator` because `next` borrows `self`.
 impl<'a> FuncAtMut<'a, Option<EntityList<DataInst>>> {
-    fn into_iter(self) -> FuncAtMut<'a, Option<EntityListIter<DataInst>>> {
+    pub fn into_iter(self) -> FuncAtMut<'a, Option<EntityListIter<DataInst>>> {
         let iter = self.position.map(|list| list.iter());
         self.at(iter)
     }
@@ -355,7 +374,7 @@ impl<'a> FuncAtMut<'a, Option<EntityList<DataInst>>> {
 
 // HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
 impl FuncAtMut<'_, Option<EntityListIter<DataInst>>> {
-    fn next(&mut self) -> Option<FuncAtMut<'_, DataInst>> {
+    pub fn next(&mut self) -> Option<FuncAtMut<'_, DataInst>> {
         let (next, rest) = self.position?.split_first(&self.data_insts);
         self.position = rest;
         Some(self.reborrow().at(next))
@@ -365,6 +384,23 @@ impl FuncAtMut<'_, Option<EntityListIter<DataInst>>> {
 impl<'a> FuncAtMut<'a, DataInst> {
     pub fn def(self) -> &'a mut DataInstDef {
         &mut self.data_insts[self.position]
+    }
+}
+
+// HACK(eddyb) can't implement `IntoIterator` because `next` borrows `self`.
+impl<'a> FuncAtMut<'a, EntityList<ControlNode>> {
+    pub fn into_iter(self) -> FuncAtMut<'a, Option<EntityListIter<ControlNode>>> {
+        let iter = Some(self.position.iter());
+        self.at(iter)
+    }
+}
+
+// HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
+impl FuncAtMut<'_, Option<EntityListIter<ControlNode>>> {
+    pub fn next(&mut self) -> Option<FuncAtMut<'_, ControlNode>> {
+        let (next, rest) = self.position?.split_first(&self.control_nodes);
+        self.position = rest;
+        Some(self.reborrow().at(next))
     }
 }
 

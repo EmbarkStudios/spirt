@@ -90,6 +90,10 @@ fn main() -> std::io::Result<()> {
                 )?;
             }
 
+            let out_file_path = in_file_path.with_extension("link.spv");
+            eprint_duration(|| module.lift_to_spv_file(&out_file_path))?;
+            eprintln!("Module::lift_to_spv_file({})", out_file_path.display());
+
             Ok(())
         }
         args => {

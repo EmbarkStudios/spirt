@@ -1,9 +1,9 @@
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef,
-    ExportKey, Exportee, Func, FuncAtMut, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    EntityListIter, ExportKey, Exportee, Func, FuncAtMut, FuncDecl, FuncDefBody, FuncParam,
+    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
+    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -458,24 +458,22 @@ impl InnerInPlaceTransform for FuncDefBody {
         // HACK(eddyb) have to compute this before borrowing any `self` fields.
         let rpo = self.cfg.rev_post_order(self);
 
-        for point in rpo {
-            // HACK(eddyb) this needs to transform `UnstructuredMerge`s on `Exit`
-            // instead of `Entry`, because they don't have have `Entry`s.
-            let can_uniquely_transform = match self.control_nodes[point.control_node()].kind {
-                ControlNodeKind::UnstructuredMerge => {
-                    assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                    true
-                }
-                _ => matches!(point, cfg::ControlPoint::Entry(_)),
-            };
+        for point_range in rpo {
+            self.at_mut(Some(point_range.control_nodes()))
+                .inner_in_place_transform_with(transformer);
 
-            if can_uniquely_transform {
-                transformer.in_place_transform_control_node_def(self.at_mut(point.control_node()));
-            }
-
-            if let Some(control_inst) = self.cfg.control_insts.get_mut(point) {
+            if let Some(control_inst) = self.cfg.control_insts.get_mut(point_range.last()) {
                 control_inst.inner_in_place_transform_with(transformer);
             }
+        }
+    }
+}
+
+impl InnerInPlaceTransform for FuncAtMut<'_, Option<EntityListIter<ControlNode>>> {
+    fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
+        let mut iter = self.reborrow();
+        while let Some(func_at_control_node) = iter.next() {
+            transformer.in_place_transform_control_node_def(func_at_control_node);
         }
     }
 }

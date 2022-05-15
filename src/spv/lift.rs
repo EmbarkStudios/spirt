@@ -10,6 +10,7 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -203,7 +204,7 @@ struct FuncLifting<'a> {
 struct BlockLifting<'a> {
     phis: SmallVec<[Phi; 2]>,
     insts: SmallVec<[EntityList<DataInst>; 1]>,
-    terminator: &'a cfg::ControlInst,
+    terminator: Cow<'a, cfg::ControlInst>,
 }
 
 struct Phi {
@@ -281,67 +282,88 @@ impl<'a> FuncLifting<'a> {
 
         // Create a SPIR-V block for every CFG point needing one.
         let mut blocks = FxIndexMap::default();
-        for point in func_def_body.cfg.rev_post_order(func_def_body) {
-            let control_node_def = &func_def_body.control_nodes[point.control_node()];
+        for point_range in func_def_body.cfg.rev_post_order(func_def_body) {
+            let func_at_point_range = func_def_body.at(point_range);
+            func_at_point_range.rev_post_order_try_for_each(|func_at_point_cursor| {
+                let point_cursor = func_at_point_cursor.position;
+                let point = point_cursor.position;
+                let control_node_def = &func_def_body.control_nodes[point.control_node()];
 
-            match control_node_def.kind {
-                // Only create a block for the `Entry` point of a
-                // `ControlNodeKind::Block`, not also its `Exit`.
-                ControlNodeKind::Block { .. } => {
-                    if let cfg::ControlPoint::Exit(_) = point {
-                        continue;
-                    }
-                }
-                _ => {}
-            }
-
-            let phis = if let cfg::ControlPoint::Exit(_) = point {
-                control_node_def
-                    .outputs
-                    .iter()
-                    .map(|&output_decl| {
-                        Ok(Phi {
-                            result_id: alloc_id()?,
-                            cases: SmallVec::new(),
-                            output_decl,
+                let phis = if let cfg::ControlPoint::Exit(_) = point {
+                    control_node_def
+                        .outputs
+                        .iter()
+                        .map(|&output_decl| {
+                            Ok(Phi {
+                                result_id: alloc_id()?,
+                                cases: SmallVec::new(),
+                                output_decl,
+                            })
                         })
-                    })
-                    .collect::<Result<_, _>>()?
-            } else {
-                SmallVec::new()
-            };
+                        .collect::<Result<_, _>>()?
+                } else {
+                    SmallVec::new()
+                };
 
-            let (insts, terminator) = match control_node_def.kind {
-                ControlNodeKind::Block { insts } => {
-                    // The terminator of a `ControlNodeKind::Block` is attached
-                    // to its `Exit` point, but as per the `filter` above,
-                    // the block itself is attached to the `Entry` point.
-                    let terminator = func_def_body
-                        .cfg
-                        .control_insts
-                        .get(cfg::ControlPoint::Exit(point.control_node()))
-                        .expect("missing terminator for `ControlNodeKind::Block`");
+                let insts = match (point, &control_node_def.kind) {
+                    (cfg::ControlPoint::Entry(_), &ControlNodeKind::Block { insts }) => {
+                        insts.into_iter().collect()
+                    }
+                    _ => SmallVec::new(),
+                };
 
-                    (insts.into_iter().collect(), terminator)
-                }
-                _ => (
-                    SmallVec::new(),
-                    func_def_body
-                        .cfg
-                        .control_insts
-                        .get(point)
-                        .expect("missing terminator"),
-                ),
-            };
+                let terminator = match func_def_body.cfg.control_insts.get(point) {
+                    Some(terminator) => Cow::Borrowed(terminator),
 
-            blocks.insert(
-                point,
-                BlockLifting {
-                    phis,
-                    insts,
-                    terminator,
-                },
-            );
+                    // Structured control-flow, reconstruct a terminator.
+                    None => match func_at_point_cursor.unique_successor() {
+                        Some((func_at_succ_cursor, parent_region_outputs)) => {
+                            let succ_cursor = func_at_succ_cursor.position;
+                            Cow::Owned(cfg::ControlInst {
+                                attrs: AttrSet::default(),
+                                kind: cfg::ControlInstKind::Branch,
+                                inputs: [].into_iter().collect(),
+                                targets: [succ_cursor.position].into_iter().collect(),
+                                target_merge_outputs: parent_region_outputs
+                                    .map(|outputs| {
+                                        let parent_exit = succ_cursor.position;
+                                        assert!(matches!(parent_exit, cfg::ControlPoint::Exit(_)));
+                                        (
+                                            parent_exit.control_node(),
+                                            outputs.iter().copied().collect(),
+                                        )
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                            })
+                        }
+                        None => {
+                            // FIXME(eddyb) this will fail for structured returns
+                            // out of functions, whenever those will happen.
+                            // Maybe `unique_successor` should return instead an
+                            // `enum { Return, ChildRegions, SiblingOrParent }`?
+                            assert!(matches!(point, cfg::ControlPoint::Entry(_)));
+
+                            match control_node_def.kind {
+                                ControlNodeKind::UnstructuredMerge
+                                | ControlNodeKind::Block { .. } => unreachable!(),
+                                // FIXME(eddyb) implement structured control-flow.
+                            }
+                        }
+                    },
+                };
+
+                blocks.insert(
+                    point,
+                    BlockLifting {
+                        phis,
+                        insts,
+                        terminator,
+                    },
+                );
+
+                Ok(())
+            })?;
         }
 
         // Count the number of "uses" of each block (each incoming edge, plus
@@ -376,7 +398,7 @@ impl<'a> FuncLifting<'a> {
             let BlockLifting {
                 terminator: original_terminator,
                 ..
-            } = blocks[block_idx];
+            } = &blocks[block_idx];
 
             let is_trivial_branch = {
                 let cfg::ControlInst {
@@ -385,7 +407,7 @@ impl<'a> FuncLifting<'a> {
                     inputs,
                     targets,
                     target_merge_outputs,
-                } = original_terminator;
+                } = &**original_terminator;
 
                 *attrs == AttrSet::default()
                     && matches!(kind, cfg::ControlInstKind::Branch)
@@ -402,13 +424,23 @@ impl<'a> FuncLifting<'a> {
                     let BlockLifting {
                         phis: ref target_phis,
                         insts: ref mut extra_insts,
-                        terminator: new_terminator,
+                        terminator: ref mut new_terminator,
                     } = blocks[&target];
 
                     // FIXME(eddyb) check for block-level attributes, once/if
                     // they start being tracked.
                     if target_phis.is_empty() {
                         let extra_insts = mem::take(extra_insts);
+                        let new_terminator = mem::replace(
+                            new_terminator,
+                            Cow::Owned(cfg::ControlInst {
+                                attrs: Default::default(),
+                                kind: cfg::ControlInstKind::Unreachable,
+                                inputs: Default::default(),
+                                targets: Default::default(),
+                                target_merge_outputs: Default::default(),
+                            }),
+                        );
                         *target_use_count = 0;
 
                         let combined_block = &mut blocks[block_idx];
@@ -427,12 +459,16 @@ impl<'a> FuncLifting<'a> {
         // HACK(eddyb) this takes advantage of `blocks` being an `IndexMap`,
         // to iterate at the same time as mutating other entries.
         for block_idx in 0..blocks.len() {
-            let (&source_point, &BlockLifting { terminator, .. }) =
+            let (&source_point, BlockLifting { terminator, .. }) =
                 blocks.get_index(block_idx).unwrap();
 
-            for (&target, outputs) in &terminator.target_merge_outputs {
+            // FIXME(eddyb) cloning only needed because not all `ControlInst`s
+            // are borrowed from the `Module`, some/most are synthesized above.
+            let target_merge_outputs = terminator.target_merge_outputs.clone();
+
+            for (target, outputs) in target_merge_outputs {
                 let target_block = blocks.get_mut(&cfg::ControlPoint::Exit(target)).unwrap();
-                for (target_phi, &v) in target_block.phis.iter_mut().zip(outputs) {
+                for (target_phi, v) in target_block.phis.iter_mut().zip(outputs) {
                     target_phi.cases.push((v, source_point));
                 }
             }

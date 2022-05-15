@@ -7,11 +7,11 @@ use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInst, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncDefBody, FuncParam,
-    FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncParam, FxIndexMap,
+    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
+    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
@@ -363,10 +363,9 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         if let DeclDef::Present(func_def_body) = &func_decl.def {
-            // FIXME(eddyb) computing the RPO and not reusing it later isn't very
-            // efficient, but there aren't any other ways to get the right order.
-            for point in func_def_body.cfg.rev_post_order(func_def_body) {
-                if let Some(control_inst) = func_def_body.cfg.control_insts.get(point) {
+            for point_range in func_def_body.cfg.rev_post_order(func_def_body) {
+                if let Some(control_inst) = func_def_body.cfg.control_insts.get(point_range.last())
+                {
                     for &target in &control_inst.targets {
                         *self
                             .use_counts
@@ -817,11 +816,14 @@ impl<'a> Printer<'a> {
                 });
 
             for func_def_body in func_def_bodies_across_versions {
-                for point in func_def_body.cfg.rev_post_order(func_def_body) {
+                for point_range in func_def_body.cfg.rev_post_order(func_def_body) {
+                    // The label is only for CFG edge destinations.
+                    let label_point = point_range.first();
+
                     // Only assign a new index if this `ControlPointLabel` is
                     // new in this version (and absent from previous ones).
                     if let Some(use_style @ UseStyle::Inline) =
-                        use_styles.get_mut(&Use::ControlPointLabel(point))
+                        use_styles.get_mut(&Use::ControlPointLabel(label_point))
                     {
                         let idx = control_pointer_label_counter;
                         control_pointer_label_counter += 1;
@@ -831,54 +833,66 @@ impl<'a> Printer<'a> {
                         };
                     }
 
-                    // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
-                    // instead of `Entry`, because they don't have have `Entry`s.
-                    let can_uniquely_visit =
-                        match func_def_body.control_nodes[point.control_node()].kind {
-                            ControlNodeKind::UnstructuredMerge => {
-                                assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                                true
+                    // FIXME(eddyb) stop using `rev_post_order_try_for_each`.
+                    func_def_body
+                        .at(point_range)
+                        .rev_post_order_try_for_each(|func_at_point_cursor| -> Result<(), ()> {
+                            let point_cursor = func_at_point_cursor.position;
+                            let point = point_cursor.position;
+
+                            // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
+                            // instead of `Entry`, because they don't have have `Entry`s.
+                            let can_uniquely_visit =
+                                match func_def_body.control_nodes[point.control_node()].kind {
+                                    ControlNodeKind::UnstructuredMerge => {
+                                        assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                                        true
+                                    }
+                                    _ => matches!(point, cfg::ControlPoint::Entry(_)),
+                                };
+
+                            if !can_uniquely_visit {
+                                return Ok(());
                             }
-                            _ => matches!(point, cfg::ControlPoint::Entry(_)),
-                        };
 
-                    if !can_uniquely_visit {
-                        continue;
-                    }
+                            let control_node = point.control_node();
+                            let ControlNodeDef { kind, outputs } =
+                                &*func_def_body.control_nodes[control_node];
 
-                    let control_node = point.control_node();
-                    let ControlNodeDef { kind, outputs } =
-                        &*func_def_body.control_nodes[control_node];
-
-                    let block_insts = match *kind {
-                        ControlNodeKind::UnstructuredMerge => None,
-                        ControlNodeKind::Block { insts } => insts,
-                    };
-
-                    let defined_values =
-                        func_def_body
-                            .at(block_insts)
-                            .into_iter()
-                            .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
-                            .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
-                            .chain(outputs.iter().enumerate().map(|(i, _)| {
-                                Use::ControlNodeOutput {
-                                    control_node,
-                                    output_idx: i.try_into().unwrap(),
-                                }
-                            }));
-                    for use_kind in defined_values {
-                        // Only assign a new index if this `Value` definition is
-                        // new in this version (and absent from previous ones)
-                        if let Some(use_style @ UseStyle::Inline) = use_styles.get_mut(&use_kind) {
-                            let idx = value_counter;
-                            value_counter += 1;
-                            *use_style = UseStyle::Anon {
-                                parent_func: Some(func),
-                                idx,
+                            let block_insts = match *kind {
+                                ControlNodeKind::UnstructuredMerge => None,
+                                ControlNodeKind::Block { insts } => insts,
                             };
-                        }
-                    }
+
+                            let defined_values = func_def_body
+                                .at(block_insts)
+                                .into_iter()
+                                .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
+                                .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
+                                .chain(outputs.iter().enumerate().map(|(i, _)| {
+                                    Use::ControlNodeOutput {
+                                        control_node,
+                                        output_idx: i.try_into().unwrap(),
+                                    }
+                                }));
+                            for use_kind in defined_values {
+                                // Only assign a new index if this `Value` definition is
+                                // new in this version (and absent from previous ones)
+                                if let Some(use_style @ UseStyle::Inline) =
+                                    use_styles.get_mut(&use_kind)
+                                {
+                                    let idx = value_counter;
+                                    value_counter += 1;
+                                    *use_style = UseStyle::Anon {
+                                        parent_func: Some(func),
+                                        idx,
+                                    };
+                                }
+                            }
+
+                            Ok(())
+                        })
+                        .unwrap();
                 }
             }
         }
@@ -2086,115 +2100,74 @@ impl Print for FuncDecl {
             }
 
             // FIXME(eddyb) this can probably go into `impl Print for FuncDefBody`.
-            DeclDef::Present(
-                def @ FuncDefBody {
-                    data_insts: _,
-                    control_nodes,
-                    body: _,
-                    cfg,
-                },
-            ) => {
-                // HACK(eddyb) having this separate from `use_counts`/`use_styles`
-                // allows skipping label printing even with multiple versions.
-                let mut unstructured_targets = FxHashSet::default();
+            DeclDef::Present(def) => pretty::Fragment::new([
+                sig,
+                " {".into(),
+                pretty::Node::IndentedBlock(
+                    def.cfg
+                        .rev_post_order(def)
+                        .map(|point_range| {
+                            // The label is only for CFG edge destinations.
+                            let label_point = point_range.first();
+                            let label = Use::ControlPointLabel(label_point);
+                            let label_header = if printer.use_styles.contains_key(&label) {
+                                // FIXME(eddyb) `:` as used here for C-like "label syntax"
+                                // interferes (in theory) with `e: T` "type ascription syntax".
+                                Some(pretty::Fragment::new([
+                                    label.print_as_def(printer),
+                                    ":".into(),
+                                ]))
+                            } else {
+                                None
+                            };
+                            let (entry_label_header, exit_label_header) = match label_point {
+                                cfg::ControlPoint::Entry(_) => (label_header, None),
+                                cfg::ControlPoint::Exit(_) => (None, label_header),
+                            };
 
-                // FIXME(eddyb) reuse the RPO instead of computing it twice.
-                for point in cfg.rev_post_order(def) {
-                    if let Some(control_inst) = cfg.control_insts.get(point) {
-                        for &target in &control_inst.targets {
-                            unstructured_targets.insert(target);
-                        }
-                    }
-                }
+                            let control_nodes = pretty::Node::IndentedBlock(
+                                def.at(Some(point_range.control_nodes()))
+                                    .map(|func_at_control_node| {
+                                        func_at_control_node.print(printer).into()
+                                    })
+                                    .collect(),
+                            );
 
-                // HACK(eddyb) by tracking this statefully, the "vertical gap"
-                // can be avoided where it would be unnecessary.
-                let mut next_needs_vertical_gap = false;
-
-                pretty::Fragment::new([
-                    sig,
-                    " {".into(),
-                    pretty::Node::IndentedBlock(
-                        cfg.rev_post_order(def)
-                            .filter(|point| {
-                                // HACK(eddyb) this needs to print `UnstructuredMerge`s on `Exit`
-                                // instead of `Entry`, because they don't have have `Entry`s.
-                                match control_nodes[point.control_node()].kind {
-                                    ControlNodeKind::UnstructuredMerge => {
-                                        assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                                        true
-                                    }
-                                    _ => matches!(point, cfg::ControlPoint::Entry(_)),
-                                }
-                            })
-                            .map(|point| {
-                                let maybe_vertical_gap_before = if next_needs_vertical_gap {
-                                    // Separate (top-level) control nodes with empty lines.
-                                    // FIXME(eddyb) have an explicit `pretty::Node`
-                                    // for "vertical gap" instead.
-                                    Some("\n\n".into())
-                                } else {
-                                    None
-                                };
-                                next_needs_vertical_gap = false;
-
-                                let label_header = if unstructured_targets.contains(&point) {
-                                    // FIXME(eddyb) `:` as used here for C-like "label syntax"
-                                    // interferes (in theory) with `e: T` "type ascription syntax".
-                                    Some(pretty::Fragment::new([
-                                        Use::ControlPointLabel(point).print_as_def(printer),
-                                        ":".into(),
-                                    ]))
-                                } else {
-                                    None
-                                };
-                                let (entry_label_header, exit_label_header) = match point {
-                                    cfg::ControlPoint::Entry(_) => (label_header, None),
-                                    cfg::ControlPoint::Exit(_) => (None, label_header),
-                                };
-
-                                let control_node = point.control_node();
-                                let control_node_body = def.at(control_node).print(printer);
-
-                                pretty::Fragment::new(
+                            pretty::Fragment::new(
+                                [
+                                    entry_label_header,
+                                    Some(control_nodes.into()),
+                                    exit_label_header,
+                                    if let Some(control_inst) =
+                                        def.cfg.control_insts.get(point_range.last())
+                                    {
+                                        Some(control_inst.print(printer))
+                                    } else {
+                                        None
+                                    },
+                                ]
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|fragment| {
                                     [
-                                        maybe_vertical_gap_before,
-                                        entry_label_header,
-                                        Some(
-                                            pretty::Node::IndentedBlock(vec![
-                                                control_node_body.into(),
-                                            ])
-                                            .into(),
-                                        ),
-                                        exit_label_header,
-                                        if let Some(control_inst) = cfg
-                                            .control_insts
-                                            .get(cfg::ControlPoint::Exit(control_node))
-                                        {
-                                            next_needs_vertical_gap = true;
-
-                                            Some(control_inst.print(printer))
-                                        } else {
-                                            None
-                                        },
+                                        pretty::Node::ForceLineSeparation.into(),
+                                        fragment,
+                                        pretty::Node::ForceLineSeparation.into(),
                                     ]
-                                    .into_iter()
-                                    .flatten()
-                                    .flat_map(|fragment| {
-                                        [
-                                            pretty::Node::ForceLineSeparation.into(),
-                                            fragment,
-                                            pretty::Node::ForceLineSeparation.into(),
-                                        ]
-                                    }),
-                                )
-                            })
-                            .collect(),
-                    )
-                    .into(),
-                    "}".into(),
-                ])
-            }
+                                }),
+                            )
+                        })
+                        .intersperse({
+                            // Separate (top-level) control nodes with empty lines.
+                            // FIXME(eddyb) have an explicit `pretty::Node`
+                            // for "vertical gap" instead.
+                            "\n\n".into()
+                        })
+                        .collect(),
+                )
+                .into(),
+                "}".into(),
+            ]),
         };
 
         AttrsAndDef {

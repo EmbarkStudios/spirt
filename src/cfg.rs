@@ -1,8 +1,8 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityList, EntityOrientedDenseMap,
-    EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, Value,
+    spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityList, EntityListIter,
+    EntityOrientedDenseMap, EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, Value,
 };
 use smallvec::SmallVec;
 
@@ -10,6 +10,8 @@ use smallvec::SmallVec;
 /// (`ControlInst`s) attached to `ControlNode`-relative CFG points (`ControlPoint`s).
 #[derive(Clone, Default)]
 pub struct ControlFlowGraph {
+    // FIXME(eddyb) if all keys are `ControlPoint::Exit`s, should this map be
+    // keyed on `ControlNode` (and have e.g. `_on_exit` in the name) instead?
     pub control_insts: EntityOrientedDenseMap<ControlPoint, ControlInst>,
 }
 
@@ -116,16 +118,234 @@ pub enum SelectionKind {
     SpvInst(spv::Inst),
 }
 
+/// Abstraction for (potentially partially structured) CFG traversal, taking
+/// advantage of structured control-flow to avoid allocating `ControlPoint`
+/// sequences which are otherwise entirely predictable from the linear chaining
+/// of the `ControlNode` children in a `ControlRegion`.
+#[derive(Copy, Clone)]
+pub enum ControlPointRange {
+    /// Individual `ControlPoint`, equivalent to `Exit(control_node)`.
+    ///
+    /// For the `Entry` case, see `LinearChain` below (which always has a paired
+    /// `Exit`, even for leaf `ControlNode`s - i.e. can't enter without exiting).
+    UnstructuredExit(ControlNode),
+
+    /// All `ControlPoint`s from `Entry(first)` to `Exit(last)`, including all
+    /// `ControlPoint`s from nested `ControlRegion`s (recursively).
+    ///
+    /// Of those, only the two ends interact with unstructured control-flow:
+    /// * `Entry(first)` alone can be a target of a `ControlInst` (elsewhere)
+    /// * `Exit(last)` alone can have a `ControlInst` associated with it
+    ///
+    /// The `ControlInst` taking over from `Exit(last)` definitely has to exist
+    /// if there is any unstructured control-flow in the function, as all exits
+    /// out of the function have to be unstructured in that case.
+    /// In other words, `Exit(last)` not having a `ControlInst` can only occur
+    /// for the implicit structured return at the end of a function's body, and
+    /// such a return implies the lack of any unstructured control-flow, as it's
+    /// impossible to nest unstructured control-flow in structured control-flow.
+    //
+    // FIXME(eddyb) is using `EntityListIter` here good? CFG traversal can end up
+    // in structured control-flow through an `Entry` into a `ControlNode`, that
+    // it keeps following `.next_in_list()` to find the last node in the list,
+    // but ideally it shouldn't have to do that work in the first place.
+    // Alternatively, each target from a `ControlInst` could have the whole list
+    // of chained `ControlNode`s in the `Entry` case, instead of just the first.
+    LinearChain(EntityListIter<ControlNode>),
+}
+
+impl ControlPointRange {
+    /// Return the first `ControlPoint` in this `ControlPointRange`.
+    ///
+    /// This is the only `ControlPoint` in a `ControlPointRange` that can be
+    /// targeted by `ControlInst`s in the CFG (i.e. be the destination of an edge).
+    pub fn first(self) -> ControlPoint {
+        match self {
+            Self::UnstructuredExit(control_node) => ControlPoint::Exit(control_node),
+            Self::LinearChain(control_node_list) => ControlPoint::Entry(control_node_list.first),
+        }
+    }
+
+    /// Return the last `ControlPoint` in this `ControlPointRange`, which is
+    /// always an `Exit` (e.g. the final exit of a `ControlRegion`).
+    ///
+    /// This is the only `ControlPoint` in a `ControlPointRange` that can have
+    /// `ControlInst`s attached to in the CFG (i.e. be the source of an edge).
+    pub fn last(self) -> ControlPoint {
+        match self {
+            Self::UnstructuredExit(control_node) => ControlPoint::Exit(control_node),
+            Self::LinearChain(control_node_list) => ControlPoint::Exit(control_node_list.last),
+        }
+    }
+
+    /// Iterate over the `ControlNode`s in the `ControlPointRange`, shallowly.
+    pub fn control_nodes(self) -> EntityListIter<ControlNode> {
+        match self {
+            Self::UnstructuredExit(control_node) => EntityListIter {
+                first: control_node,
+                last: control_node,
+            },
+            Self::LinearChain(control_node_list) => control_node_list,
+        }
+    }
+}
+
+/// Helper type for deep traversal of `ControlPointRange`, which tracks the
+/// necessary context for "peeking around" within the `ControlPointRange`.
+#[derive(Copy, Clone)]
+pub struct ControlCursor<'a, 'p, P> {
+    pub position: P,
+    pub parent: Option<&'p ControlCursor<'a, 'p, (ControlNode, &'a ControlRegion)>>,
+}
+
+impl<'a> FuncAt<'a, ControlCursor<'a, '_, ControlPoint>> {
+    /// Return the next `ControlPoint` (wrapped in `ControlCursor`) in a linear
+    /// chain within structured control-flow (i.e. no branching to child regions).
+    ///
+    /// For exits out of a parent `ControlRegion`, the value outputs are also
+    /// provided (as they would otherwise require non-trivial work to get to).
+    //
+    // FIXME(eddyb) introduce more types to make the whole `ControlRegion` outputs
+    // stuff seem less hacky.
+    pub fn unique_successor(self) -> Option<(Self, Option<&'a [Value]>)> {
+        let cursor = self.position;
+        let control_node = cursor.position.control_node();
+        let control_node_def = &self.control_nodes[control_node];
+        match cursor.position {
+            // Entering a `ControlNode` depends entirely on the `ControlNodeKind`.
+            ControlPoint::Entry(_) => {
+                let child_regions: &[ControlRegion] = match control_node_def.kind {
+                    ControlNodeKind::Block { .. } => &[],
+
+                    ControlNodeKind::UnstructuredMerge => {
+                        unreachable!("cfg: `UnstructuredMerge` can only be exited, not entered");
+                    }
+                };
+
+                if child_regions.is_empty() {
+                    Some((
+                        self.at(ControlCursor {
+                            position: ControlPoint::Exit(control_node),
+                            parent: cursor.parent,
+                        }),
+                        None,
+                    ))
+                } else {
+                    None
+                }
+            }
+
+            // Exiting a `ControlNode` chains to a sibling/parent.
+            ControlPoint::Exit(_) => {
+                match control_node_def.next_in_list() {
+                    // Enter the next sibling in the `ControlRegion`, if one exists.
+                    Some(next_control_node) => Some((
+                        self.at(ControlCursor {
+                            position: ControlPoint::Entry(next_control_node),
+                            parent: cursor.parent,
+                        }),
+                        None,
+                    )),
+
+                    // Exit the parent `ControlNode`, if one exists.
+                    None => cursor.parent.map(|parent| {
+                        let (parent_control_node, parent_control_region) = parent.position;
+                        (
+                            self.at(ControlCursor {
+                                position: ControlPoint::Exit(parent_control_node),
+                                parent: parent.parent,
+                            }),
+                            Some(&parent_control_region.outputs[..]),
+                        )
+                    }),
+                }
+            }
+        }
+    }
+}
+
+impl<'a> FuncAt<'a, ControlPointRange> {
+    /// Traverse every `ControlPoint` described by this `ControlPointRange`,
+    /// in reverse post-order (RPO), with `f` receiving each `ControlPoint`
+    /// in turn (wrapped in `ControlCursor`, for further traversal flexibility),
+    /// and being able to stop iteration by returning `Err`.
+    ///
+    /// RPO iteration over a CFG provides certain guarantees, most importantly
+    /// that SSA definitions are visited before any of their uses.
+    ///
+    /// While this form of traversal is efficient enough (it doesn't allocate,
+    /// as non-trivial `ControlPointRange`s only describe structured control-flow,
+    /// which doesn't require bookkeeping to visit every `ControlNode` only once,
+    /// nor the kind of buffering involved in arbitrary CFG RPO), it should be
+    /// nevertheless avoided where possible, in favor of custom recursion on the
+    /// `ControlNode`s described by `ControlPointRange::LinearChain`, which can
+    /// handle structured control-flow in a manner simpler than arbitrary CFGs.
+    pub fn rev_post_order_try_for_each<E>(
+        self,
+        mut f: impl FnMut(FuncAt<'a, ControlCursor<'a, '_, ControlPoint>>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        match self.position {
+            ControlPointRange::UnstructuredExit(control_node) => f(self.at(ControlCursor {
+                position: ControlPoint::Exit(control_node),
+                parent: None,
+            })),
+            ControlPointRange::LinearChain(control_node_list) => self
+                .at(Some(control_node_list))
+                .rev_post_order_try_for_each_inner(&mut f, None),
+        }
+    }
+}
+
+impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
+    fn rev_post_order_try_for_each_inner<E>(
+        self,
+        f: &mut impl FnMut(FuncAt<'a, ControlCursor<'a, '_, ControlPoint>>) -> Result<(), E>,
+        parent: Option<&ControlCursor<'a, '_, (ControlNode, &'a ControlRegion)>>,
+    ) -> Result<(), E> {
+        for func_at_control_node in self {
+            let child_regions: &[ControlRegion] = match func_at_control_node.def().kind {
+                ControlNodeKind::Block { .. } => &[],
+
+                ControlNodeKind::UnstructuredMerge => {
+                    unreachable!("cfg: `UnstructuredMerge` can only be exited, not entered");
+                }
+            };
+
+            let control_node = func_at_control_node.position;
+            f(self.at(ControlCursor {
+                position: ControlPoint::Entry(control_node),
+                parent,
+            }))?;
+            for region in child_regions {
+                self.at(region.children)
+                    .into_iter()
+                    .rev_post_order_try_for_each_inner(
+                        f,
+                        Some(&ControlCursor {
+                            position: (control_node, region),
+                            parent,
+                        }),
+                    )?;
+            }
+            f(self.at(ControlCursor {
+                position: ControlPoint::Exit(control_node),
+                parent,
+            }))?;
+        }
+        Ok(())
+    }
+}
+
 impl ControlFlowGraph {
-    /// Iterate over all `ControlPoint`s reachable through the CFG for `func_def_body`,
-    /// in reverse post-order (RPO).
+    /// Iterate over all `ControlPointRange`s (effectively, `ControlPoint`s)
+    /// reachable through `func_def_body`'s CFG, in reverse post-order (RPO).
     ///
     /// RPO iteration over a CFG provides certain guarantees, most importantly
     /// that SSA definitions are visited before any of their uses.
     pub fn rev_post_order(
         &self,
         func_def_body: &FuncDefBody,
-    ) -> impl DoubleEndedIterator<Item = ControlPoint> {
+    ) -> impl DoubleEndedIterator<Item = ControlPointRange> {
         let mut post_order = SmallVec::<[_; 8]>::new();
         {
             let mut incoming_edge_counts = EntityOrientedDenseMap::new();
@@ -139,21 +359,6 @@ impl ControlFlowGraph {
 
         post_order.into_iter().rev()
     }
-}
-
-/// The logical continuation of a `ControlRegion` (used by `traverse`).
-enum ControlRegionSuccessor<'a> {
-    /// No structural exit allowed, only `ControlInst`.
-    Unstructured,
-
-    /// Structural return implied by leaving a function body.
-    Return,
-
-    /// The `ControlRegion` has a parent `ControlNode`, which must also be exited.
-    ExitParent {
-        parent: ControlNode,
-        parent_region_successor: &'a ControlRegionSuccessor<'a>,
-    },
 }
 
 // HACK(eddyb) this only serves to disallow accessing `private_count` field of
@@ -191,130 +396,114 @@ impl ControlFlowGraph {
         &self,
         func_def_body: &FuncDefBody,
         incoming_edge_counts: &mut EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
-        pre_order_visit: &mut impl FnMut(ControlPoint),
-        post_order_visit: &mut impl FnMut(ControlPoint),
+        pre_order_visit: &mut impl FnMut(ControlPointRange),
+        post_order_visit: &mut impl FnMut(ControlPointRange),
     ) {
         let body_children = func_def_body.body.children.iter();
-        let body_entry = ControlPoint::Entry(body_children.first);
+        let body_range = ControlPointRange::LinearChain(body_children);
         let body_exit = ControlPoint::Exit(body_children.last);
 
-        let body_successor = if self.control_insts.get(body_exit).is_some() {
-            ControlRegionSuccessor::Unstructured
-        } else {
-            ControlRegionSuccessor::Return
-        };
-
-        self.traverse(
-            func_def_body.at(body_entry),
-            &body_successor,
-            incoming_edge_counts,
-            pre_order_visit,
-            post_order_visit,
-        );
-    }
-
-    fn traverse(
-        &self,
-        func_at_point: FuncAt<ControlPoint>,
-        region_successor: &ControlRegionSuccessor<'_>,
-        incoming_edge_counts: &mut EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
-        pre_order_visit: &mut impl FnMut(ControlPoint),
-        post_order_visit: &mut impl FnMut(ControlPoint),
-    ) {
-        let point = func_at_point.position;
-
-        // FIXME(eddyb) `EntityOrientedDenseMap` should have an `entry` API.
-        if let Some(existing_count) = incoming_edge_counts.get_mut(point) {
-            *existing_count += IncomingEdgeCount::ONE;
-            return;
-        }
-        incoming_edge_counts.insert(point, IncomingEdgeCount::ONE);
-
-        pre_order_visit(point);
-
-        let mut visit_target = |target, new_region_successor: &_| {
+        if self.control_insts.get(body_exit).is_some() {
             self.traverse(
-                func_at_point.at(target),
-                new_region_successor,
+                func_def_body.at(body_range),
                 incoming_edge_counts,
                 pre_order_visit,
                 post_order_visit,
             );
+        } else {
+            // Entirely structured function body, no CFG traversal needed.
+
+            // FIXME(eddyb) this feels potentially wasteful, but it can probably
+            // be alleviated by `FuncDefBody` not keeping its `ControlFlowGraph`
+            // once structurization is complete, and not ending up in traversal
+            // APIs like this, afterwards, in the first place.
+            incoming_edge_counts.insert(
+                ControlPoint::Entry(body_children.first),
+                IncomingEdgeCount::ONE,
+            );
+
+            pre_order_visit(body_range);
+            post_order_visit(body_range);
+        }
+    }
+
+    fn traverse(
+        &self,
+        func_at_unnormalized_point_range: FuncAt<ControlPointRange>,
+        incoming_edge_counts: &mut EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
+        pre_order_visit: &mut impl FnMut(ControlPointRange),
+        post_order_visit: &mut impl FnMut(ControlPointRange),
+    ) {
+        let control_nodes = func_at_unnormalized_point_range.control_nodes;
+
+        // The initial `ControlPointRange` is "unnormalized" because it might be
+        // shorter than what's actually possible, but it would be wasteful to
+        // compute the last `ControlNode` in the `LinearChain`, so it's not done
+        // in the caller. If that ever changes, the normalization code can be
+        // switched to assert that the provided range is always normalized.
+        let unnormalized_point_range = func_at_unnormalized_point_range.position;
+
+        // The first `ControlPoint` in the `ControlPointRange` is the same,
+        // regardless of normalization (which extends the last `ControlPoint`).
+        let first_point = unnormalized_point_range.first();
+
+        // FIXME(eddyb) `EntityOrientedDenseMap` should have an `entry` API.
+        if let Some(existing_count) = incoming_edge_counts.get_mut(first_point) {
+            *existing_count += IncomingEdgeCount::ONE;
+            return;
+        }
+        incoming_edge_counts.insert(first_point, IncomingEdgeCount::ONE);
+
+        // Normalize the `ControlPointRange`, extending its last `ControlPoint`
+        // (which is always an `Exit`) as much as necessary.
+        let point_range = match unnormalized_point_range {
+            ControlPointRange::UnstructuredExit(_) => unnormalized_point_range,
+            ControlPointRange::LinearChain(mut control_node_list) => {
+                assert!(
+                    control_nodes[control_node_list.first]
+                        .prev_in_list()
+                        .is_none(),
+                    "cfg: unstructured targets cannot point to the middle of \
+                     a structured `ControlRegion`, only to its very start"
+                );
+
+                // Extend the list with siblings from the parent `ControlRegion`.
+                while let Some(next) = control_nodes[control_node_list.last].next_in_list() {
+                    control_node_list.last = next;
+                }
+
+                ControlPointRange::LinearChain(control_node_list)
+            }
         };
 
-        let control_node = point.control_node();
-        let control_node_def = &func_at_point.control_nodes[control_node];
+        pre_order_visit(point_range);
 
-        let mut used_unstructured_control_inst = false;
-        match point {
-            // Entering a `ControlNode` depends entirely on the `ControlNodeKind`.
-            ControlPoint::Entry(_) => {
-                let child_regions: &[ControlRegion] = match control_node_def.kind {
-                    // Blocks don't have `ControlInst`s attached to their `Entry`,
-                    // only to their `Exit`, so we pretend here there is an edge
-                    // between their `Entry` and `Exit` points.
-                    ControlNodeKind::Block { .. } => {
-                        visit_target(ControlPoint::Exit(control_node), region_successor);
-                        &[]
-                    }
+        let control_inst = self
+            .control_insts
+            .get(point_range.last())
+            .expect("cfg: missing `ControlInst`, despite having left structured control-flow");
 
-                    ControlNodeKind::UnstructuredMerge => {
-                        unreachable!("cfg: `UnstructuredMerge` can only be exited, not entered");
-                    }
-                };
-                for region in child_regions {
-                    visit_target(
-                        ControlPoint::Entry(region.children.iter().first),
-                        &ControlRegionSuccessor::ExitParent {
-                            parent: control_node,
-                            parent_region_successor: region_successor,
-                        },
-                    )
+        for &target in &control_inst.targets {
+            let target_range = match target {
+                ControlPoint::Entry(control_node) => {
+                    ControlPointRange::LinearChain(EntityListIter {
+                        first: control_node,
+                        last: control_node,
+                    })
                 }
-            }
-
-            // Exiting a `ControlNode` chains to a sibling/parent.
-            ControlPoint::Exit(_) => {
-                match control_node_def.next_in_list() {
-                    // Enter the next sibling in the `ControlRegion`, if one exists.
-                    Some(next_control_node) => {
-                        visit_target(ControlPoint::Entry(next_control_node), region_successor);
-                    }
-
-                    // Exit the parent `ControlNode`, if one exists.
-                    None => match region_successor {
-                        ControlRegionSuccessor::Unstructured => {
-                            let control_inst = self.control_insts.get(point).expect(
-                                "cfg: missing `ControlInst`, despite \
-                                 having left structured control-flow",
-                            );
-                            // With a `ControlInst`, it can be followed regardless of `ControlNodeKind`.
-                            for &target in &control_inst.targets {
-                                visit_target(target, &ControlRegionSuccessor::Unstructured);
-                            }
-                            used_unstructured_control_inst = true;
-                        }
-
-                        ControlRegionSuccessor::Return => {}
-
-                        &ControlRegionSuccessor::ExitParent {
-                            parent,
-                            parent_region_successor,
-                        } => visit_target(ControlPoint::Exit(parent), parent_region_successor),
-                    },
+                ControlPoint::Exit(control_node) => {
+                    ControlPointRange::UnstructuredExit(control_node)
                 }
-            }
-        }
-
-        if !used_unstructured_control_inst {
-            assert!(
-                self.control_insts.get(point).is_none(),
-                "cfg: `ControlPoint` has associated `ControlInst`, but didn't \
-                 get used because structured control-flow took precedence"
+            };
+            self.traverse(
+                func_at_unnormalized_point_range.at(target_range),
+                incoming_edge_counts,
+                pre_order_visit,
+                post_order_visit,
             );
         }
 
-        post_order_visit(point);
+        post_order_visit(point_range);
     }
 }
 
@@ -401,13 +590,27 @@ impl<'a> Structurizer<'a> {
         }
 
         // Entering a block implies the block itself, and also exiting the block.
+        //
+        // FIXME(eddyb) replace this with something more general about encountering
+        // already-structured regions and "bringing them into the fold".
         if let ControlPoint::Entry(control_node) = edge_bundle.target {
             if let ControlNodeKind::Block { .. } =
                 self.func_def_body.control_nodes[control_node].kind
             {
+                let exit_point = ControlPoint::Exit(control_node);
+
+                // HACK(eddyb) the initial `incoming_edge_counts` can't account
+                // for such edges internal to structured control-flow, so they
+                // have to be supplanted here.
+                assert!(
+                    self.incoming_edge_counts
+                        .insert(exit_point, IncomingEdgeCount::ONE)
+                        .is_none()
+                );
+
                 let mut region = self
                     .try_claim_edge_bundle(IncomingEdgeBundle {
-                        target: ControlPoint::Exit(control_node),
+                        target: exit_point,
                         accumulated_count: IncomingEdgeCount::ONE,
                     })
                     .unwrap();

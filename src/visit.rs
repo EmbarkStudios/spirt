@@ -1,9 +1,9 @@
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef,
-    ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
-    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    EntityListIter, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
+    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -340,31 +340,23 @@ impl InnerVisit for FuncParam {
 
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            data_insts: _,
-            control_nodes,
-            body: _,
-            cfg,
-        } = self;
+        for point_range in self.cfg.rev_post_order(self) {
+            self.at(Some(point_range.control_nodes()))
+                .inner_visit_with(visitor);
 
-        for point in cfg.rev_post_order(self) {
-            // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
-            // instead of `Entry`, because they don't have have `Entry`s.
-            let can_uniquely_visit = match control_nodes[point.control_node()].kind {
-                ControlNodeKind::UnstructuredMerge => {
-                    assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                    true
-                }
-                _ => matches!(point, cfg::ControlPoint::Entry(_)),
-            };
-
-            if can_uniquely_visit {
-                visitor.visit_control_node_def(self.at(point.control_node()));
-            }
-
-            if let Some(control_inst) = cfg.control_insts.get(point) {
+            if let Some(control_inst) = self.cfg.control_insts.get(point_range.last()) {
                 control_inst.inner_visit_with(visitor);
             }
+        }
+    }
+}
+
+// FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
+// requirement, whereas this has `'a` in `self: FuncAt<'a, ...>`.
+impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
+    fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
+        for func_at_control_node in self {
+            visitor.visit_control_node_def(func_at_control_node);
         }
     }
 }
