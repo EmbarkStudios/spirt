@@ -567,15 +567,17 @@ impl<'a> Structurizer<'a> {
             } = body_region;
 
             // FIXME(eddyb) make e.g. a dummy block when childless.
-            if let Some(children) = children {
-                self.func_def_body.body.children = children;
-                match successor {
-                    PartialControlRegionSuccessor::Unstructured(control_inst) => {
-                        self.func_def_body
-                            .cfg
-                            .control_insts
-                            .insert(ControlPoint::Exit(children.iter().last), control_inst);
-                    }
+            let children = children.expect(
+                "cfg::Structurizer::try_structurize_func: did not expect blockless function",
+            );
+
+            self.func_def_body.body.children = children;
+            match successor {
+                PartialControlRegionSuccessor::Unstructured(control_inst) => {
+                    self.func_def_body
+                        .cfg
+                        .control_insts
+                        .insert(ControlPoint::Exit(children.iter().last), control_inst);
                 }
             }
         }
