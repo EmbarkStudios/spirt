@@ -523,6 +523,15 @@ pub enum ControlNodeKind {
         // (OTOH, empty blocks could easily arise through e.g. dead code removal)
         insts: Option<EntityList<DataInst>>,
     },
+
+    /// Choose one `ControlRegion` out of `cases` to execute, based on a single
+    /// value input (`scrutinee`) interpreted according to `SelectionKind`.
+    Select {
+        kind: SelectionKind,
+        scrutinee: Value,
+
+        cases: Vec<ControlRegion>,
+    },
 }
 
 #[derive(Clone)]

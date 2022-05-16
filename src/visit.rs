@@ -1,9 +1,9 @@
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef,
-    EntityListIter, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncDefBody, FuncParam, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind,
-    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
+    DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncAt, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -352,6 +352,19 @@ impl InnerVisit for FuncDefBody {
 }
 
 // FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
+// requirement, whereas this has `'a` in `self: FuncAt<'a, &'a ControlRegion>`.
+impl<'a> FuncAt<'a, &'a ControlRegion> {
+    fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
+        let ControlRegion { children, outputs } = self.position;
+
+        self.at(*children).into_iter().inner_visit_with(visitor);
+        for v in outputs {
+            visitor.visit_value_use(v);
+        }
+    }
+}
+
+// FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ...>`.
 impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
     fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
@@ -367,11 +380,21 @@ impl<'a> FuncAt<'a, ControlNode> {
     fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
         let ControlNodeDef { kind, outputs } = self.def();
 
-        match *kind {
+        match kind {
             ControlNodeKind::UnstructuredMerge => {}
             ControlNodeKind::Block { insts } => {
-                for func_at_inst in self.at(insts) {
+                for func_at_inst in self.at(*insts) {
                     visitor.visit_data_inst_def(func_at_inst.def());
+                }
+            }
+            ControlNodeKind::Select {
+                kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                scrutinee,
+                cases,
+            } => {
+                visitor.visit_value_use(scrutinee);
+                for case in cases {
+                    self.at(case).inner_visit_with(visitor);
                 }
             }
         }

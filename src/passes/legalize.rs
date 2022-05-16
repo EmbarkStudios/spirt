@@ -3,9 +3,11 @@ use crate::{cfg, AttrSet, Const, Context, DeclDef, Func, FxIndexSet, GlobalVar, 
 
 /// Apply the `cfg::Structurize` algorithm to all function definitions in `module`.
 pub fn structurize_func_cfgs(module: &mut Module) {
+    let cx = &module.cx();
+
     // FIXME(eddyb) reuse this collection work in some kind of "pass manager".
     let mut collector = ReachableUseCollector {
-        cx: module.cx_ref(),
+        cx,
         module,
 
         seen_types: FxIndexSet::default(),
@@ -19,7 +21,7 @@ pub fn structurize_func_cfgs(module: &mut Module) {
 
     for &func in &collector.seen_funcs {
         if let DeclDef::Present(func_def_body) = &mut module.funcs[func].def {
-            cfg::Structurizer::new(func_def_body).try_structurize_func();
+            cfg::Structurizer::new(cx, func_def_body).try_structurize_func();
         }
     }
 }

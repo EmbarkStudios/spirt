@@ -1,9 +1,9 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, ControlNode, ControlNodeKind, ControlRegion, EntityList, EntityListIter,
-    EntityOrientedDenseMap, EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, SelectionKind,
-    Value,
+    spv, AttrSet, Context, ControlNode, ControlNodeDef, ControlNodeKind, ControlRegion, EntityList,
+    EntityListIter, EntityOrientedDenseMap, EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap,
+    SelectionKind, Value,
 };
 use smallvec::SmallVec;
 
@@ -207,12 +207,12 @@ impl<'a> FuncAt<'a, ControlCursor<'a, '_, ControlPoint>> {
         match cursor.position {
             // Entering a `ControlNode` depends entirely on the `ControlNodeKind`.
             ControlPoint::Entry(_) => {
-                let child_regions: &[ControlRegion] = match control_node_def.kind {
-                    ControlNodeKind::Block { .. } => &[],
-
+                let child_regions: &[_] = match &control_node_def.kind {
                     ControlNodeKind::UnstructuredMerge => {
                         unreachable!("cfg: `UnstructuredMerge` can only be exited, not entered");
                     }
+                    ControlNodeKind::Block { .. } => &[],
+                    ControlNodeKind::Select { cases, .. } => cases,
                 };
 
                 if child_regions.is_empty() {
@@ -296,12 +296,12 @@ impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
         parent: Option<&ControlCursor<'a, '_, (ControlNode, &'a ControlRegion)>>,
     ) -> Result<(), E> {
         for func_at_control_node in self {
-            let child_regions: &[ControlRegion] = match func_at_control_node.def().kind {
-                ControlNodeKind::Block { .. } => &[],
-
+            let child_regions: &[_] = match &func_at_control_node.def().kind {
                 ControlNodeKind::UnstructuredMerge => {
                     unreachable!("cfg: `UnstructuredMerge` can only be exited, not entered");
                 }
+                ControlNodeKind::Block { .. } => &[],
+                ControlNodeKind::Select { cases, .. } => cases,
             };
 
             let control_node = func_at_control_node.position;
@@ -501,6 +501,7 @@ impl ControlFlowGraph {
 }
 
 pub struct Structurizer<'a> {
+    cx: &'a Context,
     func_def_body: &'a mut FuncDefBody,
     incoming_edge_counts: EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
 }
@@ -514,6 +515,15 @@ pub struct Structurizer<'a> {
 struct IncomingEdgeBundle {
     target: ControlPoint,
     accumulated_count: IncomingEdgeCount,
+}
+
+impl IncomingEdgeBundle {
+    fn single(target: ControlPoint) -> Self {
+        Self {
+            target,
+            accumulated_count: IncomingEdgeCount::ONE,
+        }
+    }
 }
 
 /// Partially structurized `ControlRegion`.
@@ -534,7 +544,7 @@ enum PartialControlRegionSuccessor {
 }
 
 impl<'a> Structurizer<'a> {
-    pub fn new(func_def_body: &'a mut FuncDefBody) -> Self {
+    pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
         let mut incoming_edge_counts = EntityOrientedDenseMap::new();
         func_def_body.cfg.traverse_whole_func(
             func_def_body,
@@ -543,35 +553,29 @@ impl<'a> Structurizer<'a> {
             &mut |_| {},
         );
         Self {
+            cx,
             func_def_body,
             incoming_edge_counts,
         }
     }
 
     pub fn try_structurize_func(mut self) {
-        let entry_edge = IncomingEdgeBundle {
-            target: ControlPoint::Entry(self.func_def_body.body.children.iter().first),
-            accumulated_count: IncomingEdgeCount::ONE,
-        };
+        let entry_edge = IncomingEdgeBundle::single(ControlPoint::Entry(
+            self.func_def_body.body.children.iter().first,
+        ));
         if let Ok(body_region) = self.try_claim_edge_bundle(entry_edge) {
             let PartialControlRegion {
                 children,
                 successor,
-            } = body_region;
-
-            // FIXME(eddyb) make e.g. a dummy block when childless.
-            let children = children.expect(
-                "cfg::Structurizer::try_structurize_func: did not expect blockless function",
-            );
-
-            self.func_def_body.body.children = children;
+            } = &body_region;
+            self.func_def_body.body.children =
+                children.unwrap_or_else(|| self.empty_control_region_children());
             match successor {
-                PartialControlRegionSuccessor::Unstructured(control_inst) => {
-                    self.func_def_body
-                        .cfg
-                        .control_insts
-                        .insert(ControlPoint::Exit(children.iter().last), control_inst);
-                }
+                // FIXME(eddyb) support structured function body exits.
+                PartialControlRegionSuccessor::Unstructured(_) => self.undo_claim(
+                    ControlPoint::Exit(self.func_def_body.body.children.iter().last),
+                    body_region,
+                ),
             }
         }
     }
@@ -604,10 +608,7 @@ impl<'a> Structurizer<'a> {
                 );
 
                 let mut region = self
-                    .try_claim_edge_bundle(IncomingEdgeBundle {
-                        target: exit_point,
-                        accumulated_count: IncomingEdgeCount::ONE,
-                    })
+                    .try_claim_edge_bundle(IncomingEdgeBundle::single(exit_point))
                     .unwrap();
 
                 region.children = Some(EntityList::insert_first(
@@ -632,36 +633,251 @@ impl<'a> Structurizer<'a> {
                 )
             });
 
-        {
-            let ControlInst {
-                attrs,
-                kind,
-                inputs,
-                targets,
-                target_merge_outputs,
-            } = &control_inst;
+        Ok(self.claim_control_inst(control_inst))
+    }
 
-            // FIXME(eddyb) this loses `attrs`.
-            let _ = attrs;
+    fn claim_control_inst(&mut self, control_inst: ControlInst) -> PartialControlRegion {
+        let ControlInst {
+            attrs,
+            kind,
+            inputs,
+            targets,
+            target_merge_outputs,
+        } = &control_inst;
 
-            // FIXME(eddyb) support more than merely linear control-flow.
-            if target_merge_outputs.is_empty() {
-                if let ControlInstKind::Branch = kind {
-                    assert!(inputs.is_empty() && targets.len() == 1);
-                    let branch_edge = IncomingEdgeBundle {
-                        target: targets[0],
-                        accumulated_count: IncomingEdgeCount::ONE,
-                    };
-                    if let Ok(region) = self.try_claim_edge_bundle(branch_edge) {
-                        return Ok(region);
+        // FIXME(eddyb) this loses `attrs`.
+        let _ = attrs;
+
+        let mut child_regions = Some(SmallVec::<[_; 8]>::with_capacity(targets.len()));
+        for &target in targets {
+            match self.try_claim_edge_bundle(IncomingEdgeBundle::single(target)) {
+                Ok(child_region) => child_regions.as_mut().unwrap().push(child_region),
+
+                // On the first error, undo claims to previous child regions.
+                Err(()) => {
+                    for (&undo_target, undo_child_region) in
+                        targets.iter().zip(child_regions.take().unwrap())
+                    {
+                        self.undo_claim(undo_target, undo_child_region);
                     }
+                    break;
                 }
             }
         }
 
-        Ok(PartialControlRegion {
+        if let Some(child_regions) = child_regions {
+            // HACK(eddyb) `IncomingEdgeCount::ONE` on each target should imply
+            // that there are no `target_merge_outputs`, in theory.
+            assert!(target_merge_outputs.is_empty());
+
+            match kind {
+                ControlInstKind::Unreachable | ControlInstKind::ExitInvocation(_) => {
+                    assert_eq!(child_regions.len(), 0);
+
+                    // FIXME(eddyb) introduce equivalent `ControlNodeKind` for these.
+                }
+
+                ControlInstKind::Return => {
+                    assert_eq!(child_regions.len(), 0);
+
+                    // FIXME(eddyb) encode this into `PartialControlRegionSuccessor`.
+                }
+
+                // FIXME(eddyb) support more than merely linear control-flow.
+                ControlInstKind::Branch => {
+                    assert_eq!((inputs.len(), child_regions.len()), (0, 1));
+
+                    return child_regions.into_iter().nth(0).unwrap();
+                }
+
+                ControlInstKind::SelectBranch(_) => {
+                    assert_eq!(inputs.len(), 1);
+
+                    let scrutinee = inputs[0];
+
+                    // HACK(eddyb) special-case the happy path of all child
+                    // regions branching together into a common merge point.
+                    struct NoCommonMerge;
+                    let merge_bundle = child_regions
+                        .iter()
+                        .map(|child_region| match &child_region.successor {
+                            PartialControlRegionSuccessor::Unstructured(ControlInst {
+                                attrs: _,
+                                kind: ControlInstKind::Branch,
+                                inputs,
+                                targets,
+                                target_merge_outputs: _,
+                            }) => {
+                                assert_eq!((inputs.len(), targets.len()), (0, 1));
+
+                                Ok(IncomingEdgeBundle::single(targets[0]))
+                            }
+                            _ => Err(NoCommonMerge),
+                        })
+                        .reduce(
+                            |merge_bundle, new_bundle| match (merge_bundle, new_bundle) {
+                                (Ok(a), Ok(b)) if a.target == b.target => Ok(IncomingEdgeBundle {
+                                    target: a.target,
+                                    accumulated_count: a.accumulated_count + b.accumulated_count,
+                                }),
+                                _ => Err(NoCommonMerge),
+                            },
+                        )
+                        .unwrap_or(
+                            // FIXME(eddyb) caseless selections can be supported
+                            // by introducing an `Unreachable` after them.
+                            Err(NoCommonMerge),
+                        );
+
+                    if let Ok(merge_bundle) = merge_bundle {
+                        if let Ok(mut region) = self.try_claim_edge_bundle(merge_bundle) {
+                            // If an `UnstructuredMerge` is being `Exit`ed, that
+                            // means the unstructured CFG effectively has phis,
+                            // which have to be taken into account, and the
+                            // merge `ControlNode` reused.
+                            let unstructured_exit_merge = match merge_bundle.target {
+                                ControlPoint::Exit(merge_node) => {
+                                    assert!(matches!(
+                                        self.func_def_body.control_nodes[merge_node].kind,
+                                        ControlNodeKind::UnstructuredMerge
+                                    ));
+                                    Some(merge_node)
+                                }
+                                _ => None,
+                            };
+
+                            let kind = match control_inst.kind {
+                                ControlInstKind::SelectBranch(kind) => kind,
+                                _ => unreachable!(),
+                            };
+                            let cases = child_regions
+                                .into_iter()
+                                .map(|child_region| {
+                                    let PartialControlRegion {
+                                        children,
+                                        successor,
+                                    } = child_region;
+
+                                    let outputs;
+                                    match successor {
+                                        PartialControlRegionSuccessor::Unstructured(
+                                            ControlInst {
+                                                // FIXME(eddyb) this loses `attrs`.
+                                                attrs: _,
+                                                kind: ControlInstKind::Branch,
+                                                inputs: _,
+                                                targets: _,
+                                                mut target_merge_outputs,
+                                            },
+                                        ) => {
+                                            outputs = unstructured_exit_merge
+                                                .and_then(|merge_node| {
+                                                    target_merge_outputs.remove(&merge_node)
+                                                })
+                                                .unwrap_or_default();
+                                            assert!(target_merge_outputs.is_empty());
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                    ControlRegion {
+                                        children: children.unwrap_or_else(|| {
+                                            self.empty_control_region_children()
+                                        }),
+                                        outputs,
+                                    }
+                                })
+                                .collect();
+
+                            let kind = ControlNodeKind::Select {
+                                kind,
+                                scrutinee,
+                                cases,
+                            };
+                            let select_node = match unstructured_exit_merge {
+                                Some(merge_node) => {
+                                    // Reuse the `UnstructuredMerge` region, and
+                                    // specifically its `outputs`, which cannot
+                                    // change without rewriting all their uses
+                                    // elsewhere in the function.
+                                    self.func_def_body.control_nodes[merge_node].kind = kind;
+
+                                    merge_node
+                                }
+                                _ => self.func_def_body.control_nodes.define(
+                                    self.cx,
+                                    ControlNodeDef {
+                                        kind,
+                                        outputs: [].into_iter().collect(),
+                                    }
+                                    .into(),
+                                ),
+                            };
+
+                            // FIXME(eddyb) maybe make a method for this?
+                            // It's also used in `try_claim_edge_bundle`.
+                            region.children = Some(EntityList::insert_first(
+                                region.children,
+                                select_node,
+                                &mut self.func_def_body.control_nodes,
+                            ));
+
+                            return region;
+                        }
+                    }
+                }
+            }
+
+            // Undo claims if the child regions aren't used above.
+            for (&undo_target, undo_child_region) in targets.iter().zip(child_regions) {
+                self.undo_claim(undo_target, undo_child_region);
+            }
+        }
+
+        PartialControlRegion {
             children: None,
             successor: PartialControlRegionSuccessor::Unstructured(control_inst),
-        })
+        }
+    }
+
+    /// Place back relevant information into the CFG, that was taken by claiming
+    /// an edge (bundle) to `target`, which resulted in `partial_control_region`.
+    fn undo_claim(&mut self, target: ControlPoint, partial_control_region: PartialControlRegion) {
+        let PartialControlRegion {
+            children,
+            successor,
+        } = partial_control_region;
+
+        let undo_point = children
+            .map(|list| ControlPoint::Exit(list.iter().last))
+            .unwrap_or(target);
+
+        let undo_control_inst = match successor {
+            PartialControlRegionSuccessor::Unstructured(control_inst) => control_inst,
+        };
+
+        assert!(
+            self.func_def_body
+                .cfg
+                .control_insts
+                .insert(undo_point, undo_control_inst)
+                .is_none()
+        );
+    }
+
+    /// Create an empty `Block` `ControlNode` to use as the single child of an
+    /// otherwise empty `ControlRegion`.
+    //
+    // FIXME(eddyb) should `ControlRegion`s just allowed to be empty? That might
+    // complicate anything that relies on `ControlPoint`s covering everything.
+    fn empty_control_region_children(&mut self) -> EntityList<ControlNode> {
+        let dummy_block = self.func_def_body.control_nodes.define(
+            self.cx,
+            ControlNodeDef {
+                kind: ControlNodeKind::Block { insts: None },
+                outputs: [].into_iter().collect(),
+            }
+            .into(),
+        );
+        EntityList::insert_last(None, dummy_block, &mut self.func_def_body.control_nodes)
     }
 }

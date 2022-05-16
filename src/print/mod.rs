@@ -6,10 +6,10 @@ use itertools::Itertools as _;
 use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
-    ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInst, DataInstDef,
-    DataInstKind, DeclDef, ExportKey, Exportee, Func, FuncAt, FuncDecl, FuncParam, FxIndexMap,
-    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInst,
+    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncAt,
+    FuncDecl, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -860,8 +860,8 @@ impl<'a> Printer<'a> {
                                 &*func_def_body.control_nodes[control_node];
 
                             let block_insts = match *kind {
-                                ControlNodeKind::UnstructuredMerge => None,
                                 ControlNodeKind::Block { insts } => insts,
+                                _ => None,
                             };
 
                             let defined_values = func_def_body
@@ -2125,13 +2125,9 @@ impl Print for FuncDecl {
                                 cfg::ControlPoint::Exit(_) => (None, label_header),
                             };
 
-                            let control_nodes = pretty::Node::IndentedBlock(
-                                def.at(Some(point_range.control_nodes()))
-                                    .map(|func_at_control_node| {
-                                        func_at_control_node.print(printer).into()
-                                    })
-                                    .collect(),
-                            );
+                            let control_nodes = pretty::Node::IndentedBlock(vec![
+                                def.at(Some(point_range.control_nodes())).print(printer),
+                            ]);
 
                             pretty::Fragment::new(
                                 [
@@ -2193,6 +2189,40 @@ impl Print for FuncParam {
     }
 }
 
+impl Print for FuncAt<'_, &'_ ControlRegion> {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        let ControlRegion { children, outputs } = self.position;
+
+        let outputs_footer = if !outputs.is_empty() {
+            let mut outputs = outputs.iter().map(|v| v.print(printer));
+            let outputs = if outputs.len() == 1 {
+                outputs.next().unwrap()
+            } else {
+                pretty::join_comma_sep("(", outputs, ")")
+            };
+            pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), outputs])
+        } else {
+            pretty::Fragment::default()
+        };
+
+        pretty::Fragment::new([
+            self.at(*children).into_iter().print(printer),
+            outputs_footer,
+        ])
+    }
+}
+
+impl Print for FuncAt<'_, Option<EntityListIter<ControlNode>>> {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        pretty::Fragment::new(
+            self.map(|func_at_control_node| func_at_control_node.print(printer))
+                .intersperse(pretty::Node::ForceLineSeparation.into()),
+        )
+    }
+}
+
 impl Print for FuncAt<'_, ControlNode> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
@@ -2219,7 +2249,7 @@ impl Print for FuncAt<'_, ControlNode> {
             pretty::Fragment::default()
         };
 
-        let control_node_body = match *kind {
+        let control_node_body = match kind {
             ControlNodeKind::UnstructuredMerge => printer
                 .comment_style()
                 .apply("/* unstructured merge */")
@@ -2228,7 +2258,7 @@ impl Print for FuncAt<'_, ControlNode> {
                 assert!(outputs.is_empty());
 
                 pretty::Fragment::new(
-                    self.at(insts)
+                    self.at(*insts)
                         .into_iter()
                         .map(|func_at_inst| {
                             let data_inst_def = func_at_inst.def();
@@ -2245,6 +2275,21 @@ impl Print for FuncAt<'_, ControlNode> {
                             )
                         })
                         .flat_map(|entry| [pretty::Node::ForceLineSeparation.into(), entry]),
+                )
+            }
+            ControlNodeKind::Select {
+                kind,
+                scrutinee,
+                cases,
+            } => {
+                // FIXME(eddyb) using `declarative_keyword_style` seems more
+                // appropriate here, but it's harder to spot at a glance.
+                let kw_style = printer.imperative_keyword_style();
+                kind.print_with_scrutinee_and_cases(
+                    printer,
+                    kw_style,
+                    *scrutinee,
+                    cases.iter().map(|case| self.at(case).print(printer)),
                 )
             }
         };
@@ -2373,7 +2418,7 @@ impl Print for cfg::ControlInst {
 
         let kw_style = printer.imperative_keyword_style();
         let kw = |kw| kw_style.clone().apply(kw).into();
-        let def = match *kind {
+        let def = match kind {
             cfg::ControlInstKind::Unreachable => {
                 // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
                 assert!(targets.len() == 0 && inputs.is_empty());
@@ -2390,11 +2435,11 @@ impl Print for cfg::ControlInst {
             }
             cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(spv::Inst {
                 opcode,
-                ref imms,
+                imms,
             })) => {
                 // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
                 assert!(targets.len() == 0);
-                printer.pretty_spv_inst(kw_style, opcode, imms, inputs, Print::print, None)
+                printer.pretty_spv_inst(kw_style, *opcode, imms, inputs, Print::print, None)
             }
 
             cfg::ControlInstKind::Branch => {
@@ -2402,30 +2447,43 @@ impl Print for cfg::ControlInst {
                 pretty::Fragment::new([kw("branch"), " ".into(), targets.nth(0).unwrap()])
             }
 
-            cfg::ControlInstKind::SelectBranch(SelectionKind::BoolCond) => {
-                assert_eq!((targets.len(), inputs.len()), (2, 1));
-                let [target_then, target_else] = {
-                    // HACK(eddyb) work around the lack of `Into<[T; N]>` on `SmallVec`.
-                    let mut it = targets.into_iter();
-                    [it.next().unwrap(), it.next().unwrap()]
-                };
+            cfg::ControlInstKind::SelectBranch(kind) => {
+                assert_eq!(inputs.len(), 1);
+                kind.print_with_scrutinee_and_cases(printer, kw_style, inputs[0], targets)
+            }
+        };
+
+        pretty::Fragment::new([attrs, def])
+    }
+}
+
+impl SelectionKind {
+    fn print_with_scrutinee_and_cases(
+        &self,
+        printer: &Printer<'_>,
+        kw_style: pretty::Styles,
+        scrutinee: Value,
+        mut cases: impl ExactSizeIterator<Item = pretty::Fragment>,
+    ) -> pretty::Fragment {
+        let kw = |kw| kw_style.clone().apply(kw).into();
+        match *self {
+            SelectionKind::BoolCond => {
+                assert_eq!(cases.len(), 2);
+                let [then_case, else_case] = [cases.next().unwrap(), cases.next().unwrap()];
                 pretty::Fragment::new([
                     kw("if"),
                     " ".into(),
-                    inputs[0].print(printer),
+                    scrutinee.print(printer),
                     " {".into(),
-                    pretty::Node::IndentedBlock(vec![target_then]).into(),
+                    pretty::Node::IndentedBlock(vec![then_case]).into(),
                     "} ".into(),
                     kw("else"),
                     " {".into(),
-                    pretty::Node::IndentedBlock(vec![target_else]).into(),
+                    pretty::Node::IndentedBlock(vec![else_case]).into(),
                     "}".into(),
                 ])
             }
-            cfg::ControlInstKind::SelectBranch(SelectionKind::SpvInst(spv::Inst {
-                opcode,
-                ref imms,
-            })) => {
+            SelectionKind::SpvInst(spv::Inst { opcode, ref imms }) => {
                 #[derive(Copy, Clone)]
                 struct TargetLabelId;
 
@@ -2433,10 +2491,10 @@ impl Print for cfg::ControlInst {
                     kw_style,
                     opcode,
                     imms,
-                    inputs
-                        .iter()
+                    [scrutinee]
+                        .into_iter()
                         .map(Ok)
-                        .chain((0..targets.len()).map(|_| Err(TargetLabelId))),
+                        .chain((0..cases.len()).map(|_| Err(TargetLabelId))),
                     |id, printer| match id {
                         Ok(v) => Some(v.print(printer)),
                         Err(TargetLabelId) => None,
@@ -2444,17 +2502,18 @@ impl Print for cfg::ControlInst {
                     None,
                 );
 
+                // FIXME(eddyb) this doesn't work well for structured selects.
                 pretty::Fragment::new([
                     header,
-                    match targets.len() {
+                    match cases.len() {
                         0 => pretty::Fragment::default(),
-                        1 => pretty::Fragment::new([" ".into(), targets.nth(0).unwrap()]),
+                        1 => pretty::Fragment::new([" ".into(), cases.nth(0).unwrap()]),
                         _ => pretty::join_comma_sep(
                             " {",
-                            targets.map(|target| {
+                            cases.map(|case| {
                                 pretty::Fragment::new([
                                     pretty::Node::ForceLineSeparation.into(),
-                                    target,
+                                    case,
                                 ])
                             }),
                             "}",
@@ -2462,9 +2521,7 @@ impl Print for cfg::ControlInst {
                     },
                 ])
             }
-        };
-
-        pretty::Fragment::new([attrs, def])
+        }
     }
 }
 

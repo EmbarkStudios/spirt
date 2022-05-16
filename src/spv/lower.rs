@@ -1158,8 +1158,8 @@ impl Module {
                 let current_control_node_def =
                     &mut func_def_body.control_nodes[current_block_control_node];
                 let current_block_insts = match &mut current_control_node_def.kind {
-                    ControlNodeKind::UnstructuredMerge => unreachable!(),
                     ControlNodeKind::Block { insts } => insts,
+                    _ => unreachable!(),
                 };
 
                 if is_last_in_block {

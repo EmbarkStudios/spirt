@@ -116,6 +116,7 @@ def_well_known! {
         FunctionControl,
         Decoration,
         LinkageType,
+        SelectionControl,
 
         LiteralInteger,
         LiteralExtInstInteger,

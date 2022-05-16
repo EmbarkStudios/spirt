@@ -1,9 +1,9 @@
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, DataInstDef, DataInstKind, DeclDef,
-    EntityListIter, ExportKey, Exportee, Func, FuncAtMut, FuncDecl, FuncDefBody, FuncParam,
-    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
+    DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncAtMut, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
 
@@ -481,13 +481,67 @@ impl InnerInPlaceTransform for FuncAtMut<'_, Option<EntityListIter<ControlNode>>
 impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         // HACK(eddyb) handle `kind` separately to allow reborrowing `FuncAtMut`.
-        match self.reborrow().def().kind {
-            ControlNodeKind::UnstructuredMerge => {}
-            ControlNodeKind::Block { insts } => {
+        let num_child_regions = match &mut self.reborrow().def().kind {
+            ControlNodeKind::UnstructuredMerge => 0,
+            &mut ControlNodeKind::Block { insts } => {
                 let mut func_at_inst_iter = self.reborrow().at(insts).into_iter();
                 while let Some(func_at_inst) = func_at_inst_iter.next() {
                     transformer.in_place_transform_data_inst_def(func_at_inst.def());
                 }
+
+                0
+            }
+            ControlNodeKind::Select {
+                kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                scrutinee,
+                cases,
+            } => {
+                scrutinee
+                    .inner_transform_with(transformer)
+                    .apply_to(scrutinee);
+
+                cases.len()
+            }
+        };
+
+        // FIXME(eddyb) represent child regions without having them in a
+        // `Vec<ControlRegion>`, which requires workarounds like this.
+        for child_region_idx in 0..num_child_regions {
+            // FIXME(eddyb) this could work with explicit `for<'a>` closures or
+            // even just `let closure: impl for<'a> Fn(...) -> ... = |...| {...};`
+            // (but the latter is still unstable, and the former not yet impl'd).
+            let child_region = {
+                fn mk_child_region_getter(
+                    child_region_idx: usize,
+                ) -> impl Fn(FuncAtMut<'_, ControlNode>) -> &mut ControlRegion {
+                    move |func_at_control_node| {
+                        let child_regions = match &mut func_at_control_node.def().kind {
+                            ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => {
+                                &mut [][..]
+                            }
+
+                            ControlNodeKind::Select { cases, .. } => cases,
+                        };
+                        &mut child_regions[child_region_idx]
+                    }
+                }
+                mk_child_region_getter(child_region_idx)
+            };
+
+            // HACK(eddyb) handle the fields of `ControlRegion` separately, to
+            // allow reborrowing `FuncAtMut` (for recursing into `ControlNode`s).
+            let control_nodes = child_region(self.reborrow()).children;
+            self.reborrow()
+                .at(Some(control_nodes.iter()))
+                .inner_in_place_transform_with(transformer);
+
+            let ControlRegion {
+                children: _,
+                outputs,
+            } = child_region(self.reborrow());
+
+            for v in outputs {
+                v.inner_transform_with(transformer).apply_to(v);
             }
         }
 

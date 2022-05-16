@@ -205,6 +205,7 @@ struct FuncLifting<'a> {
 struct BlockLifting<'a> {
     phis: SmallVec<[Phi; 2]>,
     insts: SmallVec<[EntityList<DataInst>; 1]>,
+    selection_merge: Option<cfg::ControlPoint>,
     terminator: Cow<'a, cfg::ControlInst>,
 }
 
@@ -313,14 +314,15 @@ impl<'a> FuncLifting<'a> {
                     _ => SmallVec::new(),
                 };
 
+                let mut selection_merge = None;
                 let terminator = match func_def_body.cfg.control_insts.get(point) {
                     Some(terminator) => Cow::Borrowed(terminator),
 
                     // Structured control-flow, reconstruct a terminator.
-                    None => match func_at_point_cursor.unique_successor() {
+                    None => Cow::Owned(match func_at_point_cursor.unique_successor() {
                         Some((func_at_succ_cursor, parent_region_outputs)) => {
                             let succ_cursor = func_at_succ_cursor.position;
-                            Cow::Owned(cfg::ControlInst {
+                            cfg::ControlInst {
                                 attrs: AttrSet::default(),
                                 kind: cfg::ControlInstKind::Branch,
                                 inputs: [].into_iter().collect(),
@@ -336,7 +338,7 @@ impl<'a> FuncLifting<'a> {
                                     })
                                     .into_iter()
                                     .collect(),
-                            })
+                            }
                         }
                         None => {
                             // FIXME(eddyb) this will fail for structured returns
@@ -345,13 +347,33 @@ impl<'a> FuncLifting<'a> {
                             // `enum { Return, ChildRegions, SiblingOrParent }`?
                             assert!(matches!(point, cfg::ControlPoint::Entry(_)));
 
-                            match control_node_def.kind {
+                            match &control_node_def.kind {
                                 ControlNodeKind::UnstructuredMerge
                                 | ControlNodeKind::Block { .. } => unreachable!(),
-                                // FIXME(eddyb) implement structured control-flow.
+
+                                ControlNodeKind::Select {
+                                    kind,
+                                    scrutinee,
+                                    cases,
+                                } => {
+                                    selection_merge =
+                                        Some(cfg::ControlPoint::Exit(point.control_node()));
+                                    cfg::ControlInst {
+                                        attrs: AttrSet::default(),
+                                        kind: cfg::ControlInstKind::SelectBranch(kind.clone()),
+                                        inputs: [*scrutinee].into_iter().collect(),
+                                        targets: cases
+                                            .iter()
+                                            .map(|case| {
+                                                cfg::ControlPoint::Entry(case.children.iter().first)
+                                            })
+                                            .collect(),
+                                        target_merge_outputs: FxIndexMap::default(),
+                                    }
+                                }
                             }
                         }
-                    },
+                    }),
                 };
 
                 blocks.insert(
@@ -359,6 +381,7 @@ impl<'a> FuncLifting<'a> {
                     BlockLifting {
                         phis,
                         insts,
+                        selection_merge,
                         terminator,
                     },
                 );
@@ -371,18 +394,22 @@ impl<'a> FuncLifting<'a> {
         // `1` for the entry block), to help determine which blocks are part
         // of a linear branch chain (and potentially fusable), later on.
         //
-        // FIXME(eddyb) also count uses in selection/loop merges, when that
-        // information starts being emitted.
         // FIXME(eddyb) use `EntityOrientedDenseMap` here.
         let mut use_counts = FxHashMap::default();
         use_counts.reserve(blocks.len());
-        if let Some((&entry_point, _)) = blocks.first() {
-            use_counts.insert(entry_point, 1usize);
-        }
-        for block in blocks.values() {
-            for &target in &block.terminator.targets {
-                *use_counts.entry(target).or_default() += 1;
-            }
+        let all_edges = blocks
+            .first()
+            .map(|(&entry_point, _)| entry_point)
+            .into_iter()
+            .chain(blocks.values().flat_map(|block| {
+                block
+                    .selection_merge
+                    .iter()
+                    .chain(&block.terminator.targets)
+                    .copied()
+            }));
+        for target in all_edges {
+            *use_counts.entry(target).or_default() += 1;
         }
 
         // Fuse chains of linear branches, when there is no information being
@@ -397,11 +424,12 @@ impl<'a> FuncLifting<'a> {
         // to iterate at the same time as mutating other entries.
         for block_idx in (0..blocks.len()).rev() {
             let BlockLifting {
+                selection_merge: original_selection_merge,
                 terminator: original_terminator,
                 ..
             } = &blocks[block_idx];
 
-            let is_trivial_branch = {
+            let is_trivial_branch = original_selection_merge.is_none() && {
                 let cfg::ControlInst {
                     attrs,
                     kind,
@@ -425,6 +453,7 @@ impl<'a> FuncLifting<'a> {
                     let BlockLifting {
                         phis: ref target_phis,
                         insts: ref mut extra_insts,
+                        selection_merge: ref mut new_selection_merge,
                         terminator: ref mut new_terminator,
                     } = blocks[&target];
 
@@ -432,6 +461,7 @@ impl<'a> FuncLifting<'a> {
                     // they start being tracked.
                     if target_phis.is_empty() {
                         let extra_insts = mem::take(extra_insts);
+                        let new_selection_merge = new_selection_merge.take();
                         let new_terminator = mem::replace(
                             new_terminator,
                             Cow::Owned(cfg::ControlInst {
@@ -446,6 +476,7 @@ impl<'a> FuncLifting<'a> {
 
                         let combined_block = &mut blocks[block_idx];
                         combined_block.insts.extend(extra_insts);
+                        combined_block.selection_merge = new_selection_merge;
                         combined_block.terminator = new_terminator;
                     }
                 }
@@ -523,6 +554,9 @@ enum LazyInst<'a, 'b> {
         result_id: Option<spv::Id>,
         data_inst_def: &'a DataInstDef,
     },
+    OpSelectionMerge {
+        merge_label_id: spv::Id,
+    },
     ControlInst {
         parent_func: &'b FuncLifting<'a>,
         control_inst: &'a cfg::ControlInst,
@@ -577,6 +611,7 @@ impl LazyInst<'_, '_> {
                 result_id,
                 data_inst_def,
             } => (result_id, data_inst_def.attrs, None),
+            Self::OpSelectionMerge { merge_label_id: _ } => (None, AttrSet::default(), None),
             Self::ControlInst {
                 parent_func: _,
                 control_inst,
@@ -764,6 +799,17 @@ impl LazyInst<'_, '_> {
                         .collect(),
                 }
             }
+            Self::OpSelectionMerge { merge_label_id } => spv::InstWithIds {
+                without_ids: spv::Inst {
+                    opcode: wk.OpSelectionMerge,
+                    imms: [spv::Imm::Short(wk.SelectionControl, 0)]
+                        .into_iter()
+                        .collect(),
+                },
+                result_type_id: None,
+                result_id: None,
+                ids: [merge_label_id].into_iter().collect(),
+            },
             Self::ControlInst {
                 parent_func,
                 control_inst,
@@ -921,6 +967,7 @@ impl Module {
                         let BlockLifting {
                             phis,
                             insts,
+                            selection_merge,
                             terminator,
                         } = block;
 
@@ -947,6 +994,11 @@ impl Module {
                                         data_inst_def,
                                     }
                                 }),
+                        )
+                        .chain(
+                            selection_merge.map(|merge_point| LazyInst::OpSelectionMerge {
+                                merge_label_id: func_lifting.label_ids[&merge_point],
+                            }),
                         )
                         .chain([LazyInst::ControlInst {
                             parent_func: func_lifting,
