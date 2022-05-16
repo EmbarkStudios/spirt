@@ -565,7 +565,7 @@ pub enum DataInstKind {
     SpvExtInst { ext_set: InternedStr, inst: u32 },
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Value {
     Const(Const),
     FuncParam {
