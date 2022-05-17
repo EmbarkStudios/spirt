@@ -6,6 +6,7 @@ use crate::{
     EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, SelectionKind, TypeCtor, TypeDef, Value,
 };
 use smallvec::SmallVec;
+use std::mem;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
 /// (`ControlInst`s) attached to `ControlNode`-relative CFG points (`ControlPoint`s).
@@ -508,6 +509,43 @@ pub struct Structurizer<'a> {
 
     func_def_body: &'a mut FuncDefBody,
     incoming_edge_counts: EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
+
+    /// Keyed by the input to `structurize_region_from` (the start `ControlPoint`),
+    /// and describing the state of that partial structurization step.
+    ///
+    /// See also `StructurizeRegionState`'s docs.
+    //
+    // FIXME(eddyb) use `EntityOrientedDenseMap` (which lacks iteration by design).
+    structurize_region_state: FxIndexMap<ControlPoint, StructurizeRegionState>,
+}
+
+/// The state of one `structurize_region_from` invocation (keyed on its start
+/// `ControlPoint` in `Structurizer`) and its `PartialControlRegion` output.
+///
+/// There is a fourth (or 0th) implicit state, which is where nothing has yet
+/// observed some region, and `Structurizer` isn't tracking it at all.
+//
+// FIXME(eddyb) make the 0th state explicit and move `incoming_edge_counts` to it.
+enum StructurizeRegionState {
+    /// Structurization is still running, and observing this is a cycle.
+    InProgress,
+
+    /// Structurization completed, and this region can now be claimed.
+    Ready {
+        /// If this region had any backedges (targeting its start `ControlPoint`),
+        /// and they were effectively removed by structurization to a loop,
+        /// this field holds their count
+        //
+        // FIXME(eddyb) actually implement loop structurization.
+        consumed_backedges: IncomingEdgeCount,
+
+        region: PartialControlRegion,
+    },
+
+    /// Region was claimed (by an `IncomingEdgeBundle`, with the appropriate
+    /// total `IncomingEdgeCount`, minus any `consumed_backedges`), and has
+    /// since likely been incorporated as part of some larger region.
+    Claimed,
 }
 
 /// An "(incoming) edge bundle" is a subset of the edges into a single `target`.
@@ -628,6 +666,8 @@ impl<'a> Structurizer<'a> {
 
             func_def_body,
             incoming_edge_counts,
+
+            structurize_region_state: FxIndexMap::default(),
         }
     }
 
@@ -647,7 +687,15 @@ impl<'a> Structurizer<'a> {
             // FIXME(eddyb) support structured function body exits.
             PartialControlRegionSuccessor::Unstructured(_)
             | PartialControlRegionSuccessor::Deferred(_) => {
-                self.undo_claim(body_entry, body_region)
+                self.undo_claim(body_entry, body_region);
+            }
+        }
+
+        // Undo anything that got unused (e.g. because of loops).
+        let structurize_region_state = mem::take(&mut self.structurize_region_state);
+        for (target, state) in structurize_region_state {
+            if let StructurizeRegionState::Ready { region, .. } = state {
+                self.undo_claim(target, region);
             }
         }
     }
@@ -676,7 +724,30 @@ impl<'a> Structurizer<'a> {
         &mut self,
         edge_bundle: IncomingEdgeBundle,
     ) -> Result<PartialControlRegion, DeferredEdgeBundle> {
-        if self.incoming_edge_counts[edge_bundle.target] != edge_bundle.accumulated_count {
+        let target = edge_bundle.target;
+
+        // Always attempt structurization before checking the `IncomingEdgeCount`,
+        // to be able to make use of `consumed_backedges` (if any were found).
+        if self.structurize_region_state.get(&target).is_none() {
+            self.structurize_region_from(target);
+        }
+
+        let consumed_backedges = match self.structurize_region_state[&target] {
+            // This `try_claim_edge_bundle` call is itself a backedge, and it's
+            // coherent to not let any of them claim the loop itself, and only
+            // allow claiming the whole loop (if successfully structurized).
+            StructurizeRegionState::InProgress => IncomingEdgeCount::default(),
+
+            StructurizeRegionState::Ready {
+                consumed_backedges, ..
+            } => consumed_backedges,
+
+            StructurizeRegionState::Claimed => {
+                unreachable!("cfg::Structurizer::try_claim_edge_bundle: already claimed");
+            }
+        };
+
+        if self.incoming_edge_counts[target] != edge_bundle.accumulated_count + consumed_backedges {
             return Err(DeferredEdgeBundle {
                 condition: Value::Const(self.const_true),
                 edge_bundle,
@@ -688,26 +759,100 @@ impl<'a> Structurizer<'a> {
         // e.g. a single-case `ControlNodeKind::Select` to inject them in.
         assert!(edge_bundle.target_merge_outputs.is_empty());
 
+        let state = self
+            .structurize_region_state
+            .insert(target, StructurizeRegionState::Claimed)
+            .unwrap();
+
+        match state {
+            StructurizeRegionState::InProgress => unreachable!(
+                "cfg::Structurizer::try_claim_edge_bundle: cyclic calls \
+                 should not get this far"
+            ),
+
+            StructurizeRegionState::Ready { region, .. } => Ok(region),
+
+            StructurizeRegionState::Claimed => {
+                // Handled above.
+                unreachable!()
+            }
+        }
+    }
+
+    /// Structurize a region starting from `first_point`, and extending as much
+    /// as possible into the CFG (likely everything dominated by `first_point`).
+    ///
+    /// The output of this process is stored in, and any other bookkeeping is
+    /// done through, `self.structurize_region_state[first_point]`.
+    ///
+    /// See also `StructurizeRegionState`'s docs.
+    //
+    // FIXME(eddyb) should this take `ControlPointRange` instead?
+    fn structurize_region_from(&mut self, first_point: ControlPoint) {
+        {
+            let old_state = self
+                .structurize_region_state
+                .insert(first_point, StructurizeRegionState::InProgress);
+            if let Some(old_state) = old_state {
+                unreachable!(
+                    "cfg::Structurizer::structurize_region_from: \
+                     already {}, when attempting to start structurization",
+                    match old_state {
+                        StructurizeRegionState::InProgress => "in progress (cycle detected)",
+                        StructurizeRegionState::Ready { .. } => "completed",
+                        StructurizeRegionState::Claimed => "claimed",
+                    }
+                );
+            }
+        }
+
+        let store_result = |this: &mut Self, region| {
+            let old_state = this.structurize_region_state.insert(
+                first_point,
+                StructurizeRegionState::Ready {
+                    consumed_backedges: IncomingEdgeCount::default(),
+                    region,
+                },
+            );
+            if !matches!(old_state, Some(StructurizeRegionState::InProgress)) {
+                unreachable!(
+                    "cfg::Structurizer::structurize_region_from: \
+                     already {}, when attempting to store structurization result",
+                    match old_state {
+                        None => "reverted to missing (removed from the map?)",
+                        Some(StructurizeRegionState::InProgress) => unreachable!(),
+                        Some(StructurizeRegionState::Ready { .. }) => "completed",
+                        Some(StructurizeRegionState::Claimed) => "claimed",
+                    }
+                );
+            }
+        };
+
         // Entering a block implies the block itself, and also exiting the block.
         //
         // FIXME(eddyb) replace this with something more general about encountering
         // already-structured regions and "bringing them into the fold".
-        if let ControlPoint::Entry(control_node) = edge_bundle.target {
+        if let ControlPoint::Entry(control_node) = first_point {
             if let ControlNodeKind::Block { .. } =
                 self.func_def_body.control_nodes[control_node].kind
             {
                 let exit_point = ControlPoint::Exit(control_node);
 
-                // HACK(eddyb) the initial `incoming_edge_counts` can't account
-                // for such edges internal to structured control-flow, so they
-                // have to be supplanted here.
-                assert!(
-                    self.incoming_edge_counts
-                        .insert(exit_point, IncomingEdgeCount::ONE)
-                        .is_none()
-                );
+                self.structurize_region_from(exit_point);
+                let exit_state = self
+                    .structurize_region_state
+                    .insert(exit_point, StructurizeRegionState::Claimed);
 
-                let mut region = self.claim_or_defer_single_edge(exit_point, SmallVec::new());
+                let mut region = match exit_state {
+                    Some(StructurizeRegionState::Ready {
+                        consumed_backedges,
+                        region,
+                    }) => {
+                        assert_eq!(consumed_backedges, IncomingEdgeCount::default());
+                        region
+                    }
+                    _ => unreachable!(),
+                };
 
                 region.children = Some(EntityList::insert_first(
                     region.children,
@@ -715,7 +860,8 @@ impl<'a> Structurizer<'a> {
                     &mut self.func_def_body.control_nodes,
                 ));
 
-                return Ok(region);
+                store_result(self, region);
+                return;
             }
         }
 
@@ -723,18 +869,14 @@ impl<'a> Structurizer<'a> {
             .func_def_body
             .cfg
             .control_insts
-            .remove(edge_bundle.target)
+            .remove(first_point)
             .unwrap_or_else(|| {
                 unreachable!(
-                    "cfg::Structurizer::try_claim_edge_bundle: already claimed \
-                     or the CFG wasn't unstructured in the first place"
+                    "cfg::Structurizer::structurize_region_from: missing \
+                     `ControlInst` (CFG wasn't unstructured in the first place?)"
                 )
             });
 
-        Ok(self.claim_control_inst(control_inst))
-    }
-
-    fn claim_control_inst(&mut self, control_inst: ControlInst) -> PartialControlRegion {
         let ControlInst {
             attrs,
             kind,
@@ -776,7 +918,10 @@ impl<'a> Structurizer<'a> {
             ControlInstKind::Branch => {
                 assert_eq!((inputs.len(), child_regions.len()), (0, 1));
 
-                return child_regions.into_iter().nth(0).unwrap();
+                let region = child_regions.into_iter().nth(0).unwrap();
+
+                store_result(self, region);
+                return;
             }
 
             ControlInstKind::SelectBranch(_) => {
@@ -905,14 +1050,15 @@ impl<'a> Structurizer<'a> {
                         };
 
                         // FIXME(eddyb) maybe make a method for this?
-                        // It's also used in `try_claim_edge_bundle`.
+                        // It's also used at this art of `structurize_region_from`.
                         region.children = Some(EntityList::insert_first(
                             region.children,
                             select_node,
                             &mut self.func_def_body.control_nodes,
                         ));
 
-                        return region;
+                        store_result(self, region);
+                        return;
                     }
                 }
             }
@@ -923,10 +1069,12 @@ impl<'a> Structurizer<'a> {
             self.undo_claim(undo_target, undo_child_region);
         }
 
-        PartialControlRegion {
+        let region = PartialControlRegion {
             children: None,
             successor: PartialControlRegionSuccessor::Unstructured(control_inst),
-        }
+        };
+
+        store_result(self, region);
     }
 
     /// Place back relevant information into the CFG, that was taken by claiming
