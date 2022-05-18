@@ -30,6 +30,12 @@ pub struct ControlFlowGraph {
 /// * `ControlNodeKind::Block`: between its `Entry` and `Exit` points, a block only
 ///   has its own linear sequence of instructions as (implied) control-flow, so
 ///   no `ControlInst` can attach to its `Entry` or target its `Exit`
+//
+// FIXME(eddyb) the above comment treats `Block` specially but the trend has
+// been to make all the CFG logic treat structured `ControlNode`s (or several of
+// them in linear chains, as found in a `ControlRegion`) as never having any
+// `ControlInst`s except at the very last `Exit`, and the CFG mostly ignoring
+// the structured control-flow (see also the comments on `ControlPointRange`).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ControlPoint {
     Entry(ControlNode),
@@ -806,36 +812,80 @@ impl<'a> Structurizer<'a> {
             }
         }
 
-        let store_result = |this: &mut Self, region| {
-            let old_state = this.structurize_region_state.insert(
-                first_point,
-                StructurizeRegionState::Ready {
-                    consumed_backedges: IncomingEdgeCount::default(),
-                    region,
-                },
-            );
-            if !matches!(old_state, Some(StructurizeRegionState::InProgress)) {
-                unreachable!(
-                    "cfg::Structurizer::structurize_region_from: \
-                     already {}, when attempting to store structurization result",
-                    match old_state {
-                        None => "reverted to missing (removed from the map?)",
-                        Some(StructurizeRegionState::InProgress) => unreachable!(),
-                        Some(StructurizeRegionState::Ready { .. }) => "completed",
-                        Some(StructurizeRegionState::Claimed) => "claimed",
-                    }
-                );
+        /// Marker error type indicating a structured `Entry`, w/o a `ControlInst`.
+        #[derive(Debug)]
+        struct StructuredEntry;
+
+        let control_inst = if let ControlPoint::Entry(_) = first_point {
+            Err(StructuredEntry)
+        } else {
+            Ok(self
+                .func_def_body
+                .cfg
+                .control_insts
+                .remove(first_point)
+                .unwrap_or_else(|| {
+                    unreachable!(
+                        "cfg::Structurizer::structurize_region_from: missing \
+                     `ControlInst` (CFG wasn't unstructured in the first place?)"
+                    )
+                }))
+        };
+
+        // HACK(eddyb) these variables are present here to avoid having to bump
+        // the indent for the `ControlInstKind` handling below, any further.
+        let (kind, inputs, child_regions) = match &control_inst {
+            Err(StructuredEntry) => (Err(StructuredEntry), &[][..], [].into_iter().collect()),
+            Ok(ControlInst {
+                attrs,
+                kind,
+                inputs,
+                targets,
+                target_merge_outputs,
+            }) => {
+                // FIXME(eddyb) this loses `attrs`.
+                let _ = attrs;
+
+                let child_regions: SmallVec<[_; 8]> = targets
+                    .iter()
+                    .map(|&target| {
+                        self.claim_or_defer_single_edge(
+                            target,
+                            target_merge_outputs
+                                .get(&target.control_node())
+                                .filter(|_| matches!(target, ControlPoint::Exit(_)))
+                                .cloned()
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+
+                (Ok(kind), &inputs[..], child_regions)
             }
         };
 
-        // Entering a block implies the block itself, and also exiting the block.
-        //
-        // FIXME(eddyb) replace this with something more general about encountering
-        // already-structured regions and "bringing them into the fold".
-        if let ControlPoint::Entry(control_node) = first_point {
-            if let ControlNodeKind::Block { .. } =
-                self.func_def_body.control_nodes[control_node].kind
-            {
+        /// Marker error type for unhandled `ControlInst`s below.
+        struct UnsupportedControlInst<CI, CR> {
+            control_inst: CI,
+
+            /// Kept here only to have `undo_claim` called on each of them.
+            child_regions: CR,
+        }
+
+        let region = match kind {
+            // Entering a structured `ControlNode` always results in a structured
+            // exit from that node (even if initially that might only be `Block`s).
+            Err(StructuredEntry) => {
+                let control_node = first_point.control_node();
+
+                assert!(
+                    self.func_def_body.control_nodes[control_node]
+                        .next_in_list()
+                        .is_none(),
+                    "cfg::Structurizer::structurize_region_from: re-structurizing \
+                 with structured regions already present is not yet supported"
+                );
+
                 let exit_point = ControlPoint::Exit(control_node);
 
                 self.structurize_region_from(exit_point);
@@ -860,71 +910,36 @@ impl<'a> Structurizer<'a> {
                     &mut self.func_def_body.control_nodes,
                 ));
 
-                store_result(self, region);
-                return;
+                Ok(region)
             }
-        }
 
-        let control_inst = self
-            .func_def_body
-            .cfg
-            .control_insts
-            .remove(first_point)
-            .unwrap_or_else(|| {
-                unreachable!(
-                    "cfg::Structurizer::structurize_region_from: missing \
-                     `ControlInst` (CFG wasn't unstructured in the first place?)"
-                )
-            });
-
-        let ControlInst {
-            attrs,
-            kind,
-            inputs,
-            targets,
-            target_merge_outputs,
-        } = &control_inst;
-
-        // FIXME(eddyb) this loses `attrs`.
-        let _ = attrs;
-
-        let child_regions: SmallVec<[_; 8]> = targets
-            .iter()
-            .map(|&target| {
-                self.claim_or_defer_single_edge(
-                    target,
-                    target_merge_outputs
-                        .get(&target.control_node())
-                        .filter(|_| matches!(target, ControlPoint::Exit(_)))
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            })
-            .collect();
-
-        match kind {
-            ControlInstKind::Unreachable | ControlInstKind::ExitInvocation(_) => {
+            Ok(ControlInstKind::Unreachable | ControlInstKind::ExitInvocation(_)) => {
                 assert_eq!(child_regions.len(), 0);
 
                 // FIXME(eddyb) introduce equivalent `ControlNodeKind` for these.
+                Err(UnsupportedControlInst {
+                    control_inst,
+                    child_regions,
+                })
             }
 
-            ControlInstKind::Return => {
+            Ok(ControlInstKind::Return) => {
                 assert_eq!(child_regions.len(), 0);
 
                 // FIXME(eddyb) encode this into `PartialControlRegionSuccessor`.
+                Err(UnsupportedControlInst {
+                    control_inst,
+                    child_regions,
+                })
             }
 
-            ControlInstKind::Branch => {
+            Ok(ControlInstKind::Branch) => {
                 assert_eq!((inputs.len(), child_regions.len()), (0, 1));
 
-                let region = child_regions.into_iter().nth(0).unwrap();
-
-                store_result(self, region);
-                return;
+                Ok(child_regions.into_iter().nth(0).unwrap())
             }
 
-            ControlInstKind::SelectBranch(_) => {
+            Ok(ControlInstKind::SelectBranch(_)) => {
                 assert_eq!(inputs.len(), 1);
 
                 let scrutinee = inputs[0];
@@ -992,7 +1007,7 @@ impl<'a> Structurizer<'a> {
                             _ => None,
                         };
 
-                        let kind = match control_inst.kind {
+                        let kind = match control_inst.unwrap().kind {
                             ControlInstKind::SelectBranch(kind) => kind,
                             _ => unreachable!(),
                         };
@@ -1050,31 +1065,70 @@ impl<'a> Structurizer<'a> {
                         };
 
                         // FIXME(eddyb) maybe make a method for this?
-                        // It's also used at this art of `structurize_region_from`.
+                        // It's also used above for `Err(StructuredEntry)`.
                         region.children = Some(EntityList::insert_first(
                             region.children,
                             select_node,
                             &mut self.func_def_body.control_nodes,
                         ));
 
-                        store_result(self, region);
-                        return;
+                        Ok(region)
+                    } else {
+                        Err(UnsupportedControlInst {
+                            control_inst,
+                            child_regions,
+                        })
                     }
+                } else {
+                    Err(UnsupportedControlInst {
+                        control_inst,
+                        child_regions,
+                    })
                 }
             }
-        }
-
-        // Undo claims if the child regions aren't used above.
-        for (&undo_target, undo_child_region) in targets.iter().zip(child_regions) {
-            self.undo_claim(undo_target, undo_child_region);
-        }
-
-        let region = PartialControlRegion {
-            children: None,
-            successor: PartialControlRegionSuccessor::Unstructured(control_inst),
         };
 
-        store_result(self, region);
+        let region = region.unwrap_or_else(
+            |UnsupportedControlInst {
+                 control_inst,
+                 child_regions,
+             }| {
+                let control_inst = control_inst.unwrap();
+
+                // Undo claims if the child regions aren't used above.
+                for (&undo_target, undo_child_region) in
+                    control_inst.targets.iter().zip(child_regions)
+                {
+                    self.undo_claim(undo_target, undo_child_region);
+                }
+
+                PartialControlRegion {
+                    children: None,
+                    successor: PartialControlRegionSuccessor::Unstructured(control_inst),
+                }
+            },
+        );
+        let consumed_backedges = IncomingEdgeCount::default();
+
+        let old_state = self.structurize_region_state.insert(
+            first_point,
+            StructurizeRegionState::Ready {
+                consumed_backedges,
+                region,
+            },
+        );
+        if !matches!(old_state, Some(StructurizeRegionState::InProgress)) {
+            unreachable!(
+                "cfg::Structurizer::structurize_region_from: \
+                 already {}, when attempting to store structurization result",
+                match old_state {
+                    None => "reverted to missing (removed from the map?)",
+                    Some(StructurizeRegionState::InProgress) => unreachable!(),
+                    Some(StructurizeRegionState::Ready { .. }) => "completed",
+                    Some(StructurizeRegionState::Claimed) => "claimed",
+                }
+            );
+        }
     }
 
     /// Place back relevant information into the CFG, that was taken by claiming
