@@ -76,25 +76,6 @@ jobs:
       - name: cargo publish check
         run: cargo publish --dry-run
 
-  # TODO: Remove this job if you don't publish the crate(s) from this repo
-  # You must add a crates.io API token to your GH secrets and name it CRATES_IO_TOKEN
-  publish:
-    name: Publish
-    needs: [test, deny-check, publish-check]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - run: cargo fetch
-      - name: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: cargo publish
-
   # TODO: Remove this job if you don't release binaries
   # Replace occurances of $BIN_NAME with the name of your binary
   release:
@@ -180,7 +161,7 @@ jobs:
 
   # TODO: Remove this job if you don't publish container images on each release
   # TODO: Create a repository on DockerHub with the same name as the GitHub repo
-  # TODO: Add the new repo to the buildbot group with read & write permissions 
+  # TODO: Add the new repo to the buildbot group with read & write permissions
   # TODO: Add the embarkbot dockerhub password to the repo secrets as DOCKERHUB_PASSWORD
   publish-container-images:
     name: Publish container images
@@ -195,7 +176,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v1
       - name: Login to Dockerhub
-        uses: docker/login-action@v1 
+        uses: docker/login-action@v1
         with:
           username: embarkbot
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
