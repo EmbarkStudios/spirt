@@ -511,9 +511,14 @@ pub struct ControlNodeOutputDecl {
 pub enum ControlNodeKind {
     /// Helper `ControlNode` used for conversions between a CFG and structured regions,
     /// potentially having `ControlNodeOutputDecl`s with values provided externally.
+    //
     // FIXME(eddyb) is there a better way to do this?
     UnstructuredMerge,
 
+    /// Linear chain of `DataInst`s, executing in sequence.
+    ///
+    /// This is only an optimization over keeping `DataInst`s in `ControlRegion`
+    /// linear chains directly, or even merging `DataInst` with `ControlNode`.
     Block {
         // FIXME(eddyb) should empty blocks be allowed? should their usecases be
         // handled by a different `ControlNodeKind`? they mainly exist so that
@@ -526,11 +531,34 @@ pub enum ControlNodeKind {
 
     /// Choose one `ControlRegion` out of `cases` to execute, based on a single
     /// value input (`scrutinee`) interpreted according to `SelectionKind`.
+    ///
+    /// This corresponds to "gamma" (`γ`) nodes in (R)VSDG, though those are
+    /// sometimes limited only to a two-way selection on a boolean condition.
     Select {
         kind: SelectionKind,
         scrutinee: Value,
 
         cases: Vec<ControlRegion>,
+    },
+
+    /// Execute `body` repeatedly, until `repeat_condition` evaluates to `false`.
+    ///
+    /// As the condition is checked only *after* the body, this type of loop is
+    /// sometimes described as "tail-controlled", and is also equivalent to the
+    /// C-like `do { body; } while(repeat_condition)` construct.
+    ///
+    /// This corresponds to "theta" (`θ`) nodes in (R)VSDG.
+    //
+    // FIXME(eddyb) introduce `ControlRegion` inputs (i.e. `ControlRegion` having
+    // a list of `ControlRegionInputDecl`s, and a `ControlRegionInput` variant in
+    // `Value`) and use it to pass values to the `body` which can either be some
+    // initial ones, or the last set of ("state") values *output* from `body`.
+    Loop {
+        body: ControlRegion,
+
+        // FIXME(eddyb) should this be kept in `body.outputs`? (that would not
+        // have any ambiguity as to whether it can see `body`-computed values)
+        repeat_condition: Value,
     },
 }
 

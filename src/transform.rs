@@ -6,6 +6,7 @@ use crate::{
     ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
+use std::slice;
 
 /// The result of a transformation (which is not in-place).
 #[must_use]
@@ -480,7 +481,8 @@ impl InnerInPlaceTransform for FuncAtMut<'_, Option<EntityListIter<ControlNode>>
 
 impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        // HACK(eddyb) handle `kind` separately to allow reborrowing `FuncAtMut`.
+        // HACK(eddyb) handle pre-child-regions parts of `kind` separately to
+        // allow reborrowing `FuncAtMut` (for the child region recursion).
         let num_child_regions = match &mut self.reborrow().def().kind {
             ControlNodeKind::UnstructuredMerge => 0,
             &mut ControlNodeKind::Block { insts } => {
@@ -502,6 +504,10 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
 
                 cases.len()
             }
+            ControlNodeKind::Loop {
+                body: _,
+                repeat_condition: _,
+            } => 1,
         };
 
         // FIXME(eddyb) represent child regions without having them in a
@@ -521,6 +527,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
                             }
 
                             ControlNodeKind::Select { cases, .. } => cases,
+                            ControlNodeKind::Loop { body, .. } => slice::from_mut(body),
                         };
                         &mut child_regions[child_region_idx]
                     }
@@ -545,7 +552,27 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
             }
         }
 
-        let ControlNodeDef { kind: _, outputs } = self.reborrow().def();
+        let ControlNodeDef { kind, outputs } = self.reborrow().def();
+
+        match kind {
+            // Fully handled above, before recursing into any child regions.
+            ControlNodeKind::UnstructuredMerge
+            | ControlNodeKind::Block { insts: _ }
+            | ControlNodeKind::Select {
+                kind: _,
+                scrutinee: _,
+                cases: _,
+            } => {}
+
+            ControlNodeKind::Loop {
+                body: _,
+                repeat_condition,
+            } => {
+                repeat_condition
+                    .inner_transform_with(transformer)
+                    .apply_to(repeat_condition);
+            }
+        };
 
         for output in outputs {
             output.inner_transform_with(transformer).apply_to(output);

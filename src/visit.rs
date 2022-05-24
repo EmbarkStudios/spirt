@@ -397,6 +397,13 @@ impl<'a> FuncAt<'a, ControlNode> {
                     self.at(case).inner_visit_with(visitor);
                 }
             }
+            ControlNodeKind::Loop {
+                body,
+                repeat_condition,
+            } => {
+                self.at(body).inner_visit_with(visitor);
+                visitor.visit_value_use(repeat_condition);
+            }
         }
         for output in outputs {
             output.inner_visit_with(visitor);

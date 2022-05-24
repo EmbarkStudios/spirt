@@ -2249,6 +2249,10 @@ impl Print for FuncAt<'_, ControlNode> {
             pretty::Fragment::default()
         };
 
+        // FIXME(eddyb) using `declarative_keyword_style` seems more
+        // appropriate here, but it's harder to spot at a glance.
+        let kw_style = printer.imperative_keyword_style();
+        let kw = |kw| kw_style.clone().apply(kw).into();
         let control_node_body = match kind {
             ControlNodeKind::UnstructuredMerge => printer
                 .comment_style()
@@ -2281,16 +2285,26 @@ impl Print for FuncAt<'_, ControlNode> {
                 kind,
                 scrutinee,
                 cases,
+            } => kind.print_with_scrutinee_and_cases(
+                printer,
+                kw_style,
+                *scrutinee,
+                cases.iter().map(|case| self.at(case).print(printer)),
+            ),
+            ControlNodeKind::Loop {
+                body,
+                repeat_condition,
             } => {
-                // FIXME(eddyb) using `declarative_keyword_style` seems more
-                // appropriate here, but it's harder to spot at a glance.
-                let kw_style = printer.imperative_keyword_style();
-                kind.print_with_scrutinee_and_cases(
-                    printer,
-                    kw_style,
-                    *scrutinee,
-                    cases.iter().map(|case| self.at(case).print(printer)),
-                )
+                // FIXME(eddyb) this is a weird mishmash of Rust and C syntax.
+                pretty::Fragment::new([
+                    kw("loop"),
+                    " {".into(),
+                    pretty::Node::IndentedBlock(vec![self.at(body).print(printer)]).into(),
+                    "} ".into(),
+                    kw("while"),
+                    " ".into(),
+                    repeat_condition.print(printer),
+                ])
             }
         };
         pretty::Fragment::new([outputs_header, control_node_body])

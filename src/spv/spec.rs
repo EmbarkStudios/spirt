@@ -117,6 +117,7 @@ def_well_known! {
         Decoration,
         LinkageType,
         SelectionControl,
+        LoopControl,
 
         LiteralInteger,
         LiteralExtInstInteger,
