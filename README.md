@@ -1,5 +1,5 @@
 <!-- Allow this file to not have a first line heading -->
-<!-- markdownlint-disable-file MD041 -->
+<!-- markdownlint-disable-file MD041 no-emphasis-as-heading -->
 
 <!-- inline html -->
 <!-- markdownlint-disable-file MD033 -->
@@ -13,7 +13,7 @@
 **Template for creating new open source repositories that follow the Embark open source guidelines**
 
 <!--- FIXME: Update crate, repo and CI workflow names here! Remove any that are not relevant --->
-    
+
 [![Embark](https://img.shields.io/badge/embark-open%20source-blueviolet.svg)](https://embark.dev)
 [![Embark](https://img.shields.io/badge/discord-ark-%237289da.svg?logo=discord)](https://discord.gg/dAuKfZS)
 [![Crates.io](https://img.shields.io/crates/v/rust-gpu.svg)](https://crates.io/crates/rust-gpu)
@@ -25,14 +25,16 @@
 ## TEMPLATE INSTRUCTIONS
 
 1. Create a new repository under EmbarkStudios using this template.
-1. __Title:__ Change the first line of this README to the name of your project, and replace the sunflower with an emoji that represents your project. 🚨 Your emoji selection is critical.
-1. __Badges:__ In the badges section above, change the repo name in each URL. If you are creating something other than a Rust crate, remove the crates.io and docs badges (and feel free to add more appropriate ones for your language).
-1. __CI:__ In `./github/workflows/` rename `rust-ci.yml` (or the appropriate config for your language) to `ci.yml`. And go over it and adapt it to work for your project
-1. __Cleanup:__ Remove this section of the README and any unused files (such as configs for other languages) from the repo.
+1. **Title:** Change the first line of this README to the name of your project, and replace the sunflower with an emoji that represents your project. 🚨 Your emoji selection is critical.
+1. **Badges:** In the badges section above, change the repo name in each URL. If you are creating something other than a Rust crate, remove the crates.io and docs badges (and feel free to add more appropriate ones for your language).
+1. **CI:** In `./github/workflows/` rename `rust-ci.yml` (or the appropriate config for your language) to `ci.yml`. And go over it and adapt it to work for your project
+1. **CHANGELOG.md:** Change the `$REPO_NAME` in the links at the bottom to the name of the repository, and replace the example template lines with the actual notes for the repository/crate.
+1. **release.toml:** in `./release.toml` change the `$REPO_NAME` to the name of the repository
+1. **Cleanup:** Remove this section of the README and any unused files (such as configs for other languages) from the repo.
 
 ## Contribution
 
-[![Contributor Covenant](https://img.shields.io/badge/contributor%20covenant-v1.4-ff69b4.svg)](../main/CODE_OF_CONDUCT.md)
+[![Contributor Covenant](https://img.shields.io/badge/contributor%20covenant-v1.4-ff69b4.svg)](CODE_OF_CONDUCT.md)
 
 We welcome community contributions to this project.
 
