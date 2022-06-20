@@ -3,12 +3,13 @@
 #![allow(unstable_name_collisions)]
 use itertools::Itertools as _;
 
+use crate::func_at::FuncAt;
 use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInst,
-    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncAt,
-    FuncDecl, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl,
+    FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
     ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;

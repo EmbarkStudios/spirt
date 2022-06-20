@@ -1,9 +1,10 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
+use crate::func_at::FuncAt;
 use crate::{
     spv, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode, ControlNodeDef,
     ControlNodeKind, ControlRegion, EntityList, EntityListIter, EntityOrientedDenseMap,
-    EntityOrientedMapKey, FuncAt, FuncDefBody, FxIndexMap, SelectionKind, TypeCtor, TypeDef, Value,
+    EntityOrientedMapKey, FuncDefBody, FxIndexMap, SelectionKind, TypeCtor, TypeDef, Value,
 };
 use smallvec::SmallVec;
 use std::{mem, slice};
