@@ -267,39 +267,86 @@ pub struct FuncDefBody {
     pub control_nodes: EntityDefs<ControlNode>,
 
     /// The `ControlRegion` representing the whole body of the function.
-    // FIXME(eddyb) this is not that useful without `cfg` right now, which is
-    // needed to reach other `ControlNode`s (through CFG edges).
     pub body: ControlRegion,
 
     /// The (unstructured) control-flow graph of the function.
-    // FIXME(eddyb) replace this CFG setup with stricter structured regions.
+    // FIXME(eddyb) make this optional, rename it to `unstructured_cfg`, and
+    // describe how `body.children.last` leads into the CFG when `Some`.
     pub cfg: cfg::ControlFlowGraph,
 }
 
-/// A graph of `ControlNode`s, asymmetrically isolated from surrounding `ControlNode`s:
-/// * inputs inside the region are free to use values defined outside
-/// * values defined inside the region are hidden from outside users
-///   (propagating values to the outside can, and should, be done through
-///   the `outputs` field, which can reference values defined inside)
+/// Linear chain of `ControlNode`s, describing a single-entry single-exit (SESE)
+/// control-flow "region" (subgraph) in a function's control-flow graph (CFG).
 ///
-/// For more general information on structured control-flow, and specifically
-/// how SPIR-T represents it, also see `ControlNodeDef`'s documentation.
-//
-// FIXME(eddyb) consider perhaps moving more documentation, from there, up here.
+/// # Control-flow
 ///
-/// The choice of a separate `ControlRegion` type, instead of "simply" a variant
-/// of `ControlNodeKind`, may seem like an unnecessary distinction, but it:
-/// * prevents (unwanted) arbitrary nesting of `ControlNode`s
-///   * i.e. it prevents `ControlNodeKind` from having child `ControlNode`s,
-///     without grouping them into `ControlRegion`s first
-/// * provides direct access to `outputs` and ensures their presence
+/// In SPIR-T, two forms of control-flow are used:
+/// * "structured": `ControlNode`s which are linked together in a `ControlRegion`
+///   * each such `ControlNode` can only appear in exactly one region
+///   * a region is either the function's body, or used as part of another
+///     `ControlNode` (e.g. the "then" case of an `if`-`else`)
+///   * when inside a region, reaching any other part of the function (or any
+///     other function on call stack) requires leaving through the region's
+///     single exit (also called "merge") point, i.e. its execution is either:
+///     * "convergent": the region completes and continues into its parent
+///       `ControlNode`, or function (the latter being a "structural return")
+///     * "divergent": execution gets stuck in the region (an infinite loop),
+///       or is aborted (e.g. `OpTerminateInvocation` from SPIR-V)
+/// * "unstructured": `ControlNode`s which connect to other `ControlNode`s using
+///   `cfg::ControlInst`s (as described by a `cfg::ControlFlowGraph`)
 ///
-/// Currently the `ControlNode` "graph" of a `ControlRegion` is a linear chain
-/// (using `EntityList<ControlNode>`, a doubly-linked "intrusive" list going
-/// through `ControlNode`s' definitions), but this may change in the future.
+/// When a function's entire body can be described by a single `ControlRegion,
+/// that function is said to have (entirely) "structured control-flow".
 ///
-/// Also, regions could include `DataInst`s more directly (as simpler nodes),
-/// than merely having a `ControlNode` container for them (`ControlNodeKind::Block`).
+/// Mixing "structured" and "unstructured" control-flow is supported because:
+/// * during structurization, it allows structured subgraphs to remain connected
+///   by the same CFG edges that were connecting leaf `ControlNode`s before
+/// * structurization doesn't have to fail in the cases it doesn't fully support
+///   yet, but can instead result in a "maximally structured" function
+///
+/// Other IRs may use different "structured control-flow" definitions, notably:
+/// * SPIR-V uses a laxer definition, that corresponds more to the constraints
+///   of the GLSL language, and is single-entry multiple-exit (SEME) with
+///   "alternate exits" consisting of `break`s out of `switch`es and loops,
+///   and `return`s (making it non-trivial to inline one function into another)
+/// * RVSDG inspired SPIR-T's design, but its regions are (acyclic) graphs, it
+///   makes no distinction between control-flow and "computational" nodes, and
+///   its execution order is determined by value/state dependencies alone
+///   (SPIR-T may get closer to it in the future, but the initial compromise
+///   was chosen to limit the effort of lowering/lifting from/to SPIR-V)
+///
+/// # Data-flow interactions
+///
+/// SPIR-T `Value`s follow "single static assignment" (SSA), just like SPIR-V:
+/// * inside a function, any new value is produced (or "defined") as an output
+///   of `DataInst`/`ControlNode`, and "uses" of that value are `Value`s
+///   variants which refer to the defining `DataInst`/`ControlNode` directly
+///   (guaranteeing the "single" and "static" of "SSA", by construction)
+/// * the definition of a value must "dominate" all of its uses
+///   (i.e. in all possible execution paths, the definition precedes all uses)
+///
+/// But unlike SPIR-V, SPIR-T's structured control-flow has implications for SSA:
+/// * dominance is simpler, so values defined in a `ControlRegion` can be used:
+///   * later in that region, including in the region's `outputs`
+///     (which allows "exporting" values out to the rest of the function)
+///   * outside that region, but *only* if the parent `ControlNode` only has
+///     exactly one child region (i.e. a single-case `Select`, or a `Loop`)
+///     * this is an "emergent" property, stemming from the region having to
+///       execute (at least once) before the parent `ControlNode` can complete,
+///       but is not is not ideal (especially for reasoning about loops) and
+///       should eventually be replaced with passing all such values through
+///       the region `outputs` (or by inlining the region, in the `Select` case)
+/// * instead of φ ("phi") nodes, SPIR-T uses region `outputs` to merge values
+///   coming from separate control-flow paths (e.g. the cases of a `Select`)
+///   * like the "block arguments" alternative to SSA phi nodes (which some
+///     other SSA IRs use), this has the advantage of keeping the uses of the
+///     "source" values in their respective paths (where they're dominated),
+///     instead of in the merge (where phi nodes require special-casing, as
+///     their "uses" of all the "source" values would normally be illegal)
+///   * in unstructured control-flow, a special-purpose kind of `ControlNode`
+///     (`UnstructuredMerge`) serves to bridge the gap, and allow referring to
+///     phi node outputs the same way as if they had come from a `Select`,
+///     while the "source" values are kept in the `cfg::ControlFlowGraph`
 #[derive(Clone)]
 pub struct ControlRegion {
     pub children: EntityList<ControlNode>,
@@ -307,28 +354,6 @@ pub struct ControlRegion {
     pub outputs: SmallVec<[Value; 2]>,
 }
 
-/// A control-flow "node" is a self-contained single-entry single-exit (SESE)
-/// subgraph of the control-flow graph (CFG) of a function, with child nodes
-/// being grouped into `ControlRegion`s and only appearing exactly once, and
-/// no mechanism for leaving a `ControlNode`/`ControlRegion` and continuing to
-/// execute the parent function (or any other on the call stack), without going
-/// through its single exit (also called "merge") point.
-///
-/// When the entire body of a function has its control-flow represented as a
-/// tree of `ControlRegion`s and their `ControlNode`s, that function is said
-/// to have (entirely) "structured control-flow".
-///
-/// Note that this may differ from other "structured control-flow" definitions,
-/// in particular SPIR-V uses a laxer definition, that corresponds more to the
-/// constraints of the GLSL language, and is single-entry multiple-exit (SEME)
-/// with "alternate exits" consisting of `break`s out of `switch`es and loops,
-/// and `return`s (making it non-trivial to inline one function into another).
-///
-/// In SPIR-T, unstructured control-flow is represented with a separate CFG
-/// (i.e. a `cfg::ControlFlowGraph`) connecting `ControlNode`s together, and
-/// mainly exists as an intermediary state during lowering to structured regions.
-//
-// FIXME(eddyb) fully implement CFG structurization.
 #[derive(Clone)]
 pub struct ControlNodeDef {
     pub kind: ControlNodeKind,
