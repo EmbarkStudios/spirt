@@ -300,7 +300,7 @@ impl<'a> FuncLifting<'a> {
 
         // Create a SPIR-V block for every CFG point needing one.
         let mut blocks = FxIndexMap::default();
-        for point_range in func_def_body.cfg.rev_post_order(func_def_body) {
+        let mut visit_point_range = |point_range: cfg::ControlPointRange| {
             let func_at_point_range = func_def_body.at(point_range);
             func_at_point_range.rev_post_order_try_for_each(|func_at_point_cursor| {
                 let point_cursor = func_at_point_cursor.position;
@@ -331,7 +331,11 @@ impl<'a> FuncLifting<'a> {
                 };
 
                 let mut merge = None;
-                let terminator = match func_def_body.cfg.control_insts.get(point) {
+                let terminator = match func_def_body
+                    .unstructured_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.control_insts.get(point))
+                {
                     Some(terminator) => Cow::Borrowed(terminator),
 
                     // Structured control-flow, reconstruct a terminator.
@@ -385,9 +389,13 @@ impl<'a> FuncLifting<'a> {
                         },
 
                         // Exiting the root `ControlRegion` (function body).
-                        (cfg::ControlPoint::Exit(_), None) => {
-                            unimplemented!("structured function returns");
-                        }
+                        (cfg::ControlPoint::Exit(_), None) => cfg::ControlInst {
+                            attrs: AttrSet::default(),
+                            kind: cfg::ControlInstKind::Return,
+                            inputs: func_def_body.body.outputs.clone(),
+                            targets: [].into_iter().collect(),
+                            target_merge_outputs: FxIndexMap::default(),
+                        },
 
                         // Exiting the parent `ControlRegion`.
                         (_, Some((func_at_succ_cursor, Some(parent_region_outputs)))) => {
@@ -487,7 +495,17 @@ impl<'a> FuncLifting<'a> {
                 );
 
                 Ok(())
-            })?;
+            })
+        };
+        match &func_def_body.unstructured_cfg {
+            None => visit_point_range(cfg::ControlPointRange::LinearChain(
+                func_def_body.body.children.iter(),
+            ))?,
+            Some(cfg) => {
+                for point_range in cfg.rev_post_order(func_def_body) {
+                    visit_point_range(point_range)?;
+                }
+            }
         }
 
         // Count the number of "uses" of each block (each incoming edge, plus

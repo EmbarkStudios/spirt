@@ -364,14 +364,15 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         if let DeclDef::Present(func_def_body) = &func_decl.def {
-            for point_range in func_def_body.cfg.rev_post_order(func_def_body) {
-                if let Some(control_inst) = func_def_body.cfg.control_insts.get(point_range.last())
-                {
-                    for &target in &control_inst.targets {
-                        *self
-                            .use_counts
-                            .entry(Use::ControlPointLabel(target))
-                            .or_default() += 1;
+            if let Some(cfg) = &func_def_body.unstructured_cfg {
+                for point_range in cfg.rev_post_order(func_def_body) {
+                    if let Some(control_inst) = cfg.control_insts.get(point_range.last()) {
+                        for &target in &control_inst.targets {
+                            *self
+                                .use_counts
+                                .entry(Use::ControlPointLabel(target))
+                                .or_default() += 1;
+                        }
                     }
                 }
             }
@@ -817,7 +818,7 @@ impl<'a> Printer<'a> {
                 });
 
             for func_def_body in func_def_bodies_across_versions {
-                for point_range in func_def_body.cfg.rev_post_order(func_def_body) {
+                let mut visit_point_range = |point_range: cfg::ControlPointRange| {
                     // The label is only for CFG edge destinations.
                     let label_point = point_range.first();
 
@@ -893,7 +894,18 @@ impl<'a> Printer<'a> {
 
                             Ok(())
                         })
-                        .unwrap();
+                        .unwrap()
+                };
+
+                match &func_def_body.unstructured_cfg {
+                    None => visit_point_range(cfg::ControlPointRange::LinearChain(
+                        func_def_body.body.children.iter(),
+                    )),
+                    Some(cfg) => {
+                        for point_range in cfg.rev_post_order(func_def_body) {
+                            visit_point_range(point_range);
+                        }
+                    }
                 }
             }
         }
@@ -2104,55 +2116,21 @@ impl Print for FuncDecl {
             DeclDef::Present(def) => pretty::Fragment::new([
                 sig,
                 " {".into(),
-                pretty::Node::IndentedBlock(
-                    def.cfg
+                pretty::Node::IndentedBlock(match &def.unstructured_cfg {
+                    None => vec![def.at(&def.body).print(printer)],
+                    Some(cfg) => cfg
                         .rev_post_order(def)
                         .map(|point_range| {
-                            // The label is only for CFG edge destinations.
-                            let label_point = point_range.first();
-                            let label = Use::ControlPointLabel(label_point);
-                            let label_header = if printer.use_styles.contains_key(&label) {
-                                // FIXME(eddyb) `:` as used here for C-like "label syntax"
-                                // interferes (in theory) with `e: T` "type ascription syntax".
-                                Some(pretty::Fragment::new([
-                                    label.print_as_def(printer),
-                                    ":".into(),
-                                ]))
-                            } else {
-                                None
-                            };
-                            let (entry_label_header, exit_label_header) = match label_point {
-                                cfg::ControlPoint::Entry(_) => (label_header, None),
-                                cfg::ControlPoint::Exit(_) => (None, label_header),
-                            };
-
-                            let control_nodes = pretty::Node::IndentedBlock(vec![
-                                def.at(Some(point_range.control_nodes())).print(printer),
-                            ]);
-
-                            pretty::Fragment::new(
-                                [
-                                    entry_label_header,
-                                    Some(control_nodes.into()),
-                                    exit_label_header,
-                                    if let Some(control_inst) =
-                                        def.cfg.control_insts.get(point_range.last())
-                                    {
-                                        Some(control_inst.print(printer))
-                                    } else {
-                                        None
-                                    },
-                                ]
-                                .into_iter()
-                                .flatten()
-                                .flat_map(|fragment| {
-                                    [
-                                        pretty::Node::ForceLineSeparation.into(),
-                                        fragment,
-                                        pretty::Node::ForceLineSeparation.into(),
-                                    ]
-                                }),
-                            )
+                            pretty::Fragment::new([
+                                def.at(point_range).print(printer),
+                                if let Some(control_inst) =
+                                    cfg.control_insts.get(point_range.last())
+                                {
+                                    control_inst.print(printer)
+                                } else {
+                                    pretty::Fragment::default()
+                                },
+                            ])
                         })
                         .intersperse({
                             // Separate (top-level) control nodes with empty lines.
@@ -2161,7 +2139,7 @@ impl Print for FuncDecl {
                             "\n\n".into()
                         })
                         .collect(),
-                )
+                })
                 .into(),
                 "}".into(),
             ]),
@@ -2221,6 +2199,39 @@ impl Print for FuncAt<'_, Option<EntityListIter<ControlNode>>> {
             self.map(|func_at_control_node| func_at_control_node.print(printer))
                 .intersperse(pretty::Node::ForceLineSeparation.into()),
         )
+    }
+}
+
+impl Print for FuncAt<'_, cfg::ControlPointRange> {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        let point_range = self.position;
+
+        let control_nodes = pretty::Node::IndentedBlock(vec![
+            self.at(Some(point_range.control_nodes())).print(printer),
+        ])
+        .into();
+
+        // The label is only for CFG edge destinations.
+        let label_point = point_range.first();
+        let label = Use::ControlPointLabel(label_point);
+        if printer.use_styles.contains_key(&label) {
+            // FIXME(eddyb) `:` as used here for C-like "label syntax"
+            // interferes (in theory) with `e: T` "type ascription syntax".
+            let label_header = pretty::Fragment::new([
+                pretty::Node::ForceLineSeparation.into(),
+                label.print_as_def(printer),
+                ":".into(),
+                pretty::Node::ForceLineSeparation.into(),
+            ]);
+
+            pretty::Fragment::new(match label_point {
+                cfg::ControlPoint::Entry(_) => [label_header, control_nodes],
+                cfg::ControlPoint::Exit(_) => [control_nodes, label_header],
+            })
+        } else {
+            control_nodes
+        }
     }
 }
 

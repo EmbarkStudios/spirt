@@ -457,16 +457,82 @@ impl InnerTransform for FuncParam {
 
 impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        // HACK(eddyb) have to compute this before borrowing any `self` fields.
-        let rpo = self.cfg.rev_post_order(self);
-
-        for point_range in rpo {
-            self.at_mut(Some(point_range.control_nodes()))
-                .inner_in_place_transform_with(transformer);
-
-            if let Some(control_inst) = self.cfg.control_insts.get_mut(point_range.last()) {
-                control_inst.inner_in_place_transform_with(transformer);
+        match &self.unstructured_cfg {
+            None => {
+                FuncAtMutControlRegion::FuncBody(self).inner_in_place_transform_with(transformer)
             }
+            Some(cfg) => {
+                // HACK(eddyb) have to compute this before borrowing any `self` fields.
+                let rpo = cfg.rev_post_order(self);
+
+                for point_range in rpo {
+                    self.at_mut(Some(point_range.control_nodes()))
+                        .inner_in_place_transform_with(transformer);
+
+                    let cfg = self.unstructured_cfg.as_mut().unwrap();
+                    if let Some(control_inst) = cfg.control_insts.get_mut(point_range.last()) {
+                        control_inst.inner_in_place_transform_with(transformer);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// HACK(eddyb) this describes how to get a `&mut ControlRegion`, which cannot
+// be held as a normal borrow while also using `FuncAtMut`.
+enum FuncAtMutControlRegion<'a> {
+    FuncBody(&'a mut FuncDefBody),
+
+    // FIXME(eddyb) represent child regions without having them in a
+    // `Vec<ControlRegion>`, which requires workarounds like this.
+    Child {
+        parent: FuncAtMut<'a, ControlNode>,
+        index: usize,
+    },
+}
+
+impl FuncAtMutControlRegion<'_> {
+    fn at<P: Copy>(&mut self, position: P) -> FuncAtMut<'_, P> {
+        match self {
+            Self::FuncBody(func_def_body) => func_def_body.at_mut(position),
+            Self::Child { parent, index: _ } => parent.reborrow().at(position),
+        }
+    }
+
+    fn def(&mut self) -> &mut ControlRegion {
+        match self {
+            Self::FuncBody(func_def_body) => &mut func_def_body.body,
+            Self::Child { parent, index } => {
+                let child_regions = match &mut parent.reborrow().def().kind {
+                    ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => {
+                        &mut [][..]
+                    }
+
+                    ControlNodeKind::Select { cases, .. } => cases,
+                    ControlNodeKind::Loop { body, .. } => slice::from_mut(body),
+                };
+                &mut child_regions[*index]
+            }
+        }
+    }
+}
+
+impl InnerInPlaceTransform for FuncAtMutControlRegion<'_> {
+    fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
+        // HACK(eddyb) handle the fields of `ControlRegion` separately, to
+        // allow reborrowing `FuncAtMut` (for recursing into `ControlNode`s).
+        let control_nodes = self.def().children;
+        self.at(Some(control_nodes.iter()))
+            .inner_in_place_transform_with(transformer);
+
+        let ControlRegion {
+            children: _,
+            outputs,
+        } = self.def();
+
+        for v in outputs {
+            v.inner_transform_with(transformer).apply_to(v);
         }
     }
 }
@@ -514,43 +580,11 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
         // FIXME(eddyb) represent child regions without having them in a
         // `Vec<ControlRegion>`, which requires workarounds like this.
         for child_region_idx in 0..num_child_regions {
-            // FIXME(eddyb) this could work with explicit `for<'a>` closures or
-            // even just `let closure: impl for<'a> Fn(...) -> ... = |...| {...};`
-            // (but the latter is still unstable, and the former not yet impl'd).
-            let child_region = {
-                fn mk_child_region_getter(
-                    child_region_idx: usize,
-                ) -> impl Fn(FuncAtMut<'_, ControlNode>) -> &mut ControlRegion {
-                    move |func_at_control_node| {
-                        let child_regions = match &mut func_at_control_node.def().kind {
-                            ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => {
-                                &mut [][..]
-                            }
-
-                            ControlNodeKind::Select { cases, .. } => cases,
-                            ControlNodeKind::Loop { body, .. } => slice::from_mut(body),
-                        };
-                        &mut child_regions[child_region_idx]
-                    }
-                }
-                mk_child_region_getter(child_region_idx)
-            };
-
-            // HACK(eddyb) handle the fields of `ControlRegion` separately, to
-            // allow reborrowing `FuncAtMut` (for recursing into `ControlNode`s).
-            let control_nodes = child_region(self.reborrow()).children;
-            self.reborrow()
-                .at(Some(control_nodes.iter()))
-                .inner_in_place_transform_with(transformer);
-
-            let ControlRegion {
-                children: _,
-                outputs,
-            } = child_region(self.reborrow());
-
-            for v in outputs {
-                v.inner_transform_with(transformer).apply_to(v);
+            FuncAtMutControlRegion::Child {
+                parent: self.reborrow(),
+                index: child_region_idx,
             }
+            .inner_in_place_transform_with(transformer);
         }
 
         let ControlNodeDef { kind, outputs } = self.reborrow().def();

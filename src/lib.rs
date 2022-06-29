@@ -267,12 +267,20 @@ pub struct FuncDefBody {
     pub control_nodes: EntityDefs<ControlNode>,
 
     /// The `ControlRegion` representing the whole body of the function.
+    ///
+    /// When `unstructured_cfg` is `None`, this includes the structured return
+    /// of the function, with `body.outputs` as the returned values.
     pub body: ControlRegion,
 
-    /// The (unstructured) control-flow graph of the function.
-    // FIXME(eddyb) make this optional, rename it to `unstructured_cfg`, and
-    // describe how `body.children.last` leads into the CFG when `Some`.
-    pub cfg: cfg::ControlFlowGraph,
+    /// The unstructured (part of the) control-flow graph of the function.
+    ///
+    /// Only present if structurization wasn't attempted, or if was only partial
+    /// (leaving behind a mix of structured and unstructured control-flow).
+    ///
+    /// When present, it starts at `ControlPoint::Exit(body.children.last)`
+    /// (effectively replacing the structured return `body` otherwise implies),
+    /// with the rest of `body.children` always being fully structured.
+    pub unstructured_cfg: Option<cfg::ControlFlowGraph>,
 }
 
 /// Linear chain of `ControlNode`s, describing a single-entry single-exit (SESE)
@@ -289,7 +297,7 @@ pub struct FuncDefBody {
 ///     other function on call stack) requires leaving through the region's
 ///     single exit (also called "merge") point, i.e. its execution is either:
 ///     * "convergent": the region completes and continues into its parent
-///       `ControlNode`, or function (the latter being a "structural return")
+///       `ControlNode`, or function (the latter being a "structured return")
 ///     * "divergent": execution gets stuck in the region (an infinite loop),
 ///       or is aborted (e.g. `OpTerminateInvocation` from SPIR-V)
 /// * "unstructured": `ControlNode`s which connect to other `ControlNode`s using

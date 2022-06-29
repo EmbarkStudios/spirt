@@ -341,12 +341,17 @@ impl InnerVisit for FuncParam {
 
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        for point_range in self.cfg.rev_post_order(self) {
-            self.at(Some(point_range.control_nodes()))
-                .inner_visit_with(visitor);
+        match &self.unstructured_cfg {
+            None => self.at(&self.body).inner_visit_with(visitor),
+            Some(cfg) => {
+                for point_range in cfg.rev_post_order(self) {
+                    self.at(Some(point_range.control_nodes()))
+                        .inner_visit_with(visitor);
 
-            if let Some(control_inst) = self.cfg.control_insts.get(point_range.last()) {
-                control_inst.inner_visit_with(visitor);
+                    if let Some(control_inst) = cfg.control_insts.get(point_range.last()) {
+                        control_inst.inner_visit_with(visitor);
+                    }
+                }
             }
         }
     }

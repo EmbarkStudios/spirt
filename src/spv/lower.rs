@@ -777,7 +777,7 @@ impl Module {
                             data_insts: Default::default(),
                             control_nodes,
                             body,
-                            cfg: Default::default(),
+                            unstructured_cfg: Some(cfg::ControlFlowGraph::default()),
                         })
                     }
                 };
@@ -978,19 +978,24 @@ impl Module {
                                             }
                                             .into(),
                                         );
-                                        func_def_body.cfg.control_insts.insert(
-                                            cfg::ControlPoint::Exit(phi_merge_target),
-                                            cfg::ControlInst {
-                                                attrs: AttrSet::default(),
-                                                kind: cfg::ControlInstKind::Branch,
-                                                inputs: SmallVec::new(),
-                                                targets: iter::once(cfg::ControlPoint::Entry(
-                                                    current_block,
-                                                ))
-                                                .collect(),
-                                                target_merge_outputs: FxIndexMap::default(),
-                                            },
-                                        );
+                                        func_def_body
+                                            .unstructured_cfg
+                                            .as_mut()
+                                            .unwrap()
+                                            .control_insts
+                                            .insert(
+                                                cfg::ControlPoint::Exit(phi_merge_target),
+                                                cfg::ControlInst {
+                                                    attrs: AttrSet::default(),
+                                                    kind: cfg::ControlInstKind::Branch,
+                                                    inputs: SmallVec::new(),
+                                                    targets: iter::once(cfg::ControlPoint::Entry(
+                                                        current_block,
+                                                    ))
+                                                    .collect(),
+                                                    target_merge_outputs: FxIndexMap::default(),
+                                                },
+                                            );
                                         phi_merge_target
                                     });
 
@@ -1290,16 +1295,21 @@ impl Module {
                         return Err(invalid("unsupported control-flow instruction"));
                     };
 
-                    func_def_body.cfg.control_insts.insert(
-                        cfg::ControlPoint::Exit(current_block_control_node),
-                        cfg::ControlInst {
-                            attrs,
-                            kind,
-                            inputs,
-                            targets,
-                            target_merge_outputs,
-                        },
-                    );
+                    func_def_body
+                        .unstructured_cfg
+                        .as_mut()
+                        .unwrap()
+                        .control_insts
+                        .insert(
+                            cfg::ControlPoint::Exit(current_block_control_node),
+                            cfg::ControlInst {
+                                attrs,
+                                kind,
+                                inputs,
+                                targets,
+                                target_merge_outputs,
+                            },
+                        );
                 } else if opcode == wk.OpPhi {
                     if !current_block_insts.is_none() {
                         return Err(invalid(
