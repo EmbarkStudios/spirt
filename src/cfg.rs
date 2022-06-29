@@ -1078,22 +1078,30 @@ impl<'a> Structurizer<'a> {
 
                 if let Ok(merge_bundle) = merge_bundle {
                     let merge_target = merge_bundle.target;
-                    if let Ok(mut region) = self.try_claim_edge_bundle(merge_bundle) {
-                        // If an `UnstructuredMerge` is being `Exit`ed, that
-                        // means the unstructured CFG effectively has phis,
-                        // which have to be taken into account, and the
-                        // merge `ControlNode` reused.
-                        let unstructured_exit_merge = match merge_target {
-                            ControlPoint::Exit(merge_node) => {
-                                assert!(matches!(
-                                    self.func_def_body.control_nodes[merge_node].kind,
-                                    ControlNodeKind::UnstructuredMerge
-                                ));
-                                Some(merge_node)
-                            }
-                            _ => None,
-                        };
 
+                    // If an `UnstructuredMerge` is being `Exit`ed, that
+                    // means the unstructured CFG effectively has phis,
+                    // which have to be taken into account, and the
+                    // merge `ControlNode` reused.
+                    let unstructured_exit_merge = match merge_target {
+                        ControlPoint::Exit(merge_node) => {
+                            assert!(matches!(
+                                self.func_def_body.control_nodes[merge_node].kind,
+                                ControlNodeKind::UnstructuredMerge
+                            ));
+                            Some(merge_node)
+                        }
+                        _ => None,
+                    };
+
+                    // HACK(eddyb) allow the "common merge" to not actually be
+                    // claimed, when there's no `UnstructuredMerge` to replace.
+                    let region = if unstructured_exit_merge.is_none() {
+                        Ok(self.claim_or_defer_single_edge(merge_target, [].into_iter().collect()))
+                    } else {
+                        self.try_claim_edge_bundle(merge_bundle)
+                    };
+                    if let Ok(mut region) = region {
                         let kind = match control_inst.unwrap().kind {
                             ControlInstKind::SelectBranch(kind) => kind,
                             _ => unreachable!(),
@@ -1108,12 +1116,19 @@ impl<'a> Structurizer<'a> {
 
                                 let outputs = match successor {
                                     PartialControlRegionSuccessor::Deferred(mut deferred_set) => {
-                                        let deferred = deferred_set
-                                            .target_to_deferred
-                                            .remove(&merge_target)
-                                            .unwrap();
-                                        assert!(deferred_set.target_to_deferred.is_empty());
-                                        deferred.edge_bundle.target_merge_outputs
+                                        match deferred_set.target_to_deferred.remove(&merge_target)
+                                        {
+                                            Some(deferred) => {
+                                                assert!(deferred_set.target_to_deferred.is_empty());
+                                                deferred.edge_bundle.target_merge_outputs
+                                            }
+                                            // FIXME(eddyb) support having outputs when some
+                                            // cases are divergent, by generating undef constants.
+                                            None => {
+                                                assert!(unstructured_exit_merge.is_none());
+                                                [].into_iter().collect()
+                                            }
+                                        }
                                     }
                                     _ => unreachable!(),
                                 };
