@@ -992,7 +992,22 @@ impl<'a> Structurizer<'a> {
                 Ok(region)
             }
 
-            Ok(ControlInstKind::Unreachable | ControlInstKind::ExitInvocation(_)) => {
+            Ok(ControlInstKind::Unreachable) => {
+                assert_eq!(child_regions.len(), 0);
+
+                // FIXME(eddyb) this may result in lost optimizations over
+                // actually encoding it in `ControlNode`/`ControlRegion`
+                // (e.g. a new `ControlKind`, or replacing region `outputs`),
+                // but it's simpler to handle it like this.
+                Ok(PartialControlRegion {
+                    children: None,
+                    successor: PartialControlRegionSuccessor::Deferred(DeferredEdgeBundleSet {
+                        target_to_deferred: [].into_iter().collect(),
+                    }),
+                })
+            }
+
+            Ok(ControlInstKind::ExitInvocation(_)) => {
                 assert_eq!(child_regions.len(), 0);
 
                 // FIXME(eddyb) introduce equivalent `ControlNodeKind` for these.
