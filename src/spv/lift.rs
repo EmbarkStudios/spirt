@@ -360,8 +360,11 @@ impl<'a> FuncLifting<'a> {
                                     inputs: [*scrutinee].into_iter().collect(),
                                     targets: cases
                                         .iter()
-                                        .map(|case| {
-                                            cfg::ControlPoint::Entry(case.children.iter().first)
+                                        .map(|&case| {
+                                            let func_at_case = func_at_point_cursor.at(case);
+                                            let case_children = func_at_case.def().children.iter();
+
+                                            cfg::ControlPoint::Entry(case_children.first)
                                         })
                                         .collect(),
                                     target_merge_outputs: FxIndexMap::default(),
@@ -372,15 +375,18 @@ impl<'a> FuncLifting<'a> {
                                 body,
                                 repeat_condition: _,
                             } => {
+                                let func_at_loop_body = func_at_point_cursor.at(*body);
+                                let loop_body_children = func_at_loop_body.def().children.iter();
+
                                 merge = Some(Merge::Loop {
                                     loop_merge: cfg::ControlPoint::Exit(point.control_node()),
-                                    body_merge: cfg::ControlPoint::Exit(body.children.iter().last),
+                                    body_merge: cfg::ControlPoint::Exit(loop_body_children.last),
                                 });
                                 cfg::ControlInst {
                                     attrs: AttrSet::default(),
                                     kind: cfg::ControlInstKind::Branch,
                                     inputs: [].into_iter().collect(),
-                                    targets: [cfg::ControlPoint::Entry(body.children.iter().first)]
+                                    targets: [cfg::ControlPoint::Entry(loop_body_children.first)]
                                         .into_iter()
                                         .collect(),
                                     target_merge_outputs: FxIndexMap::default(),
@@ -392,7 +398,7 @@ impl<'a> FuncLifting<'a> {
                         (cfg::ControlPoint::Exit(_), None) => cfg::ControlInst {
                             attrs: AttrSet::default(),
                             kind: cfg::ControlInstKind::Return,
-                            inputs: func_def_body.body.outputs.clone(),
+                            inputs: func_def_body.at_body().def().outputs.clone(),
                             targets: [].into_iter().collect(),
                             target_merge_outputs: FxIndexMap::default(),
                         },
@@ -499,7 +505,7 @@ impl<'a> FuncLifting<'a> {
         };
         match &func_def_body.unstructured_cfg {
             None => visit_point_range(cfg::ControlPointRange::LinearChain(
-                func_def_body.body.children.iter(),
+                func_def_body.at_body().def().children.iter(),
             ))?,
             Some(cfg) => {
                 for point_range in cfg.rev_post_order(func_def_body) {

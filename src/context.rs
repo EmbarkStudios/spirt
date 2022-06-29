@@ -782,6 +782,7 @@ macro_rules! entities {
 entities! {
     GlobalVar => chunk_size(0x1_0000) crate::GlobalVarDecl,
     Func => chunk_size(0x1_0000) crate::FuncDecl,
+    ControlRegion => chunk_size(0x1000) crate::ControlRegionDef,
     ControlNode => chunk_size(0x1000) EntityListNode<ControlNode, crate::ControlNodeDef>,
     DataInst => chunk_size(0x1000) EntityListNode<DataInst, crate::DataInstDef>,
 }

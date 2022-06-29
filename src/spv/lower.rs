@@ -4,7 +4,7 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegionDef, DataInstDef,
     DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
     FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
     Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
@@ -758,6 +758,7 @@ impl Module {
                 let def = match pending_imports.remove(&func_id) {
                     Some(import) => DeclDef::Imported(import),
                     None => {
+                        let mut control_regions = EntityDefs::default();
                         let mut control_nodes = EntityDefs::default();
                         // HACK(eddyb) can't get a `ControlNode` without
                         // defining it as an (empty) `ControlNodeDef` first.
@@ -769,13 +770,17 @@ impl Module {
                             }
                             .into(),
                         );
-                        let body = ControlRegion {
-                            children: EntityList::insert_last(None, entry, &mut control_nodes),
-                            outputs: SmallVec::new(),
-                        };
+                        let body = control_regions.define(
+                            &cx,
+                            ControlRegionDef {
+                                children: EntityList::insert_last(None, entry, &mut control_nodes),
+                                outputs: SmallVec::new(),
+                            },
+                        );
                         DeclDef::Present(FuncDefBody {
-                            data_insts: Default::default(),
+                            control_regions,
                             control_nodes,
+                            data_insts: Default::default(),
                             body,
                             unstructured_cfg: Some(cfg::ControlFlowGraph::default()),
                         })
@@ -934,7 +939,7 @@ impl Module {
                                 let block = if is_entry_block {
                                     // An empty `ControlNodeKind::Block` node was defined
                                     // earlier, to be able to create the `FuncDefBody`.
-                                    func_def_body.body.children.iter().first
+                                    func_def_body.at_body().def().children.iter().first
                                 } else {
                                     // HACK(eddyb) can't get a `ControlNode` without
                                     // defining it as an (empty) `ControlNodeDef` first.
@@ -1505,7 +1510,8 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                if block_details[&func_def_body.body.children.iter().first].phi_count > 0 {
+                let body_children = func_def_body.at_body().def().children.iter();
+                if block_details[&body_children.first].phi_count > 0 {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(

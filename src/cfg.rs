@@ -3,8 +3,9 @@
 use crate::func_at::FuncAt;
 use crate::{
     spv, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode, ControlNodeDef,
-    ControlNodeKind, ControlRegion, EntityList, EntityListIter, EntityOrientedDenseMap,
-    EntityOrientedMapKey, FuncDefBody, FxIndexMap, SelectionKind, TypeCtor, TypeDef, Value,
+    ControlNodeKind, ControlRegion, ControlRegionDef, EntityList, EntityListIter,
+    EntityOrientedDenseMap, EntityOrientedMapKey, FuncDefBody, FxIndexMap, SelectionKind, TypeCtor,
+    TypeDef, Value,
 };
 use smallvec::SmallVec;
 use std::{mem, slice};
@@ -194,12 +195,12 @@ impl ControlPointRange {
 /// Helper type for deep traversal of `ControlPointRange`, which tracks the
 /// necessary context for "peeking around" within the `ControlPointRange`.
 #[derive(Copy, Clone)]
-pub struct ControlCursor<'a, 'p, P> {
+pub struct ControlCursor<'p, P> {
     pub position: P,
-    pub parent: Option<&'p ControlCursor<'a, 'p, (ControlNode, &'a ControlRegion)>>,
+    pub parent: Option<&'p ControlCursor<'p, (ControlNode, ControlRegion)>>,
 }
 
-impl<'a> FuncAt<'a, ControlCursor<'a, '_, ControlPoint>> {
+impl<'a> FuncAt<'a, ControlCursor<'_, ControlPoint>> {
     /// Return the next `ControlPoint` (wrapped in `ControlCursor`) in a linear
     /// chain within structured control-flow (i.e. no branching to child regions).
     ///
@@ -257,7 +258,7 @@ impl<'a> FuncAt<'a, ControlCursor<'a, '_, ControlPoint>> {
                                 position: ControlPoint::Exit(parent_control_node),
                                 parent: parent.parent,
                             }),
-                            Some(&parent_control_region.outputs[..]),
+                            Some(&self.at(parent_control_region).def().outputs[..]),
                         )
                     }),
                 }
@@ -284,7 +285,7 @@ impl<'a> FuncAt<'a, ControlPointRange> {
     /// handle structured control-flow in a manner simpler than arbitrary CFGs.
     pub fn rev_post_order_try_for_each<E>(
         self,
-        mut f: impl FnMut(FuncAt<'a, ControlCursor<'a, '_, ControlPoint>>) -> Result<(), E>,
+        mut f: impl FnMut(FuncAt<'a, ControlCursor<'_, ControlPoint>>) -> Result<(), E>,
     ) -> Result<(), E> {
         match self.position {
             ControlPointRange::UnstructuredExit(control_node) => f(self.at(ControlCursor {
@@ -301,8 +302,8 @@ impl<'a> FuncAt<'a, ControlPointRange> {
 impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
     fn rev_post_order_try_for_each_inner<E>(
         self,
-        f: &mut impl FnMut(FuncAt<'a, ControlCursor<'a, '_, ControlPoint>>) -> Result<(), E>,
-        parent: Option<&ControlCursor<'a, '_, (ControlNode, &'a ControlRegion)>>,
+        f: &mut impl FnMut(FuncAt<'a, ControlCursor<'_, ControlPoint>>) -> Result<(), E>,
+        parent: Option<&ControlCursor<'_, (ControlNode, ControlRegion)>>,
     ) -> Result<(), E> {
         for func_at_control_node in self {
             let child_regions: &[_] = match &func_at_control_node.def().kind {
@@ -319,8 +320,9 @@ impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
                 position: ControlPoint::Entry(control_node),
                 parent,
             }))?;
-            for region in child_regions {
-                self.at(region.children)
+            for &region in child_regions {
+                self.at(region)
+                    .at_children()
                     .into_iter()
                     .rev_post_order_try_for_each_inner(
                         f,
@@ -402,14 +404,16 @@ impl ControlFlowGraph {
         pre_order_visit: &mut impl FnMut(ControlPointRange),
         post_order_visit: &mut impl FnMut(ControlPointRange),
     ) {
+        let body_def = func_def_body.at_body().def();
+
         // Quick sanity check that this is the right CFG for `func_def_body`.
         assert!(std::ptr::eq(
             func_def_body.unstructured_cfg.as_ref().unwrap(),
             self
         ));
-        assert!(func_def_body.body.outputs.is_empty());
+        assert!(body_def.outputs.is_empty());
 
-        let body_children = func_def_body.body.children.iter();
+        let body_children = body_def.children.iter();
         let body_range = ControlPointRange::LinearChain(body_children);
         self.traverse(
             func_def_body.at(body_range),
@@ -693,14 +697,16 @@ impl<'a> Structurizer<'a> {
             return;
         }
 
-        let body_entry = ControlPoint::Entry(self.func_def_body.body.children.iter().first);
+        let body_entry =
+            ControlPoint::Entry(self.func_def_body.at_body().def().children.iter().first);
         let PartialControlRegion {
             mut children,
             successor,
         } = self.claim_or_defer_single_edge(body_entry, SmallVec::new());
 
         children = Some(children.unwrap_or_else(|| self.empty_control_region_children()));
-        self.func_def_body.body.children = children.unwrap();
+
+        self.func_def_body.at_mut_body().def().children = children.unwrap();
 
         match successor {
             // Structured return, the function is fully structurized.
@@ -713,7 +719,7 @@ impl<'a> Structurizer<'a> {
                 deferred_edges,
                 deferred_return: Some(return_values),
             } if deferred_edges.target_to_deferred.is_empty() => {
-                self.func_def_body.body.outputs = return_values;
+                self.func_def_body.at_mut_body().def().outputs = return_values;
                 self.func_def_body.unstructured_cfg = None;
                 return;
             }
@@ -861,12 +867,16 @@ impl<'a> Structurizer<'a> {
             } = backedge;
             assert!(backedge.target == target);
 
-            let body = ControlRegion {
-                children: region
-                    .children
-                    .unwrap_or_else(|| self.empty_control_region_children()),
-                outputs: [].into_iter().collect(),
-            };
+            let children = region
+                .children
+                .unwrap_or_else(|| self.empty_control_region_children());
+            let body = self.func_def_body.control_regions.define(
+                self.cx,
+                ControlRegionDef {
+                    children,
+                    outputs: [].into_iter().collect(),
+                },
+            );
 
             let loop_node = self.func_def_body.control_nodes.define(
                 self.cx,
@@ -1195,11 +1205,11 @@ impl<'a> Structurizer<'a> {
                                     _ => unreachable!(),
                                 };
 
-                                ControlRegion {
-                                    children: children
-                                        .unwrap_or_else(|| self.empty_control_region_children()),
-                                    outputs,
-                                }
+                                let children = children
+                                    .unwrap_or_else(|| self.empty_control_region_children());
+                                self.func_def_body
+                                    .control_regions
+                                    .define(self.cx, ControlRegionDef { children, outputs })
                             })
                             .collect();
 

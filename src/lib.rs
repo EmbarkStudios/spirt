@@ -8,8 +8,9 @@ type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_h
 
 mod context;
 pub use context::{
-    AttrSet, Const, Context, ControlNode, DataInst, EntityDefs, EntityList, EntityListIter,
-    EntityOrientedDenseMap, EntityOrientedMapKey, Func, GlobalVar, InternedStr, Type,
+    AttrSet, Const, Context, ControlNode, ControlRegion, DataInst, EntityDefs, EntityList,
+    EntityListIter, EntityOrientedDenseMap, EntityOrientedMapKey, Func, GlobalVar, InternedStr,
+    Type,
 };
 
 pub mod cfg;
@@ -261,10 +262,9 @@ pub struct FuncParam {
 
 #[derive(Clone)]
 pub struct FuncDefBody {
-    // FIXME(eddyb) either flip the order here, or reorder the definitions of
-    // `DataInstDef` vs `ControlNodeDef` (and related types) in this module.
-    pub data_insts: EntityDefs<DataInst>,
+    pub control_regions: EntityDefs<ControlRegion>,
     pub control_nodes: EntityDefs<ControlNode>,
+    pub data_insts: EntityDefs<DataInst>,
 
     /// The `ControlRegion` representing the whole body of the function.
     ///
@@ -356,7 +356,7 @@ pub struct FuncDefBody {
 ///     phi node outputs the same way as if they had come from a `Select`,
 ///     while the "source" values are kept in the `cfg::ControlFlowGraph`
 #[derive(Clone)]
-pub struct ControlRegion {
+pub struct ControlRegionDef {
     pub children: EntityList<ControlNode>,
 
     pub outputs: SmallVec<[Value; 2]>,
@@ -406,7 +406,7 @@ pub enum ControlNodeKind {
         kind: SelectionKind,
         scrutinee: Value,
 
-        cases: Vec<ControlRegion>,
+        cases: SmallVec<[ControlRegion; 2]>,
     },
 
     /// Execute `body` repeatedly, until `repeat_condition` evaluates to `false`.

@@ -7,10 +7,11 @@ use crate::func_at::FuncAt;
 use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
-    ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInst,
-    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl,
-    FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
+    ControlRegionDef, DataInst, DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey,
+    Exportee, Func, FuncDecl, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -899,7 +900,7 @@ impl<'a> Printer<'a> {
 
                 match &func_def_body.unstructured_cfg {
                     None => visit_point_range(cfg::ControlPointRange::LinearChain(
-                        func_def_body.body.children.iter(),
+                        func_def_body.at_body().def().children.iter(),
                     )),
                     Some(cfg) => {
                         for point_range in cfg.rev_post_order(func_def_body) {
@@ -2117,7 +2118,7 @@ impl Print for FuncDecl {
                 sig,
                 " {".into(),
                 pretty::Node::IndentedBlock(match &def.unstructured_cfg {
-                    None => vec![def.at(&def.body).print(printer)],
+                    None => vec![def.at_body().print(printer)],
                     Some(cfg) => cfg
                         .rev_post_order(def)
                         .map(|point_range| {
@@ -2168,10 +2169,10 @@ impl Print for FuncParam {
     }
 }
 
-impl Print for FuncAt<'_, &'_ ControlRegion> {
+impl Print for FuncAt<'_, ControlRegion> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        let ControlRegion { children, outputs } = self.position;
+        let ControlRegionDef { children, outputs } = self.def();
 
         let outputs_footer = if !outputs.is_empty() {
             let mut outputs = outputs.iter().map(|v| v.print(printer));
@@ -2301,7 +2302,7 @@ impl Print for FuncAt<'_, ControlNode> {
                 printer,
                 kw_style,
                 *scrutinee,
-                cases.iter().map(|case| self.at(case).print(printer)),
+                cases.iter().map(|&case| self.at(case).print(printer)),
             ),
             ControlNodeKind::Loop {
                 body,
@@ -2311,7 +2312,7 @@ impl Print for FuncAt<'_, ControlNode> {
                 pretty::Fragment::new([
                     kw("loop"),
                     " {".into(),
-                    pretty::Node::IndentedBlock(vec![self.at(body).print(printer)]).into(),
+                    pretty::Node::IndentedBlock(vec![self.at(*body).print(printer)]).into(),
                     "} ".into(),
                     kw("while"),
                     " ".into(),

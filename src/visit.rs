@@ -1,10 +1,10 @@
 use crate::func_at::FuncAt;
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, DataInstDef,
-    DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody,
-    FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
+    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -342,7 +342,7 @@ impl InnerVisit for FuncParam {
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match &self.unstructured_cfg {
-            None => self.at(&self.body).inner_visit_with(visitor),
+            None => self.at_body().inner_visit_with(visitor),
             Some(cfg) => {
                 for point_range in cfg.rev_post_order(self) {
                     self.at(Some(point_range.control_nodes()))
@@ -358,10 +358,10 @@ impl InnerVisit for FuncDefBody {
 }
 
 // FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
-// requirement, whereas this has `'a` in `self: FuncAt<'a, &'a ControlRegion>`.
-impl<'a> FuncAt<'a, &'a ControlRegion> {
+// requirement, whereas this has `'a` in `self: FuncAt<'a, ControlRegion>`.
+impl<'a> FuncAt<'a, ControlRegion> {
     fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
-        let ControlRegion { children, outputs } = self.position;
+        let ControlRegionDef { children, outputs } = self.def();
 
         self.at(*children).into_iter().inner_visit_with(visitor);
         for v in outputs {
@@ -399,7 +399,7 @@ impl<'a> FuncAt<'a, ControlNode> {
                 cases,
             } => {
                 visitor.visit_value_use(scrutinee);
-                for case in cases {
+                for &case in cases {
                     self.at(case).inner_visit_with(visitor);
                 }
             }
@@ -407,7 +407,7 @@ impl<'a> FuncAt<'a, ControlNode> {
                 body,
                 repeat_condition,
             } => {
-                self.at(body).inner_visit_with(visitor);
+                self.at(*body).inner_visit_with(visitor);
                 visitor.visit_value_use(repeat_condition);
             }
         }
