@@ -268,6 +268,9 @@ pub struct FuncDefBody {
 
     /// The `ControlRegion` representing the whole body of the function.
     ///
+    /// Function parameters are provided via `body.inputs`, i.e. they can be
+    /// only accessed with `Value::ControlRegionInputs { region: body, idx }`.
+    ///
     /// When `unstructured_cfg` is `None`, this includes the structured return
     /// of the function, with `body.outputs` as the returned values.
     pub body: ControlRegion,
@@ -345,7 +348,9 @@ pub struct FuncDefBody {
 ///       should eventually be replaced with passing all such values through
 ///       the region `outputs` (or by inlining the region, in the `Select` case)
 /// * instead of φ ("phi") nodes, SPIR-T uses region `outputs` to merge values
-///   coming from separate control-flow paths (e.g. the cases of a `Select`)
+///   coming from separate control-flow paths (i.e. the cases of a `Select`),
+///   and region `inputs` for passing values back along loop backedges
+///   (additionally, the body's `inputs` are used for function parameters)
 ///   * like the "block arguments" alternative to SSA phi nodes (which some
 ///     other SSA IRs use), this has the advantage of keeping the uses of the
 ///     "source" values in their respective paths (where they're dominated),
@@ -355,16 +360,50 @@ pub struct FuncDefBody {
 ///     (`UnstructuredMerge`) serves to bridge the gap, and allow referring to
 ///     phi node outputs the same way as if they had come from a `Select`,
 ///     while the "source" values are kept in the `cfg::ControlFlowGraph`
+///     * using region `inputs` for this may be an improvement, except that
+///       `cfg::ControlFlowGraph` describes edges relative to `ControlNode`s,
+///       not `ControlRegion`s, and for `Select`s they would still have to be
+///       rewritten into `outputs` anyway
 #[derive(Clone)]
 pub struct ControlRegionDef {
+    /// Inputs to this `ControlRegion`:
+    /// * accessed using `Value::ControlRegionInput`
+    /// * values provided by the parent:
+    ///   * when this is the function body: the function's parameters
+    pub inputs: SmallVec<[ControlRegionInputDecl; 2]>,
+
     pub children: EntityList<ControlNode>,
 
+    /// Output values from this `ControlRegion`, provided to the parent:
+    /// * when this is the function body: these are the structured return values
+    /// * when this is a `Select` case: these are the values for the parent
+    ///   `ControlNode`'s outputs (accessed using `Value::ControlNodeOutput`)
+    /// * when this is a `Loop` body: these are the values to be used for the
+    ///   next loop iteration's body `inputs`
+    ///   * **not** accessible through `Value::ControlNodeOutput` on the `Loop`,
+    ///     as it's both confusing regarding `Value::ControlRegionInput`, and
+    ///     also there's nothing stopping body-defined values from directly being
+    ///     used outside the loop (once that changes, this aspect can be flipped)
+    ///   * FIXME(eddyb) not yet implemented
     pub outputs: SmallVec<[Value; 2]>,
+}
+
+#[derive(Copy, Clone)]
+pub struct ControlRegionInputDecl {
+    pub attrs: AttrSet,
+
+    pub ty: Type,
 }
 
 #[derive(Clone)]
 pub struct ControlNodeDef {
     pub kind: ControlNodeKind,
+
+    /// Outputs from this `ControlNode`:
+    /// * accessed using `Value::ControlNodeOutput`
+    /// * values provided by `region.outputs`, where `region` is the executed
+    ///   child `ControlRegion`:
+    ///   * when this is a `Select`: the case that was chosen
     pub outputs: SmallVec<[ControlNodeOutputDecl; 2]>,
 }
 
@@ -464,13 +503,26 @@ pub enum DataInstKind {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Value {
     Const(Const),
-    FuncParam {
-        idx: u32,
+
+    /// One of the inputs to a `ControlRegion`:
+    /// * declared by `region.inputs[input_idx]`
+    /// * value provided by the parent of the `region`:
+    ///   * when `region` is the function body: `input_idx`th function parameter
+    ControlRegionInput {
+        region: ControlRegion,
+        input_idx: u32,
     },
-    // FIXME(eddyb) this variant alone increases the size of the `enum`.
+
+    /// One of the outputs produced by a `ControlNode`:
+    /// * declared by `control_node.outputs[output_idx]`
+    /// * value provided by `region.outputs[output_idx]`, where `region` is the
+    ///   executed child `ControlRegion` (of `control_node`):
+    ///   * when `control_node` is a `Select`: the case that was chosen
     ControlNodeOutput {
         control_node: ControlNode,
         output_idx: u32,
     },
+
+    /// The output value of a `DataInst`.
     DataInstOutput(DataInst),
 }

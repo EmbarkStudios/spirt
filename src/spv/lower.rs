@@ -4,10 +4,10 @@ use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
     cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegionDef, DataInstDef,
-    DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
-    Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegionDef,
+    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody,
+    Import, InternedStr, Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -773,6 +773,7 @@ impl Module {
                         let body = control_regions.define(
                             &cx,
                             ControlRegionDef {
+                                inputs: SmallVec::new(),
                                 children: EntityList::insert_last(None, entry, &mut control_nodes),
                                 outputs: SmallVec::new(),
                             },
@@ -924,7 +925,17 @@ impl Module {
                         let local_id_def = if opcode == wk.OpFunctionParameter {
                             let idx = next_param_idx;
                             next_param_idx = idx.checked_add(1).unwrap();
-                            LocalIdDef::Value(Value::FuncParam { idx })
+
+                            let body = match &func_decl.def {
+                                // `LocalIdDef`s not needed for declarations.
+                                DeclDef::Imported(_) => continue,
+
+                                DeclDef::Present(def) => def.body,
+                            };
+                            LocalIdDef::Value(Value::ControlRegionInput {
+                                region: body,
+                                input_idx: idx,
+                            })
                         } else {
                             let is_entry_block = !has_blocks;
                             has_blocks = true;
@@ -1132,10 +1143,16 @@ impl Module {
                     }
 
                     assert!(imms.is_empty() && ids.is_empty());
-                    params.push(FuncParam {
-                        attrs,
-                        ty: result_type.unwrap(),
-                    });
+
+                    let ty = result_type.unwrap();
+                    params.push(FuncParam { attrs, ty });
+                    if let Some(func_def_body) = &mut func_def_body {
+                        func_def_body
+                            .at_mut_body()
+                            .def()
+                            .inputs
+                            .push(ControlRegionInputDecl { attrs, ty });
+                    }
                     continue;
                 }
                 let func_def_body = func_def_body.as_deref_mut().unwrap();

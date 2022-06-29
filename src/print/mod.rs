@@ -154,11 +154,36 @@ enum Use {
 
     ControlPointLabel(cfg::ControlPoint),
 
+    // FIXME(eddyb) these are `Value`'s variants except `Const`, maybe `Use`
+    // should just use `Value` and assert it's never `Const`?
+    ControlRegionInput {
+        region: ControlRegion,
+        input_idx: u32,
+    },
     ControlNodeOutput {
         control_node: ControlNode,
         output_idx: u32,
     },
     DataInstOutput(DataInst),
+}
+
+impl From<Value> for Use {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Const(ct) => Use::CxInterned(CxInterned::Const(ct)),
+            Value::ControlRegionInput { region, input_idx } => {
+                Use::ControlRegionInput { region, input_idx }
+            }
+            Value::ControlNodeOutput {
+                control_node,
+                output_idx,
+            } => Use::ControlNodeOutput {
+                control_node,
+                output_idx,
+            },
+            Value::DataInstOutput(inst) => Use::DataInstOutput(inst),
+        }
+    }
 }
 
 impl Use {
@@ -167,7 +192,9 @@ impl Use {
             Self::Node(node) => node.category().unwrap(),
             Self::CxInterned(interned) => interned.category(),
             Self::ControlPointLabel(_) => "label",
-            Self::ControlNodeOutput { .. } | Self::DataInstOutput(_) => "v",
+            Self::ControlRegionInput { .. }
+            | Self::ControlNodeOutput { .. }
+            | Self::DataInstOutput(_) => "v",
         }
     }
 }
@@ -383,26 +410,8 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
     fn visit_value_use(&mut self, v: &'a Value) {
         match *v {
-            Value::Const(_) | Value::FuncParam { .. } => {}
-
-            Value::ControlNodeOutput {
-                control_node,
-                output_idx,
-            } => {
-                *self
-                    .use_counts
-                    .entry(Use::ControlNodeOutput {
-                        control_node,
-                        output_idx,
-                    })
-                    .or_default() += 1;
-            }
-            Value::DataInstOutput(inst) => {
-                *self
-                    .use_counts
-                    .entry(Use::DataInstOutput(inst))
-                    .or_default() += 1;
-            }
+            Value::Const(_) => {}
+            _ => *self.use_counts.entry(Use::from(*v)).or_default() += 1,
         }
         v.inner_visit_with(self);
     }
@@ -677,6 +686,7 @@ impl<'a> Printer<'a> {
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
                 if let Use::ControlPointLabel(_)
+                | Use::ControlRegionInput { .. }
                 | Use::ControlNodeOutput { .. }
                 | Use::DataInstOutput(_) = use_kind
                 {
@@ -750,6 +760,7 @@ impl<'a> Printer<'a> {
                     }
                     Use::Node(_) => false,
                     Use::ControlPointLabel(_)
+                    | Use::ControlRegionInput { .. }
                     | Use::ControlNodeOutput { .. }
                     | Use::DataInstOutput(_) => {
                         unreachable!()
@@ -772,6 +783,7 @@ impl<'a> Printer<'a> {
                             | Node::ModuleDebugInfo,
                         )
                         | Use::ControlPointLabel(_)
+                        | Use::ControlRegionInput { .. }
                         | Use::ControlNodeOutput { .. }
                         | Use::DataInstOutput(_) => {
                             unreachable!()
@@ -804,6 +816,24 @@ impl<'a> Printer<'a> {
             let mut control_pointer_label_counter = 0;
             let mut value_counter = 0;
 
+            // Assign a new label/value index, but only if:
+            // * the definition is actually used
+            // * it doesn't already have an index (e.g. from a previous version)
+            let mut define_label_or_value = |use_kind: Use| {
+                if let Some(use_style @ UseStyle::Inline) = use_styles.get_mut(&use_kind) {
+                    let counter = match use_kind {
+                        Use::ControlPointLabel(_) => &mut control_pointer_label_counter,
+                        _ => &mut value_counter,
+                    };
+                    let idx = *counter;
+                    *counter += 1;
+                    *use_style = UseStyle::Anon {
+                        parent_func: Some(func),
+                        idx,
+                    };
+                }
+            };
+
             let func_def_bodies_across_versions = plan
                 .per_version_name_and_node_defs
                 .iter()
@@ -819,22 +849,18 @@ impl<'a> Printer<'a> {
                 });
 
             for func_def_body in func_def_bodies_across_versions {
+                for (i, _) in func_def_body.at_body().def().inputs.iter().enumerate() {
+                    define_label_or_value(Use::ControlRegionInput {
+                        region: func_def_body.body,
+                        input_idx: i.try_into().unwrap(),
+                    });
+                }
+
                 let mut visit_point_range = |point_range: cfg::ControlPointRange| {
                     // The label is only for CFG edge destinations.
                     let label_point = point_range.first();
 
-                    // Only assign a new index if this `ControlPointLabel` is
-                    // new in this version (and absent from previous ones).
-                    if let Some(use_style @ UseStyle::Inline) =
-                        use_styles.get_mut(&Use::ControlPointLabel(label_point))
-                    {
-                        let idx = control_pointer_label_counter;
-                        control_pointer_label_counter += 1;
-                        *use_style = UseStyle::Anon {
-                            parent_func: Some(func),
-                            idx,
-                        };
-                    }
+                    define_label_or_value(Use::ControlPointLabel(label_point));
 
                     // FIXME(eddyb) stop using `rev_post_order_try_for_each`.
                     func_def_body
@@ -867,30 +893,19 @@ impl<'a> Printer<'a> {
                                 _ => None,
                             };
 
-                            let defined_values = func_def_body
-                                .at(block_insts)
-                                .into_iter()
-                                .filter(|func_at_inst| func_at_inst.def().output_type.is_some())
-                                .map(|func_at_inst| Use::DataInstOutput(func_at_inst.position))
-                                .chain(outputs.iter().enumerate().map(|(i, _)| {
-                                    Use::ControlNodeOutput {
-                                        control_node,
-                                        output_idx: i.try_into().unwrap(),
-                                    }
-                                }));
-                            for use_kind in defined_values {
-                                // Only assign a new index if this `Value` definition is
-                                // new in this version (and absent from previous ones)
-                                if let Some(use_style @ UseStyle::Inline) =
-                                    use_styles.get_mut(&use_kind)
-                                {
-                                    let idx = value_counter;
-                                    value_counter += 1;
-                                    *use_style = UseStyle::Anon {
-                                        parent_func: Some(func),
-                                        idx,
-                                    };
+                            for func_at_inst in func_def_body.at(block_insts) {
+                                if func_at_inst.def().output_type.is_some() {
+                                    define_label_or_value(Use::DataInstOutput(
+                                        func_at_inst.position,
+                                    ));
                                 }
+                            }
+
+                            for (i, _) in outputs.iter().enumerate() {
+                                define_label_or_value(Use::ControlNodeOutput {
+                                    control_node,
+                                    output_idx: i.try_into().unwrap(),
+                                });
                             }
 
                             Ok(())
@@ -1226,6 +1241,7 @@ impl Use {
                     ))
                     .into(),
                 Self::ControlPointLabel(_)
+                | Self::ControlRegionInput { .. }
                 | Self::ControlNodeOutput { .. }
                 | Self::DataInstOutput(_) => "_".into(),
             },
@@ -2095,12 +2111,15 @@ impl Print for FuncDecl {
             pretty::join_comma_sep(
                 "(",
                 params.iter().enumerate().map(|(i, param)| {
-                    param.print(printer).insert_name_before_def(
-                        Value::FuncParam {
-                            idx: i.try_into().unwrap(),
+                    let param_name = match def {
+                        DeclDef::Imported(_) => "_".into(),
+                        DeclDef::Present(def) => Value::ControlRegionInput {
+                            region: def.body,
+                            input_idx: i.try_into().unwrap(),
                         }
                         .print(printer),
-                    )
+                    };
+                    param.print(printer).insert_name_before_def(param_name)
                 }),
                 ")",
             ),
@@ -2172,7 +2191,13 @@ impl Print for FuncParam {
 impl Print for FuncAt<'_, ControlRegion> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        let ControlRegionDef { children, outputs } = self.def();
+        let ControlRegionDef {
+            inputs: _,
+            children,
+            outputs,
+        } = self.def();
+
+        // NOTE(eddyb) `inputs` are always printed by the parent.
 
         let outputs_footer = if !outputs.is_empty() {
             let mut outputs = outputs.iter().map(|v| v.print(printer));
@@ -2553,35 +2578,14 @@ impl SelectionKind {
 }
 
 impl Value {
-    /// Common implementation for `Value::print` and `Value::print_as_def`.
-    fn print_as_ref_or_def(&self, printer: &Printer<'_>, is_def: bool) -> pretty::Fragment {
-        let value_use = match *self {
-            Self::Const(ct) => Use::CxInterned(CxInterned::Const(ct)),
-            Self::FuncParam { idx } => return format!("param{}", idx).into(),
-            Self::ControlNodeOutput {
-                control_node,
-                output_idx,
-            } => Use::ControlNodeOutput {
-                control_node,
-                output_idx,
-            },
-            Self::DataInstOutput(inst) => Use::DataInstOutput(inst),
-        };
-        if is_def {
-            value_use.print_as_def(printer)
-        } else {
-            value_use.print(printer)
-        }
-    }
-
     fn print_as_def(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        self.print_as_ref_or_def(printer, true)
+        Use::from(*self).print_as_def(printer)
     }
 }
 
 impl Print for Value {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        self.print_as_ref_or_def(printer, false)
+        Use::from(*self).print(printer)
     }
 }

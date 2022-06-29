@@ -2,9 +2,10 @@ use crate::func_at::FuncAtMut;
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
-    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use std::cmp::Ordering;
 use std::slice;
@@ -483,19 +484,42 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlRegion> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         // HACK(eddyb) handle the fields of `ControlRegion` separately, to
         // allow reborrowing `FuncAtMut` (for recursing into `ControlNode`s).
+        let ControlRegionDef {
+            inputs,
+            children: _,
+            outputs: _,
+        } = self.reborrow().def();
+        for input in inputs {
+            input.inner_transform_with(transformer).apply_to(input);
+        }
+
         self.reborrow()
             .at_children()
             .into_iter()
             .inner_in_place_transform_with(transformer);
 
         let ControlRegionDef {
+            inputs: _,
             children: _,
             outputs,
         } = self.reborrow().def();
-
         for v in outputs {
             v.inner_transform_with(transformer).apply_to(v);
         }
+    }
+}
+
+impl InnerTransform for ControlRegionInputDecl {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        let Self { attrs, ty } = self;
+
+        transform!({
+            attrs -> transformer.transform_attr_set_use(*attrs),
+            ty -> transformer.transform_type_use(*ty),
+        } => Self {
+            attrs,
+            ty,
+        })
     }
 }
 
@@ -657,7 +681,10 @@ impl InnerTransform for Value {
                 ct -> transformer.transform_const_use(*ct),
             } => Self::Const(ct)),
 
-            Self::FuncParam { idx: _ }
+            Self::ControlRegionInput {
+                region: _,
+                input_idx: _,
+            }
             | Self::ControlNodeOutput {
                 control_node: _,
                 output_idx: _,

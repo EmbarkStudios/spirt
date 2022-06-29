@@ -4,10 +4,10 @@ use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
     cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeKind,
-    ControlNodeOutputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, EntityList, ExportKey,
-    Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    ControlNodeOutputDecl, ControlRegion, DataInst, DataInstDef, DataInstKind, DeclDef, EntityDefs,
+    EntityList, ExportKey, Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -192,6 +192,9 @@ struct AllocatedIds<'a> {
 
 // FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
 struct FuncLifting<'a> {
+    // HACK(eddyb) allows lookup of `cfg::ControlPoint`s for `ControlRegion`s.
+    control_regions: Option<&'a EntityDefs<ControlRegion>>,
+
     func_id: spv::Id,
     param_ids: SmallVec<[spv::Id; 4]>,
     // FIXME(eddyb) use `EntityOrientedDenseMap` here.
@@ -210,7 +213,8 @@ struct BlockLifting<'a> {
 }
 
 struct Phi {
-    output_decl: ControlNodeOutputDecl,
+    attrs: AttrSet,
+    ty: Type,
 
     result_id: spv::Id,
     cases: SmallVec<[(Value, cfg::ControlPoint); 2]>,
@@ -288,6 +292,7 @@ impl<'a> FuncLifting<'a> {
         let func_def_body = match &func_decl.def {
             DeclDef::Imported(_) => {
                 return Ok(Self {
+                    control_regions: None,
                     func_id,
                     param_ids,
                     data_inst_output_ids: Default::default(),
@@ -311,11 +316,13 @@ impl<'a> FuncLifting<'a> {
                     control_node_def
                         .outputs
                         .iter()
-                        .map(|&output_decl| {
+                        .map(|&ControlNodeOutputDecl { attrs, ty }| {
                             Ok(Phi {
+                                attrs,
+                                ty,
+
                                 result_id: alloc_id()?,
                                 cases: SmallVec::new(),
-                                output_decl,
                             })
                         })
                         .collect::<Result<_, _>>()?
@@ -648,6 +655,7 @@ impl<'a> FuncLifting<'a> {
             .map(|func_at_inst| func_at_inst.position);
 
         Ok(Self {
+            control_regions: Some(&func_def_body.control_regions),
             func_id,
             param_ids,
             data_inst_output_ids: all_insts_with_output
@@ -737,7 +745,7 @@ impl LazyInst<'_, '_> {
             Self::OpPhi {
                 parent_func: _,
                 phi,
-            } => (Some(phi.result_id), phi.output_decl.attrs, None),
+            } => (Some(phi.result_id), phi.attrs, None),
             Self::DataInst {
                 parent_func: _,
                 result_id,
@@ -758,7 +766,16 @@ impl LazyInst<'_, '_> {
 
         let value_to_id = |parent_func: &FuncLifting, v| match v {
             Value::Const(ct) => ids.globals[&Global::Const(ct)],
-            Value::FuncParam { idx } => parent_func.param_ids[usize::try_from(idx).unwrap()],
+            Value::ControlRegionInput { region, input_idx } => {
+                let input_idx = usize::try_from(input_idx).unwrap();
+
+                let region_def = &parent_func.control_regions.unwrap()[region];
+                let region_entry = cfg::ControlPoint::Entry(region_def.children.iter().first);
+                match parent_func.blocks.get_full(&region_entry).unwrap() {
+                    (0, _, _) => parent_func.param_ids[input_idx],
+                    (_, _, region_entry_block) => region_entry_block.phis[input_idx].result_id,
+                }
+            }
             Value::ControlNodeOutput {
                 control_node,
                 output_idx,
@@ -882,7 +899,7 @@ impl LazyInst<'_, '_> {
             },
             Self::OpPhi { parent_func, phi } => spv::InstWithIds {
                 without_ids: wk.OpPhi.into(),
-                result_type_id: Some(ids.globals[&Global::Type(phi.output_decl.ty)]),
+                result_type_id: Some(ids.globals[&Global::Type(phi.ty)]),
                 result_id: Some(phi.result_id),
                 ids: phi
                     .cases

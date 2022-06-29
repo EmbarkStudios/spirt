@@ -2,9 +2,10 @@ use crate::func_at::FuncAt;
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
-    DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -361,12 +362,28 @@ impl InnerVisit for FuncDefBody {
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ControlRegion>`.
 impl<'a> FuncAt<'a, ControlRegion> {
     fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
-        let ControlRegionDef { children, outputs } = self.def();
+        let ControlRegionDef {
+            inputs,
+            children,
+            outputs,
+        } = self.def();
 
+        for input in inputs {
+            input.inner_visit_with(visitor);
+        }
         self.at(*children).into_iter().inner_visit_with(visitor);
         for v in outputs {
             visitor.visit_value_use(v);
         }
+    }
+}
+
+impl InnerVisit for ControlRegionInputDecl {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { attrs, ty } = *self;
+
+        visitor.visit_attr_set_use(attrs);
+        visitor.visit_type_use(ty);
     }
 }
 
@@ -484,7 +501,10 @@ impl InnerVisit for Value {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
-            Self::FuncParam { idx: _ }
+            Self::ControlRegionInput {
+                region: _,
+                input_idx: _,
+            }
             | Self::ControlNodeOutput {
                 control_node: _,
                 output_idx: _,

@@ -873,6 +873,7 @@ impl<'a> Structurizer<'a> {
             let body = self.func_def_body.control_regions.define(
                 self.cx,
                 ControlRegionDef {
+                    inputs: [].into_iter().collect(),
                     children,
                     outputs: [].into_iter().collect(),
                 },
@@ -1207,9 +1208,14 @@ impl<'a> Structurizer<'a> {
 
                                 let children = children
                                     .unwrap_or_else(|| self.empty_control_region_children());
-                                self.func_def_body
-                                    .control_regions
-                                    .define(self.cx, ControlRegionDef { children, outputs })
+                                self.func_def_body.control_regions.define(
+                                    self.cx,
+                                    ControlRegionDef {
+                                        inputs: [].into_iter().collect(),
+                                        children,
+                                        outputs,
+                                    },
+                                )
                             })
                             .collect();
 
