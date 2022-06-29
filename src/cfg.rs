@@ -541,12 +541,15 @@ enum StructurizeRegionState {
 
     /// Structurization completed, and this region can now be claimed.
     Ready {
-        /// If this region had any backedges (targeting its start `ControlPoint`),
-        /// and they were effectively removed by structurization to a loop,
-        /// this field holds their count
-        //
-        // FIXME(eddyb) actually implement loop structurization.
-        consumed_backedges: IncomingEdgeCount,
+        /// If this region had backedges (targeting its start `ControlPoint`),
+        /// their bundle is taken from the region's `DeferredEdgeBundleSet`,
+        /// and kept in this field instead (for simpler/faster access).
+        ///
+        /// Claiming a region with backedges can combine them with the bundled
+        /// edges coming into the CFG cycle from outside, and instead of failing
+        /// due to the latter not being enough to claim the region on their own,
+        /// actually perform loop structurization.
+        backedge: Option<DeferredEdgeBundle>,
 
         region: PartialControlRegion,
     },
@@ -634,7 +637,7 @@ struct PartialControlRegion {
 
 /// The logical continuation of a partially structurized `ControlRegion`.
 enum PartialControlRegionSuccessor {
-    /// Leave structural control-flow, using the `ControlInst`.
+    /// Leave structured control-flow, using the `ControlInst`.
     //
     // FIXME(eddyb) fully implement CFG structurization, which shouldn't need this.
     Unstructured(ControlInst),
@@ -703,10 +706,32 @@ impl<'a> Structurizer<'a> {
             }
         }
 
-        // Undo anything that got unused (e.g. because of loops).
+        // Undo anything that got unused (e.g. because of unstructurized loops).
         let structurize_region_state = mem::take(&mut self.structurize_region_state);
         for (target, state) in structurize_region_state {
-            if let StructurizeRegionState::Ready { region, .. } = state {
+            if let StructurizeRegionState::Ready {
+                mut region,
+                backedge,
+            } = state
+            {
+                // Undo `backedge` extraction from deferred edges, if needed.
+                if let Some(backedge) = backedge {
+                    match &mut region.successor {
+                        PartialControlRegionSuccessor::Deferred(deferred) => {
+                            assert!(
+                                deferred
+                                    .target_to_deferred
+                                    .insert(backedge.edge_bundle.target, backedge)
+                                    .is_none()
+                            );
+                        }
+                        _ => unreachable!(
+                            "cfg::Structurizer: `backedge`s must come from \
+                             `PartialControlRegionSuccessor::Deferred`"
+                        ),
+                    }
+                }
+
                 self.undo_claim(target, region);
             }
         }
@@ -739,56 +764,106 @@ impl<'a> Structurizer<'a> {
         let target = edge_bundle.target;
 
         // Always attempt structurization before checking the `IncomingEdgeCount`,
-        // to be able to make use of `consumed_backedges` (if any were found).
+        // to be able to make use of backedges (if any were found).
         if self.structurize_region_state.get(&target).is_none() {
             self.structurize_region_from(target);
         }
 
-        let consumed_backedges = match self.structurize_region_state[&target] {
+        let backedge = match &self.structurize_region_state[&target] {
             // This `try_claim_edge_bundle` call is itself a backedge, and it's
             // coherent to not let any of them claim the loop itself, and only
             // allow claiming the whole loop (if successfully structurized).
-            StructurizeRegionState::InProgress => IncomingEdgeCount::default(),
+            StructurizeRegionState::InProgress => None,
 
-            StructurizeRegionState::Ready {
-                consumed_backedges, ..
-            } => consumed_backedges,
+            StructurizeRegionState::Ready { backedge, .. } => backedge.as_ref(),
 
             StructurizeRegionState::Claimed => {
                 unreachable!("cfg::Structurizer::try_claim_edge_bundle: already claimed");
             }
         };
+        let backedge_count = backedge
+            .map(|e| e.edge_bundle.accumulated_count)
+            .unwrap_or_default();
 
-        if self.incoming_edge_counts[target] != edge_bundle.accumulated_count + consumed_backedges {
+        if self.incoming_edge_counts[target] != edge_bundle.accumulated_count + backedge_count {
             return Err(DeferredEdgeBundle {
                 condition: Value::Const(self.const_true),
                 edge_bundle,
             });
         }
 
-        // FIXME(eddyb) this should work, but it requires either replacing all
-        // uses of the `Value::ControlNodeOutput`s in question, or manufacturing
-        // e.g. a single-case `ControlNodeKind::Select` to inject them in.
-        assert!(edge_bundle.target_merge_outputs.is_empty());
-
         let state = self
             .structurize_region_state
             .insert(target, StructurizeRegionState::Claimed)
             .unwrap();
 
-        match state {
+        let (backedge, mut region) = match state {
             StructurizeRegionState::InProgress => unreachable!(
                 "cfg::Structurizer::try_claim_edge_bundle: cyclic calls \
                  should not get this far"
             ),
 
-            StructurizeRegionState::Ready { region, .. } => Ok(region),
+            StructurizeRegionState::Ready { backedge, region } => (backedge, region),
 
             StructurizeRegionState::Claimed => {
                 // Handled above.
                 unreachable!()
             }
+        };
+
+        // If the target contains any backedge to itself, that's a loop, with:
+        // * entry: `edge_bundle` (unconditional, i.e. `do`-`while`-like)
+        // * body: `region.children`
+        // * repeat ("continue") edge: `backedge` (with its `condition`)
+        // * exit ("break") edges: `region.successor` (must be `Deferred`)
+        if let Some(backedge) = backedge {
+            // FIXME(eddyb) implement loop "state" with
+            // inputs/outputs on the body `ControlRegion`.
+            {
+                // Guaranteed by `structurize_region_from` handling `backedge`.
+                assert!(backedge.edge_bundle.target_merge_outputs.is_empty());
+                // Must be the case as it's the same target as `backedge`.
+                assert!(edge_bundle.target_merge_outputs.is_empty());
+            }
+
+            let DeferredEdgeBundle {
+                condition: repeat_condition,
+                edge_bundle: backedge,
+            } = backedge;
+            assert!(backedge.target == target);
+
+            let body = ControlRegion {
+                children: region
+                    .children
+                    .unwrap_or_else(|| self.empty_control_region_children()),
+                outputs: [].into_iter().collect(),
+            };
+
+            let loop_node = self.func_def_body.control_nodes.define(
+                self.cx,
+                ControlNodeDef {
+                    kind: ControlNodeKind::Loop {
+                        body,
+                        repeat_condition,
+                    },
+                    outputs: [].into_iter().collect(),
+                }
+                .into(),
+            );
+
+            // Replace the region with the whole loop, any exits out of the loop
+            // being encoded in `region.successor` being a non-empty `Deferred`.
+            region.children = Some(EntityList::insert_last(
+                None,
+                loop_node,
+                &mut self.func_def_body.control_nodes,
+            ));
+        } else {
+            // FIXME(eddyb) collect these for later replacement.
+            assert!(edge_bundle.target_merge_outputs.is_empty());
         }
+
+        Ok(region)
     }
 
     /// Structurize a region starting from `first_point`, and extending as much
@@ -889,7 +964,7 @@ impl<'a> Structurizer<'a> {
                         .next_in_list()
                         .is_none(),
                     "cfg::Structurizer::structurize_region_from: re-structurizing \
-                 with structured regions already present is not yet supported"
+                     with structured regions already present is not yet supported"
                 );
 
                 let exit_point = ControlPoint::Exit(control_node);
@@ -901,12 +976,10 @@ impl<'a> Structurizer<'a> {
 
                 let mut region = match exit_state {
                     Some(StructurizeRegionState::Ready {
-                        consumed_backedges,
+                        backedge: None,
                         region,
-                    }) => {
-                        assert_eq!(consumed_backedges, IncomingEdgeCount::default());
-                        region
-                    }
+                    }) => region,
+
                     _ => unreachable!(),
                 };
 
@@ -1122,12 +1195,11 @@ impl<'a> Structurizer<'a> {
                 }
             },
         );
-        let mut consumed_backedges = IncomingEdgeCount::default();
 
         // Try to resolve deferred edges that may have accumulated.
-        // FIXME(eddyb) implement all of the other deferred edges.
+        // FIXME(eddyb) implement deferred edges.
 
-        // Try to consume (deferred) backedges, turning them into loops.
+        // Try to extract (deferred) backedges (which later get turned into loops).
         let backedge = match &mut region.successor {
             PartialControlRegionSuccessor::Deferred(deferred_set) => {
                 match deferred_set.target_to_deferred.get(&first_point) {
@@ -1145,48 +1217,10 @@ impl<'a> Structurizer<'a> {
             }
             _ => None,
         };
-        if let Some(backedge) = backedge {
-            let DeferredEdgeBundle {
-                condition: repeat_condition,
-                edge_bundle: backedge,
-            } = backedge;
-            assert!(backedge.target == first_point);
-            consumed_backedges += backedge.accumulated_count;
-
-            let body = ControlRegion {
-                children: region
-                    .children
-                    .unwrap_or_else(|| self.empty_control_region_children()),
-                outputs: [].into_iter().collect(),
-            };
-
-            let loop_node = self.func_def_body.control_nodes.define(
-                self.cx,
-                ControlNodeDef {
-                    kind: ControlNodeKind::Loop {
-                        body,
-                        repeat_condition,
-                    },
-                    outputs: [].into_iter().collect(),
-                }
-                .into(),
-            );
-
-            // Replace the region with the whole loop, any exits out of the loop
-            // being encoded in `region.successor` being a non-empty `Deferred`.
-            region.children = Some(EntityList::insert_last(
-                None,
-                loop_node,
-                &mut self.func_def_body.control_nodes,
-            ));
-        }
 
         let old_state = self.structurize_region_state.insert(
             first_point,
-            StructurizeRegionState::Ready {
-                consumed_backedges,
-                region,
-            },
+            StructurizeRegionState::Ready { backedge, region },
         );
         if !matches!(old_state, Some(StructurizeRegionState::InProgress)) {
             unreachable!(
