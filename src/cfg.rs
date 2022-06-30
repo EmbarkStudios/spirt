@@ -3,9 +3,9 @@
 use crate::func_at::FuncAt;
 use crate::{
     spv, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode, ControlNodeDef,
-    ControlNodeKind, ControlRegion, ControlRegionDef, EntityList, EntityListIter,
-    EntityOrientedDenseMap, EntityOrientedMapKey, FuncDefBody, FxIndexMap, SelectionKind, TypeCtor,
-    TypeDef, Value,
+    ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef, EntityList,
+    EntityListIter, EntityOrientedDenseMap, EntityOrientedMapKey, FuncDefBody, FxIndexMap,
+    SelectionKind, Type, TypeCtor, TypeDef, Value,
 };
 use smallvec::SmallVec;
 use std::{mem, slice};
@@ -506,8 +506,14 @@ impl ControlFlowGraph {
 pub struct Structurizer<'a> {
     cx: &'a Context,
 
-    /// Input for `SelectionKind::BoolCond`, corresponding to the "then" case.
+    /// Scrutinee type for `SelectionKind::BoolCond`.
+    type_bool: Type,
+
+    /// Scrutinee value for `SelectionKind::BoolCond`, for the "then" case.
     const_true: Const,
+
+    /// Scrutinee value for `SelectionKind::BoolCond`, for the "else" case.
+    const_false: Const,
 
     func_def_body: &'a mut FuncDefBody,
     incoming_edge_counts: EntityOrientedDenseMap<ControlPoint, IncomingEdgeCount>,
@@ -519,6 +525,12 @@ pub struct Structurizer<'a> {
     //
     // FIXME(eddyb) use `EntityOrientedDenseMap` (which lacks iteration by design).
     structurize_region_state: FxIndexMap<ControlPoint, StructurizeRegionState>,
+
+    /// Accumulated replacements (caused by `target_merge_output`s), i.e.:
+    /// `Value::ControlNodeOutput { control_node, output_idx }` must be replaced
+    /// with `control_node_output_replacements[control_node][output_idx]`, as
+    /// the original `control_node` cannot be meaningfully reused.
+    control_node_output_replacements: EntityOrientedDenseMap<ControlNode, SmallVec<[Value; 2]>>,
 }
 
 /// The state of one `structurize_region_from` invocation (keyed on its start
@@ -622,7 +634,9 @@ struct DeferredEdgeBundleSet {
 /// Partially structurized `ControlRegion`.
 struct PartialControlRegion {
     // FIXME(eddyb) maybe `EntityList` should really be able to be empty,
-    // but that messes with the ability of
+    // but that messes with the ability of `ControlPoint` to describe the two
+    // endpoints of a `ControlRegion` (should `ControlPoint` be changed to be
+    // relative to `ControlRegion`s instead of `ControlNode`s? unsure for now).
     children: Option<EntityList<ControlNode>>,
 
     /// When not all transitive targets could be claimed into the `ControlRegion`,
@@ -646,15 +660,21 @@ impl<'a> Structurizer<'a> {
     pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
         // FIXME(eddyb) SPIR-T should have native booleans itself.
         let wk = &spv::spec::Spec::get().well_known;
-        let bool_ty = cx.intern(TypeDef {
+        let type_bool = cx.intern(TypeDef {
             attrs: AttrSet::default(),
             ctor: TypeCtor::SpvInst(wk.OpTypeBool.into()),
             ctor_args: [].into_iter().collect(),
         });
         let const_true = cx.intern(ConstDef {
             attrs: AttrSet::default(),
-            ty: bool_ty,
+            ty: type_bool,
             ctor: ConstCtor::SpvInst(wk.OpConstantTrue.into()),
+            ctor_args: [].into_iter().collect(),
+        });
+        let const_false = cx.intern(ConstDef {
+            attrs: AttrSet::default(),
+            ty: type_bool,
+            ctor: ConstCtor::SpvInst(wk.OpConstantFalse.into()),
             ctor_args: [].into_iter().collect(),
         });
 
@@ -670,12 +690,15 @@ impl<'a> Structurizer<'a> {
 
         Self {
             cx,
+            type_bool,
             const_true,
+            const_false,
 
             func_def_body,
             incoming_edge_counts,
 
             structurize_region_state: FxIndexMap::default(),
+            control_node_output_replacements: EntityOrientedDenseMap::new(),
         }
     }
 
@@ -687,41 +710,39 @@ impl<'a> Structurizer<'a> {
 
         let body_entry =
             ControlPoint::Entry(self.func_def_body.at_body().def().children.iter().first);
-        let PartialControlRegion {
-            mut children,
-            deferred_edges,
-            deferred_return,
-        } = self.claim_or_defer_single_edge(body_entry, SmallVec::new());
+        let body_region = self.claim_or_defer_single_edge(body_entry, SmallVec::new());
 
-        children = Some(children.unwrap_or_else(|| self.empty_control_region_children()));
-
-        self.func_def_body.at_mut_body().def().children = children.unwrap();
-
-        if deferred_edges.target_to_deferred.is_empty() {
+        if body_region.deferred_edges.target_to_deferred.is_empty() {
             // Structured return, the function is fully structurized.
             //
             // FIXME(eddyb) also support structured return when the whole body
             // is divergent, by generating undef constants (needs access to the
             // whole `FuncDecl`, not just `FuncDefBody`, to get the right types).
-            if let Some(return_values) = deferred_return {
-                self.func_def_body.at_mut_body().def().outputs = return_values;
+            if let Some(return_values) = body_region.deferred_return {
+                let body_children = body_region
+                    .children
+                    .unwrap_or_else(|| self.empty_control_region_children());
+
+                let body_def = self.func_def_body.at_mut_body().def();
+                body_def.children = body_children;
+                body_def.outputs = return_values;
                 self.func_def_body.unstructured_cfg = None;
+
+                self.apply_value_replacements();
                 return;
             }
         }
 
-        // Structurization was only partial, time to start cleaning up.
-        self.undo_claim(
-            body_entry,
-            PartialControlRegion {
-                children,
-                deferred_edges,
-                deferred_return,
-            },
-        );
-
-        // Undo anything that got unused (e.g. because of unstructurized loops).
-        let structurize_region_state = mem::take(&mut self.structurize_region_state);
+        // Repair all the regions that remain unclaimed, including the body.
+        let structurize_region_state = mem::take(&mut self.structurize_region_state)
+            .into_iter()
+            .chain([(
+                body_entry,
+                StructurizeRegionState::Ready {
+                    region: body_region,
+                    backedge: None,
+                },
+            )]);
         for (target, state) in structurize_region_state {
             if let StructurizeRegionState::Ready {
                 mut region,
@@ -739,9 +760,35 @@ impl<'a> Structurizer<'a> {
                     );
                 }
 
-                self.undo_claim(target, region);
+                self.repair_unclaimed_region(target, region);
             }
         }
+
+        self.apply_value_replacements();
+    }
+
+    /// The last step of structurization is processing bulk replacements
+    /// collected while structurizing (like `control_node_output_replacements`).
+    fn apply_value_replacements(self) {
+        // FIXME(eddyb) maybe this should be provided by `transform`.
+        use crate::transform::*;
+        struct ReplaceValueWith<F>(F);
+        impl<F: Fn(Value) -> Option<Value>> Transformer for ReplaceValueWith<F> {
+            fn transform_value_use(&mut self, v: &Value) -> Transformed<Value> {
+                self.0(*v).map_or(Transformed::Unchanged, Transformed::Changed)
+            }
+        }
+
+        self.func_def_body
+            .inner_in_place_transform_with(&mut ReplaceValueWith(|v| match v {
+                Value::ControlNodeOutput {
+                    control_node,
+                    output_idx,
+                } => Some(
+                    self.control_node_output_replacements.get(control_node)?[output_idx as usize],
+                ),
+                _ => None,
+            }));
     }
 
     fn claim_or_defer_single_edge(
@@ -871,9 +918,12 @@ impl<'a> Structurizer<'a> {
                 loop_node,
                 &mut self.func_def_body.control_nodes,
             ));
-        } else {
-            // FIXME(eddyb) collect these for later replacement.
-            assert!(edge_bundle.target_merge_outputs.is_empty());
+        }
+
+        if !edge_bundle.target_merge_outputs.is_empty() {
+            assert!(matches!(target, ControlPoint::Exit(_)));
+            self.control_node_output_replacements
+                .insert(target.control_node(), edge_bundle.target_merge_outputs);
         }
 
         Ok(region)
@@ -928,47 +978,10 @@ impl<'a> Structurizer<'a> {
                 }))
         };
 
-        // HACK(eddyb) these variables are present here to avoid having to bump
-        // the indent for the `ControlInstKind` handling below, any further.
-        let (kind, inputs, child_regions) = match &control_inst {
-            Err(StructuredEntry) => (Err(StructuredEntry), &[][..], [].into_iter().collect()),
-            Ok(ControlInst {
-                attrs,
-                kind,
-                inputs,
-                targets,
-                target_merge_outputs,
-            }) => {
-                // FIXME(eddyb) this loses `attrs`.
-                let _ = attrs;
-
-                let child_regions: SmallVec<[_; 8]> = targets
-                    .iter()
-                    .map(|&target| {
-                        self.claim_or_defer_single_edge(
-                            target,
-                            target_merge_outputs
-                                .get(&target.control_node())
-                                .filter(|_| matches!(target, ControlPoint::Exit(_)))
-                                .cloned()
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect();
-
-                (Ok(kind), &inputs[..], child_regions)
-            }
-        };
-
         /// Marker error type for unhandled `ControlInst`s below.
-        struct UnsupportedControlInst<CI, CR> {
-            control_inst: CI,
+        struct UnsupportedControlInst(ControlInst);
 
-            /// Kept here only to have `undo_claim` called on each of them.
-            child_regions: CR,
-        }
-
-        let region = match kind {
+        let region = match control_inst {
             // Entering a structured `ControlNode` always results in a structured
             // exit from that node (even if initially that might only be `Block`s).
             Err(StructuredEntry) => {
@@ -1007,289 +1020,200 @@ impl<'a> Structurizer<'a> {
                 Ok(region)
             }
 
-            Ok(ControlInstKind::Unreachable) => {
-                assert_eq!((inputs.len(), child_regions.len()), (0, 0));
+            Ok(control_inst) => {
+                let ControlInst {
+                    attrs,
+                    kind,
+                    inputs,
+                    targets,
+                    target_merge_outputs,
+                } = control_inst;
 
-                // FIXME(eddyb) this may result in lost optimizations over
-                // actually encoding it in `ControlNode`/`ControlRegion`
-                // (e.g. a new `ControlKind`, or replacing region `outputs`),
-                // but it's simpler to handle it like this.
-                Ok(PartialControlRegion {
-                    children: None,
-                    deferred_edges: DeferredEdgeBundleSet {
-                        target_to_deferred: [].into_iter().collect(),
-                    },
-                    deferred_return: None,
-                })
-            }
+                // FIXME(eddyb) this loses `attrs`.
+                let _ = attrs;
 
-            Ok(ControlInstKind::ExitInvocation(_)) => {
-                assert_eq!(child_regions.len(), 0);
-
-                // FIXME(eddyb) introduce equivalent `ControlNodeKind` for these.
-                Err(UnsupportedControlInst {
-                    control_inst,
-                    child_regions,
-                })
-            }
-
-            Ok(ControlInstKind::Return) => {
-                assert_eq!(child_regions.len(), 0);
-
-                Ok(PartialControlRegion {
-                    children: None,
-                    deferred_edges: DeferredEdgeBundleSet {
-                        target_to_deferred: [].into_iter().collect(),
-                    },
-                    deferred_return: Some(control_inst.unwrap().inputs),
-                })
-            }
-
-            Ok(ControlInstKind::Branch) => {
-                assert_eq!((inputs.len(), child_regions.len()), (0, 1));
-
-                Ok(child_regions.into_iter().nth(0).unwrap())
-            }
-
-            Ok(ControlInstKind::SelectBranch(_)) => {
-                assert_eq!(inputs.len(), 1);
-
-                let scrutinee = inputs[0];
-
-                // HACK(eddyb) special-case the happy path of all child
-                // regions branching together into a common merge point.
-                struct NoCommonMerge;
-                let merge_bundle = child_regions
+                let child_regions: SmallVec<[_; 8]> = targets
                     .iter()
-                    .filter_map(|child_region| match child_region {
-                        // Ignore divergent children, they don't need to merge.
-                        PartialControlRegion {
-                            children: _,
-                            deferred_edges,
-                            deferred_return: None,
-                        } if deferred_edges.target_to_deferred.is_empty() => None,
-
-                        PartialControlRegion {
-                            children: _,
-                            deferred_edges,
-                            deferred_return: None,
-                        } => {
-                            assert_eq!(deferred_edges.target_to_deferred.len(), 1);
-
-                            let &DeferredEdgeBundle {
-                                condition,
-                                edge_bundle:
-                                    IncomingEdgeBundle {
-                                        target,
-                                        accumulated_count,
-                                        target_merge_outputs: _,
-                                    },
-                            } = deferred_edges.target_to_deferred.values().nth(0).unwrap();
-
-                            assert!(condition == Value::Const(self.const_true));
-
-                            Some(Ok(IncomingEdgeBundle {
-                                target,
-                                accumulated_count,
-                                target_merge_outputs: [].into_iter().collect(),
-                            }))
-                        }
-
-                        _ => Some(Err(NoCommonMerge)),
+                    .map(|&target| {
+                        self.claim_or_defer_single_edge(
+                            target,
+                            target_merge_outputs
+                                .get(&target.control_node())
+                                .filter(|_| matches!(target, ControlPoint::Exit(_)))
+                                .cloned()
+                                .unwrap_or_default(),
+                        )
                     })
-                    .reduce(
-                        |merge_bundle, new_bundle| match (merge_bundle, new_bundle) {
-                            (Ok(a), Ok(b)) if a.target == b.target => Ok(IncomingEdgeBundle {
-                                target: a.target,
-                                accumulated_count: a.accumulated_count + b.accumulated_count,
-                                target_merge_outputs: [].into_iter().collect(),
-                            }),
-                            _ => Err(NoCommonMerge),
-                        },
-                    )
-                    .unwrap_or(
-                        // FIXME(eddyb) caseless selections can be supported
-                        // by introducing an `Unreachable` after them.
-                        Err(NoCommonMerge),
-                    );
+                    .collect();
 
-                if let Ok(merge_bundle) = merge_bundle {
-                    let merge_target = merge_bundle.target;
+                match kind {
+                    ControlInstKind::Unreachable => {
+                        assert_eq!((inputs.len(), child_regions.len()), (0, 0));
 
-                    // If an `UnstructuredMerge` is being `Exit`ed, that
-                    // means the unstructured CFG effectively has phis,
-                    // which have to be taken into account, and the
-                    // merge `ControlNode` reused.
-                    let unstructured_exit_merge = match merge_target {
-                        ControlPoint::Exit(merge_node) => {
-                            assert!(matches!(
-                                self.func_def_body.control_nodes[merge_node].kind,
-                                ControlNodeKind::UnstructuredMerge
-                            ));
-                            Some(merge_node)
-                        }
-                        _ => None,
-                    };
-
-                    // HACK(eddyb) allow the "common merge" to not actually be
-                    // claimed, when there's no `UnstructuredMerge` to replace.
-                    let region = if unstructured_exit_merge.is_none() {
-                        Ok(self.claim_or_defer_single_edge(merge_target, [].into_iter().collect()))
-                    } else {
-                        self.try_claim_edge_bundle(merge_bundle)
-                    };
-                    if let Ok(mut region) = region {
-                        let kind = match control_inst.unwrap().kind {
-                            ControlInstKind::SelectBranch(kind) => kind,
-                            _ => unreachable!(),
-                        };
-                        let cases = child_regions
-                            .into_iter()
-                            .map(|child_region| {
-                                let PartialControlRegion {
-                                    children,
-                                    mut deferred_edges,
-                                    deferred_return,
-                                } = child_region;
-                                assert!(deferred_return.is_none());
-
-                                let outputs =
-                                    match deferred_edges.target_to_deferred.remove(&merge_target) {
-                                        Some(deferred) => {
-                                            assert!(deferred_edges.target_to_deferred.is_empty());
-                                            deferred.edge_bundle.target_merge_outputs
-                                        }
-                                        // FIXME(eddyb) support having outputs when some
-                                        // cases are divergent, by generating undef constants.
-                                        None => {
-                                            assert!(unstructured_exit_merge.is_none());
-                                            [].into_iter().collect()
-                                        }
-                                    };
-
-                                let children = children
-                                    .unwrap_or_else(|| self.empty_control_region_children());
-                                self.func_def_body.control_regions.define(
-                                    self.cx,
-                                    ControlRegionDef {
-                                        inputs: [].into_iter().collect(),
-                                        children,
-                                        outputs,
-                                    },
-                                )
-                            })
-                            .collect();
-
-                        let kind = ControlNodeKind::Select {
-                            kind,
-                            scrutinee,
-                            cases,
-                        };
-                        let select_node = match unstructured_exit_merge {
-                            Some(merge_node) => {
-                                // Reuse the `UnstructuredMerge` region, and
-                                // specifically its `outputs`, which cannot
-                                // change without rewriting all their uses
-                                // elsewhere in the function.
-                                self.func_def_body.control_nodes[merge_node].kind = kind;
-
-                                merge_node
-                            }
-                            _ => self.func_def_body.control_nodes.define(
-                                self.cx,
-                                ControlNodeDef {
-                                    kind,
-                                    outputs: [].into_iter().collect(),
-                                }
-                                .into(),
-                            ),
-                        };
-
-                        // FIXME(eddyb) maybe make a method for this?
-                        // It's also used above for `Err(StructuredEntry)`.
-                        region.children = Some(EntityList::insert_first(
-                            region.children,
-                            select_node,
-                            &mut self.func_def_body.control_nodes,
-                        ));
-
-                        Ok(region)
-                    } else {
-                        Err(UnsupportedControlInst {
-                            control_inst,
-                            child_regions,
+                        // FIXME(eddyb) this may result in lost optimizations over
+                        // actually encoding it in `ControlNode`/`ControlRegion`
+                        // (e.g. a new `ControlKind`, or replacing region `outputs`),
+                        // but it's simpler to handle it like this.
+                        Ok(PartialControlRegion {
+                            children: None,
+                            deferred_edges: DeferredEdgeBundleSet {
+                                target_to_deferred: [].into_iter().collect(),
+                            },
+                            deferred_return: None,
                         })
                     }
-                } else {
-                    Err(UnsupportedControlInst {
-                        control_inst,
-                        child_regions,
-                    })
+
+                    ControlInstKind::ExitInvocation(_) => {
+                        assert_eq!(child_regions.len(), 0);
+
+                        // FIXME(eddyb) introduce equivalent `ControlNodeKind` for these.
+                        Err(UnsupportedControlInst(ControlInst {
+                            attrs,
+                            kind,
+                            inputs,
+                            targets,
+                            target_merge_outputs,
+                        }))
+                    }
+
+                    ControlInstKind::Return => {
+                        assert_eq!(child_regions.len(), 0);
+
+                        Ok(PartialControlRegion {
+                            children: None,
+                            deferred_edges: DeferredEdgeBundleSet {
+                                target_to_deferred: [].into_iter().collect(),
+                            },
+                            deferred_return: Some(inputs),
+                        })
+                    }
+
+                    ControlInstKind::Branch => {
+                        assert_eq!((inputs.len(), child_regions.len()), (0, 1));
+
+                        Ok(child_regions.into_iter().nth(0).unwrap())
+                    }
+
+                    ControlInstKind::SelectBranch(kind) => {
+                        assert_eq!(inputs.len(), 1);
+
+                        let scrutinee = inputs[0];
+
+                        Ok(self.structurize_select(kind, scrutinee, child_regions))
+                    }
                 }
             }
         };
 
-        let mut region = region.unwrap_or_else(
-            |UnsupportedControlInst {
-                 control_inst,
-                 child_regions,
-             }| {
-                let control_inst = control_inst.unwrap();
+        let mut region = region.unwrap_or_else(|UnsupportedControlInst(control_inst)| {
+            // HACK(eddyb) this only remains used for `ExitInvocation`.
+            assert!(control_inst.targets.is_empty());
 
-                // Undo claims if the child regions aren't used above.
-                for (&undo_target, undo_child_region) in
-                    control_inst.targets.iter().zip(child_regions)
-                {
-                    self.undo_claim(undo_target, undo_child_region);
+            // HACK(eddyb) attach the unsupported `ControlInst` to a fresh
+            // new "proxy" `ControlNode`, that can then be the target of
+            // a deferred edge, specially crafted to be unclaimable.
+            let proxy = self.func_def_body.control_nodes.define(
+                self.cx,
+                ControlNodeDef {
+                    kind: ControlNodeKind::Block { insts: None },
+                    outputs: [].into_iter().collect(),
                 }
+                .into(),
+            );
+            let (proxy_entry, proxy_exit) = (ControlPoint::Entry(proxy), ControlPoint::Exit(proxy));
+            self.func_def_body
+                .unstructured_cfg
+                .as_mut()
+                .unwrap()
+                .control_insts
+                .insert(proxy_exit, control_inst);
+            self.structurize_region_state
+                .insert(proxy_entry, StructurizeRegionState::InProgress);
+            self.incoming_edge_counts
+                .insert(proxy_entry, IncomingEdgeCount::ONE);
+            let deferred_proxy = DeferredEdgeBundle {
+                condition: Value::Const(self.const_true),
+                edge_bundle: IncomingEdgeBundle {
+                    target: proxy_entry,
+                    accumulated_count: IncomingEdgeCount::default(),
+                    target_merge_outputs: [].into_iter().collect(),
+                },
+            };
 
-                // HACK(eddyb) attach the unsupported `ControlInst` to a fresh
-                // new "proxy" `ControlNode`, that can then be the target of
-                // a deferred edge, specially crafted to be unclaimable.
-                let proxy = self.func_def_body.control_nodes.define(
-                    self.cx,
-                    ControlNodeDef {
-                        kind: ControlNodeKind::Block { insts: None },
-                        outputs: [].into_iter().collect(),
+            PartialControlRegion {
+                children: None,
+                deferred_edges: DeferredEdgeBundleSet {
+                    target_to_deferred: [deferred_proxy]
+                        .into_iter()
+                        .map(|d| (d.edge_bundle.target, d))
+                        .collect(),
+                },
+                deferred_return: None,
+            }
+        });
+
+        // Try to resolve deferred edges that may have accumulated, and keep
+        // going until there's no more deferred edges that can be claimed.
+        let try_claim_any_deferred_edge =
+            |this: &mut Self, deferred_edges: &mut DeferredEdgeBundleSet| {
+                for (i, deferred) in deferred_edges.target_to_deferred.values_mut().enumerate() {
+                    // HACK(eddyb) "take" `deferred.edge_bundle` so it can be
+                    // passed to `try_claim_edge_bundle` (and put back if `Err`).
+                    let DeferredEdgeBundle {
+                        condition,
+                        ref mut edge_bundle,
+                    } = *deferred;
+                    let taken_edge_bundle = IncomingEdgeBundle {
+                        target: edge_bundle.target,
+                        accumulated_count: edge_bundle.accumulated_count,
+                        target_merge_outputs: mem::take(&mut edge_bundle.target_merge_outputs),
+                    };
+
+                    match this.try_claim_edge_bundle(taken_edge_bundle) {
+                        Ok(claimed_region) => {
+                            // FIXME(eddyb) should this use `swap_remove_index`?
+                            deferred_edges.target_to_deferred.shift_remove_index(i);
+                            return Some((condition, claimed_region));
+                        }
+
+                        // Put back the `IncomingEdgeBundle` and keep looking.
+                        Err(new_deferred) => *edge_bundle = new_deferred.edge_bundle,
                     }
-                    .into(),
-                );
-                let (proxy_entry, proxy_exit) =
-                    (ControlPoint::Entry(proxy), ControlPoint::Exit(proxy));
-                self.func_def_body
-                    .unstructured_cfg
-                    .as_mut()
-                    .unwrap()
-                    .control_insts
-                    .insert(proxy_exit, control_inst);
-                self.structurize_region_state
-                    .insert(proxy_entry, StructurizeRegionState::InProgress);
-                self.incoming_edge_counts
-                    .insert(proxy_entry, IncomingEdgeCount::ONE);
-                let deferred_proxy = DeferredEdgeBundle {
-                    condition: Value::Const(self.const_true),
-                    edge_bundle: IncomingEdgeBundle {
-                        target: proxy_entry,
-                        accumulated_count: IncomingEdgeCount::default(),
-                        target_merge_outputs: [].into_iter().collect(),
-                    },
-                };
-
-                PartialControlRegion {
-                    children: None,
-                    deferred_edges: DeferredEdgeBundleSet {
-                        target_to_deferred: [deferred_proxy]
-                            .into_iter()
-                            .map(|d| (d.edge_bundle.target, d))
-                            .collect(),
-                    },
-                    deferred_return: None,
                 }
-            },
-        );
+                None
+            };
+        while let Some((condition, then_region)) =
+            try_claim_any_deferred_edge(self, &mut region.deferred_edges)
+        {
+            let else_region = PartialControlRegion {
+                children: None,
+                ..region
+            };
+            let else_is_unreachable = else_region.deferred_edges.target_to_deferred.is_empty()
+                && else_region.deferred_return.is_none();
 
-        // Try to resolve deferred edges that may have accumulated.
-        // FIXME(eddyb) implement deferred edges.
+            // `then_region` is only taken if `condition` holds, except that
+            // `condition` can be ignored when `else_region` is unreachable.
+            let merged_region = if else_is_unreachable {
+                then_region
+            } else {
+                self.structurize_select(
+                    SelectionKind::BoolCond,
+                    condition,
+                    [then_region, else_region].into_iter().collect(),
+                )
+            };
+
+            // Prepend the original children to the freshly merged region.
+            region = PartialControlRegion {
+                children: EntityList::concat(
+                    region.children,
+                    merged_region.children,
+                    &mut self.func_def_body.control_nodes,
+                ),
+                ..merged_region
+            };
+        }
 
         // Try to extract (deferred) backedges (which later get turned into loops).
         let backedge = match region.deferred_edges.target_to_deferred.get(&first_point) {
@@ -1326,36 +1250,421 @@ impl<'a> Structurizer<'a> {
         }
     }
 
-    /// Place back relevant information into the CFG, that was taken by claiming
-    /// an edge (bundle) to `target`, which resulted in `partial_control_region`.
-    fn undo_claim(&mut self, target: ControlPoint, partial_control_region: PartialControlRegion) {
+    /// Build a `Select` `ControlNode`, from partially structured `cases`,
+    /// merging all of their `deferred_{edges,returns}` together.
+    fn structurize_select(
+        &mut self,
+        kind: SelectionKind,
+        scrutinee: Value,
+        cases: SmallVec<[PartialControlRegion; 8]>,
+    ) -> PartialControlRegion {
+        // `Select` isn't actually needed unless there's at least two `cases`.
+        if cases.len() <= 1 {
+            return cases
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| PartialControlRegion {
+                    children: None,
+                    deferred_edges: DeferredEdgeBundleSet {
+                        target_to_deferred: [].into_iter().collect(),
+                    },
+                    deferred_return: None,
+                });
+        }
+
+        // Gather the full set of deferred edges (and returns), along with the
+        // necessary information for the `Select`'s `ControlNodeOutputDecl`s.
+        let mut deferred_edges_to_output_count_and_total_edge_count = FxIndexMap::default();
+        let mut deferred_return_types = None;
+        for case in &cases {
+            for (&target, deferred) in &case.deferred_edges.target_to_deferred {
+                let output_count = deferred.edge_bundle.target_merge_outputs.len();
+
+                let (old_output_count, accumulated_edge_count) =
+                    deferred_edges_to_output_count_and_total_edge_count
+                        .entry(target)
+                        .or_insert((output_count, IncomingEdgeCount::default()));
+                assert_eq!(*old_output_count, output_count);
+                *accumulated_edge_count += deferred.edge_bundle.accumulated_count;
+            }
+            if let Some(return_values) = &case.deferred_return {
+                // HACK(eddyb) because there's no `FuncDecl` available, take the
+                // types from the returned values and hope they match.
+                deferred_return_types = Some(
+                    return_values
+                        .iter()
+                        .map(|&v| self.func_def_body.at(v).type_of(self.cx)),
+                );
+            }
+        }
+        let deferred_return_value_count = deferred_return_types.clone().map(|tys| tys.len());
+
+        // Avoid computing deferral conditions when the target isn't ambiguous.
+        let needs_per_deferred_edge_condition =
+            deferred_edges_to_output_count_and_total_edge_count.len() > 1
+                || deferred_return_types.is_some();
+
+        // The `Select` outputs are the concatenation of:
+        // * for each unique `deferred_edges` target:
+        //   * condition (only if `needs_per_deferred_edge_condition` - see above)
+        //   * `target_merge_outputs`
+        // * `deferred_return` values (if needed)
+        //
+        // FIXME(eddyb) some of this could maybe be generalized to deferred infra.
+        enum Deferred {
+            Edge {
+                target: ControlPoint,
+                // NOTE(eddyb) not including condition, only `target_merge_outputs`.
+                target_output_count: usize,
+
+                /// Sum of `accumulated_count` for this `target` across all `cases`.
+                total_edge_count: IncomingEdgeCount,
+            },
+            Return {
+                value_count: usize,
+            },
+        }
+        let deferreds = || {
+            deferred_edges_to_output_count_and_total_edge_count
+                .iter()
+                .map(
+                    |(&target, &(target_output_count, total_edge_count))| Deferred::Edge {
+                        target,
+                        target_output_count,
+                        total_edge_count,
+                    },
+                )
+                .chain(
+                    deferred_return_value_count.map(|value_count| Deferred::Return { value_count }),
+                )
+        };
+        let mut output_decls: SmallVec<[_; 2]> = SmallVec::with_capacity(
+            deferreds()
+                .map(|deferred| match deferred {
+                    Deferred::Edge {
+                        target_output_count,
+                        ..
+                    } => (needs_per_deferred_edge_condition as usize) + target_output_count,
+                    Deferred::Return { value_count } => value_count,
+                })
+                .sum(),
+        );
+        for deferred in deferreds() {
+            let output_decl_from_ty = |ty| ControlNodeOutputDecl {
+                attrs: AttrSet::default(),
+                ty,
+            };
+            match deferred {
+                Deferred::Edge {
+                    target,
+                    target_output_count,
+                    ..
+                } => {
+                    let target_outputs = match target {
+                        ControlPoint::Entry(_) => &[][..],
+                        ControlPoint::Exit(target_node) => {
+                            &self.func_def_body.at(target_node).def().outputs
+                        }
+                    };
+                    assert_eq!(target_outputs.len(), target_output_count);
+
+                    if needs_per_deferred_edge_condition {
+                        output_decls.push(output_decl_from_ty(self.type_bool));
+                    }
+                    output_decls.extend(target_outputs.iter().map(|o| output_decl_from_ty(o.ty)));
+                }
+                Deferred::Return { value_count } => {
+                    let types = deferred_return_types.clone().unwrap();
+                    assert_eq!(types.len(), value_count);
+
+                    output_decls.extend(types.map(output_decl_from_ty));
+                }
+            }
+        }
+
+        // Convert the cases into `ControlRegion`s, each outputting the full set
+        // of values described by `outputs` (with undef filling in any gaps).
+        let cases = cases
+            .into_iter()
+            .map(|case| {
+                let PartialControlRegion {
+                    children,
+                    mut deferred_edges,
+                    mut deferred_return,
+                } = case;
+
+                let mut outputs = SmallVec::with_capacity(output_decls.len());
+                for deferred in deferreds() {
+                    let (edge_condition, values_or_count) = match deferred {
+                        Deferred::Edge {
+                            target,
+                            target_output_count,
+                            ..
+                        } => match deferred_edges.target_to_deferred.remove(&target) {
+                            Some(DeferredEdgeBundle {
+                                condition,
+                                edge_bundle,
+                            }) => (Some(condition), Ok(edge_bundle.target_merge_outputs)),
+
+                            None => (
+                                Some(Value::Const(self.const_false)),
+                                Err(target_output_count),
+                            ),
+                        },
+                        Deferred::Return { value_count } => {
+                            (None, deferred_return.take().ok_or(value_count))
+                        }
+                    };
+
+                    if needs_per_deferred_edge_condition {
+                        outputs.extend(edge_condition);
+                    }
+                    match values_or_count {
+                        Ok(values) => outputs.extend(values),
+                        Err(missing_output_count) => {
+                            let decls_for_missing_outputs =
+                                &output_decls[outputs.len()..][..missing_output_count];
+                            outputs.extend(
+                                decls_for_missing_outputs
+                                    .iter()
+                                    .map(|output| Value::Const(self.const_undef(output.ty))),
+                            );
+                        }
+                    }
+                }
+
+                // All deferrals must have been converted into outputs above.
+                assert!(deferred_edges.target_to_deferred.is_empty() && deferred_return.is_none());
+                assert_eq!(outputs.len(), output_decls.len());
+
+                let children = children.unwrap_or_else(|| self.empty_control_region_children());
+                self.func_def_body.control_regions.define(
+                    self.cx,
+                    ControlRegionDef {
+                        inputs: [].into_iter().collect(),
+                        children,
+                        outputs,
+                    },
+                )
+            })
+            .collect();
+
+        let kind = ControlNodeKind::Select {
+            kind,
+            scrutinee,
+            cases,
+        };
+        let select_node = self.func_def_body.control_nodes.define(
+            self.cx,
+            ControlNodeDef {
+                kind,
+                outputs: output_decls,
+            }
+            .into(),
+        );
+
+        // Build `deferred_{edges,return}` for the whole `Select`, pointing to
+        // the outputs of the `select_node` `ControlNode` for all `Value`s.
+        let mut deferred_edges = DeferredEdgeBundleSet {
+            target_to_deferred: FxIndexMap::default(),
+        };
+        let mut deferred_return = None;
+
+        let mut outputs = (0..).map(|output_idx| Value::ControlNodeOutput {
+            control_node: select_node,
+            output_idx,
+        });
+        for deferred in deferreds() {
+            match deferred {
+                Deferred::Edge {
+                    target,
+                    target_output_count,
+                    total_edge_count,
+                } => {
+                    let condition = if needs_per_deferred_edge_condition {
+                        outputs.next().unwrap()
+                    } else {
+                        Value::Const(self.const_true)
+                    };
+                    let target_merge_outputs = outputs.by_ref().take(target_output_count).collect();
+
+                    deferred_edges.target_to_deferred.insert(
+                        target,
+                        DeferredEdgeBundle {
+                            condition,
+                            edge_bundle: IncomingEdgeBundle {
+                                target,
+                                accumulated_count: total_edge_count,
+                                target_merge_outputs,
+                            },
+                        },
+                    );
+                }
+                Deferred::Return { value_count } => {
+                    assert!(deferred_return.is_none());
+                    deferred_return = Some(outputs.by_ref().take(value_count).collect());
+                }
+            }
+        }
+
+        PartialControlRegion {
+            children: Some(EntityList::insert_last(
+                None,
+                select_node,
+                &mut self.func_def_body.control_nodes,
+            )),
+            deferred_edges,
+            deferred_return,
+        }
+    }
+
+    /// When structurization is only partial, and there remain unclaimed regions,
+    /// they have to be reintegrated into the CFG, putting back `ControlInst`s
+    /// where `structurize_region_from` has taken them (only around entry/exit).
+    ///
+    /// This function handles one region at a time to make it more manageable,
+    /// despite it having a single call site (in a loop in `structurize_func`).
+    fn repair_unclaimed_region(
+        &mut self,
+        first_point: ControlPoint,
+        partial_control_region: PartialControlRegion,
+    ) {
+        assert!(
+            self.structurize_region_state.is_empty(),
+            "cfg::Structurizer::repair_unclaimed_region: must only be called \
+             from `structurize_func`, after it takes `structurize_region_state`"
+        );
+
         let PartialControlRegion {
             children,
             deferred_edges,
             deferred_return,
         } = partial_control_region;
 
-        // The `PartialControlRegion` returned by `claim_or_defer_single_edge`
-        // in the "defer" case doesn't represent a claim and must be ignored.
-        if children.is_none() && deferred_return.is_none() {
-            // Sanity check (making this case disjoint from the "claimed" ones).
-            assert!(!matches!(
-                &self.structurize_region_state[&target],
-                StructurizeRegionState::Claimed
-            ));
-            return;
+        let children = children.map(|list| list.iter());
+
+        // First off, ensure `first_point` reaches `children`, which may not be
+        // the case if `first_point` is an `Exit` out of an `UnstructuredMerge`.
+        match first_point {
+            ControlPoint::Entry(first_node) => {
+                assert!(children.map(|list| list.first) == Some(first_node));
+            }
+            ControlPoint::Exit(unstructured_merge_node) => {
+                assert!(matches!(
+                    self.func_def_body.at(unstructured_merge_node).def().kind,
+                    ControlNodeKind::UnstructuredMerge
+                ));
+
+                // Reaching the children requires a branch that must've been
+                // taken by `structurize_region_from`, place it back.
+                if let Some(children) = children {
+                    let entry_control_inst = ControlInst {
+                        attrs: AttrSet::default(),
+                        kind: ControlInstKind::Branch,
+                        inputs: [].into_iter().collect(),
+                        targets: [ControlPoint::Entry(children.first)].into_iter().collect(),
+                        target_merge_outputs: FxIndexMap::default(),
+                    };
+                    assert!(
+                        self.func_def_body
+                            .unstructured_cfg
+                            .as_mut()
+                            .unwrap()
+                            .control_insts
+                            .insert(first_point, entry_control_inst)
+                            .is_none()
+                    );
+                }
+            }
         }
 
-        let undo_point = children
-            .map(|list| ControlPoint::Exit(list.iter().last))
-            .unwrap_or(target);
+        // Exiting the region must be done from the last `ControlNode` reachable
+        // from `first_point`, which in the absence of any children, must be the
+        // very `UnstructuredMerge` that `first_point` is an `Exit` out of.
+        let last_node = children
+            .map(|list| list.last)
+            .unwrap_or(first_point.control_node());
 
-        let undo_control_inst = if deferred_edges.target_to_deferred.is_empty() {
+        // Build a chain of conditional branches to apply deferred edges.
+        let mut deferred_edge_targets =
+            deferred_edges
+                .target_to_deferred
+                .into_iter()
+                .map(|(_, deferred)| {
+                    (
+                        deferred.condition,
+                        (
+                            deferred.edge_bundle.target,
+                            deferred.edge_bundle.target_merge_outputs,
+                        ),
+                    )
+                });
+        let mut last_node = Some(last_node);
+        while let Some((condition, then_target_and_merge_outputs)) = deferred_edge_targets.next() {
+            let branch_point = ControlPoint::Exit(last_node.take().unwrap());
+            let else_target_and_merge_outputs =
+                if deferred_edge_targets.len() <= 1 && deferred_return.is_none() {
+                    // At most one deferral left, so it can be used as the "else"
+                    // case, or the branch left unconditional in its absence.
+                    deferred_edge_targets.next().map(|(_, t)| t)
+                } else {
+                    // Either more branches, or a deferred return, are needed, so
+                    // the "else" case must be a `ControlNode` (a new empty block)
+                    // that itself can have a `ControlInst` attached to it later on.
+                    let new_empty_block = self.empty_control_region_children().iter().first;
+                    last_node = Some(new_empty_block);
+                    Some((
+                        ControlPoint::Entry(new_empty_block),
+                        [].into_iter().collect(),
+                    ))
+                };
+
+            let condition = Some(condition).filter(|_| else_target_and_merge_outputs.is_some());
+            let branch_control_inst = ControlInst {
+                attrs: AttrSet::default(),
+                kind: if condition.is_some() {
+                    ControlInstKind::SelectBranch(SelectionKind::BoolCond)
+                } else {
+                    ControlInstKind::Branch
+                },
+                inputs: condition.into_iter().collect(),
+                targets: [&then_target_and_merge_outputs]
+                    .into_iter()
+                    .chain(&else_target_and_merge_outputs)
+                    .map(|&(target, _)| target)
+                    .collect(),
+                target_merge_outputs: [then_target_and_merge_outputs]
+                    .into_iter()
+                    .chain(else_target_and_merge_outputs)
+                    .map(|(target, outputs)| (target.control_node(), outputs))
+                    .filter(|(_, outputs)| !outputs.is_empty())
+                    .collect(),
+            };
+            assert!(
+                self.func_def_body
+                    .unstructured_cfg
+                    .as_mut()
+                    .unwrap()
+                    .control_insts
+                    .insert(branch_point, branch_control_inst)
+                    .is_none()
+            );
+        }
+
+        let final_point = match last_node {
+            Some(node) => ControlPoint::Exit(node),
+            None => {
+                // The loop above handled all the targets, nothing left to do.
+                assert!(deferred_return.is_none());
+                return;
+            }
+        };
+
+        // Final deferral is either a `Return` (if needed), or an `Unreachable`
+        // (only when truly divergent, i.e. no `deferred_edges`/`deferred_return`).
+        let final_control_inst = {
             let (kind, inputs) = match deferred_return {
                 Some(return_values) => (ControlInstKind::Return, return_values),
-
-                // Divergent regions only need successors to avoid special-casing
-                // everywhere else, and `Unreachable` works for that.
                 None => (ControlInstKind::Unreachable, [].into_iter().collect()),
             };
             ControlInst {
@@ -1365,40 +1674,14 @@ impl<'a> Structurizer<'a> {
                 targets: [].into_iter().collect(),
                 target_merge_outputs: FxIndexMap::default(),
             }
-        } else {
-            // FIXME(eddyb) support multiple (and conditional) deferred exits.
-            assert_eq!(deferred_edges.target_to_deferred.len(), 1);
-            assert!(deferred_return.is_none());
-
-            let (_, deferred) = deferred_edges
-                .target_to_deferred
-                .into_iter()
-                .nth(0)
-                .unwrap();
-            assert!(deferred.condition == Value::Const(self.const_true));
-
-            ControlInst {
-                attrs: AttrSet::default(),
-                kind: ControlInstKind::Branch,
-                inputs: [].into_iter().collect(),
-                targets: [deferred.edge_bundle.target].into_iter().collect(),
-                target_merge_outputs: [(
-                    deferred.edge_bundle.target.control_node(),
-                    deferred.edge_bundle.target_merge_outputs,
-                )]
-                .into_iter()
-                .filter(|(_, outputs)| !outputs.is_empty())
-                .collect(),
-            }
         };
-
         assert!(
             self.func_def_body
                 .unstructured_cfg
                 .as_mut()
                 .unwrap()
                 .control_insts
-                .insert(undo_point, undo_control_inst)
+                .insert(final_point, final_control_inst)
                 .is_none()
         );
     }
@@ -1418,5 +1701,18 @@ impl<'a> Structurizer<'a> {
             .into(),
         );
         EntityList::insert_last(None, dummy_block, &mut self.func_def_body.control_nodes)
+    }
+
+    /// Create an undefined constant (as a placeholder where a value needs to be
+    /// present, but won't actually be used), of type `ty`.
+    fn const_undef(&self, ty: Type) -> Const {
+        // FIXME(eddyb) SPIR-T should have native undef itself.
+        let wk = &spv::spec::Spec::get().well_known;
+        self.cx.intern(ConstDef {
+            attrs: AttrSet::default(),
+            ty,
+            ctor: ConstCtor::SpvInst(wk.OpUndef.into()),
+            ctor_args: [].into_iter().collect(),
+        })
     }
 }

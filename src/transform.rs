@@ -166,6 +166,9 @@ pub trait Transformer: Sized {
     fn transform_const_def(&mut self, ct_def: &ConstDef) -> Transformed<ConstDef> {
         ct_def.inner_transform_with(self)
     }
+    fn transform_value_use(&mut self, v: &Value) -> Transformed<Value> {
+        v.inner_transform_with(self)
+    }
 
     // Non-leaves transformed in-place (defaulting to calling
     // `.inner_in_place_transform_with(self)`).
@@ -504,7 +507,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlRegion> {
             outputs,
         } = self.reborrow().def();
         for v in outputs {
-            v.inner_transform_with(transformer).apply_to(v);
+            transformer.transform_value_use(v).apply_to(v);
         }
     }
 }
@@ -551,8 +554,8 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
                 scrutinee,
                 cases,
             } => {
-                scrutinee
-                    .inner_transform_with(transformer)
+                transformer
+                    .transform_value_use(scrutinee)
                     .apply_to(scrutinee);
 
                 cases.len()
@@ -594,8 +597,8 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
                 body: _,
                 repeat_condition,
             } => {
-                repeat_condition
-                    .inner_transform_with(transformer)
+                transformer
+                    .transform_value_use(repeat_condition)
                     .apply_to(repeat_condition);
             }
         };
@@ -638,7 +641,7 @@ impl InnerInPlaceTransform for DataInstDef {
             transformer.transform_type_use(*ty).apply_to(ty);
         }
         for v in inputs {
-            v.inner_transform_with(transformer).apply_to(v);
+            transformer.transform_value_use(v).apply_to(v);
         }
     }
 }
@@ -664,11 +667,11 @@ impl InnerInPlaceTransform for cfg::ControlInst {
             ) => {}
         }
         for v in inputs {
-            v.inner_transform_with(transformer).apply_to(v);
+            transformer.transform_value_use(v).apply_to(v);
         }
         for outputs in target_merge_outputs.values_mut() {
             for v in outputs {
-                v.inner_transform_with(transformer).apply_to(v);
+                transformer.transform_value_use(v).apply_to(v);
             }
         }
     }

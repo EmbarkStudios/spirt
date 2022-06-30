@@ -536,6 +536,49 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             last: new_node,
         }
     }
+
+    /// Concatenate lists `a` and `b`, producing a new list.
+    //
+    // FIXME(eddyb) the awkwardness of this API could be alleviated by not
+    // requiring `EntityList` to be non-empty.
+    #[track_caller]
+    pub fn concat(a: Option<Self>, b: Option<Self>, defs: &mut EntityDefs<E>) -> Option<Self> {
+        let (a, b) = match (a, b) {
+            (None, None) => return None,
+            (Some(list), None) | (None, Some(list)) => return Some(list),
+            (Some(a), Some(b)) => (a, b),
+        };
+
+        {
+            let a_last_def = &mut defs[a.last];
+
+            // FIXME(eddyb) this situation should be impossible anyway, as it
+            // involves the `EntityListNode`s links, which should be unforgeable.
+            assert!(
+                a_last_def.next.is_none(),
+                "invalid EntityList: `last->next != None`"
+            );
+
+            a_last_def.next = Some(b.first);
+        }
+        {
+            let b_first_def = &mut defs[b.first];
+
+            // FIXME(eddyb) this situation should be impossible anyway, as it
+            // involves the `EntityListNode`s links, which should be unforgeable.
+            assert!(
+                b_first_def.prev.is_none(),
+                "invalid EntityList: `first->prev != None`"
+            );
+
+            b_first_def.prev = Some(a.last);
+        }
+
+        Some(Self {
+            first: a.first,
+            last: b.last,
+        })
+    }
 }
 
 /// Non-empty `EntityList<E>` iterator, but with a different API than `Iterator`.

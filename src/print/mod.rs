@@ -2440,9 +2440,15 @@ impl Print for cfg::ControlInst {
 
         let attrs = attrs.print(printer);
 
+        let kw_style = printer.imperative_keyword_style();
+        let kw = |kw| kw_style.clone().apply(kw).into();
+
         let mut targets = targets.iter().map(|&point| {
-            let mut target =
-                pretty::Fragment::new(["=> ".into(), Use::ControlPointLabel(point).print(printer)]);
+            let mut target = pretty::Fragment::new([
+                kw("branch"),
+                " ".into(),
+                Use::ControlPointLabel(point).print(printer),
+            ]);
             if let cfg::ControlPoint::Exit(control_node) = point {
                 if let Some(outputs) = target_merge_outputs.get(&control_node) {
                     target = pretty::Fragment::new([
@@ -2468,8 +2474,6 @@ impl Print for cfg::ControlInst {
             target
         });
 
-        let kw_style = printer.imperative_keyword_style();
-        let kw = |kw| kw_style.clone().apply(kw).into();
         let def = match kind {
             cfg::ControlInstKind::Unreachable => {
                 // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
@@ -2496,12 +2500,12 @@ impl Print for cfg::ControlInst {
 
             cfg::ControlInstKind::Branch => {
                 assert_eq!((targets.len(), inputs.len()), (1, 0));
-                pretty::Fragment::new([kw("branch"), " ".into(), targets.nth(0).unwrap()])
+                targets.nth(0).unwrap()
             }
 
             cfg::ControlInstKind::SelectBranch(kind) => {
                 assert_eq!(inputs.len(), 1);
-                kind.print_with_scrutinee_and_cases(printer, kw_style, inputs[0], targets)
+                kind.print_with_scrutinee_and_cases(printer, kw_style.clone(), inputs[0], targets)
             }
         };
 
@@ -2540,7 +2544,7 @@ impl SelectionKind {
                 struct TargetLabelId;
 
                 let header = printer.pretty_spv_inst(
-                    kw_style,
+                    kw_style.clone(),
                     opcode,
                     imms,
                     [scrutinee]
@@ -2554,23 +2558,27 @@ impl SelectionKind {
                     None,
                 );
 
-                // FIXME(eddyb) this doesn't work well for structured selects.
                 pretty::Fragment::new([
                     header,
-                    match cases.len() {
-                        0 => pretty::Fragment::default(),
-                        1 => pretty::Fragment::new([" ".into(), cases.nth(0).unwrap()]),
-                        _ => pretty::join_comma_sep(
-                            " {",
-                            cases.map(|case| {
+                    " {".into(),
+                    pretty::Node::IndentedBlock(
+                        cases
+                            .map(|case| {
                                 pretty::Fragment::new([
                                     pretty::Node::ForceLineSeparation.into(),
-                                    case,
+                                    // FIXME(eddyb) this should pull information out
+                                    // of the instruction to be more precise.
+                                    kw("case"),
+                                    " => {".into(),
+                                    pretty::Node::IndentedBlock(vec![case]).into(),
+                                    "}".into(),
+                                    pretty::Node::ForceLineSeparation.into(),
                                 ])
-                            }),
-                            "}",
-                        ),
-                    },
+                            })
+                            .collect(),
+                    )
+                    .into(),
+                    "}".into(),
                 ])
             }
         }

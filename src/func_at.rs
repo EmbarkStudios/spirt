@@ -9,8 +9,8 @@
 //! * they're dedicated types with inherent methods and trait `impl`s
 
 use crate::{
-    ControlNode, ControlNodeDef, ControlRegion, ControlRegionDef, DataInst, DataInstDef,
-    EntityDefs, EntityList, EntityListIter, FuncDefBody,
+    Context, ControlNode, ControlNodeDef, ControlRegion, ControlRegionDef, DataInst, DataInstDef,
+    EntityDefs, EntityList, EntityListIter, FuncDefBody, Type, Value,
 };
 
 /// Immutable traversal (i.e. visiting) helper for intra-function entities.
@@ -91,6 +91,23 @@ impl<'a> Iterator for FuncAt<'a, Option<EntityListIter<DataInst>>> {
 impl<'a> FuncAt<'a, DataInst> {
     pub fn def(self) -> &'a DataInstDef {
         &self.data_insts[self.position]
+    }
+}
+
+impl FuncAt<'_, Value> {
+    /// Return the `Type` of this `Value` (`Context` used for `Value::Const`).
+    pub fn type_of(self, cx: &Context) -> Type {
+        match self.position {
+            Value::Const(ct) => cx[ct].ty,
+            Value::ControlRegionInput { region, input_idx } => {
+                self.at(region).def().inputs[input_idx as usize].ty
+            }
+            Value::ControlNodeOutput {
+                control_node,
+                output_idx,
+            } => self.at(control_node).def().outputs[output_idx as usize].ty,
+            Value::DataInstOutput(inst) => self.at(inst).def().output_type.unwrap(),
+        }
     }
 }
 
