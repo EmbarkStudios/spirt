@@ -8,10 +8,10 @@ use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
-    ControlRegionDef, DataInst, DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey,
-    Exportee, Func, FuncDecl, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstKind, DeclDef,
+    EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncParam, FxIndexMap, GlobalVar,
+    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind,
+    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -888,16 +888,23 @@ impl<'a> Printer<'a> {
                             let ControlNodeDef { kind, outputs } =
                                 &*func_def_body.control_nodes[control_node];
 
-                            let block_insts = match *kind {
-                                ControlNodeKind::Block { insts } => insts,
-                                _ => None,
-                            };
+                            if let ControlNodeKind::Loop { body, .. } = *kind {
+                                let loop_body_def = func_at_point_cursor.at(body).def();
+                                for (i, _) in loop_body_def.inputs.iter().enumerate() {
+                                    define_label_or_value(Use::ControlRegionInput {
+                                        region: body,
+                                        input_idx: i.try_into().unwrap(),
+                                    });
+                                }
+                            }
 
-                            for func_at_inst in func_def_body.at(block_insts) {
-                                if func_at_inst.def().output_type.is_some() {
-                                    define_label_or_value(Use::DataInstOutput(
-                                        func_at_inst.position,
-                                    ));
+                            if let ControlNodeKind::Block { insts } = *kind {
+                                for func_at_inst in func_def_body.at(insts) {
+                                    if func_at_inst.def().output_type.is_some() {
+                                        define_label_or_value(Use::DataInstOutput(
+                                            func_at_inst.position,
+                                        ));
+                                    }
                                 }
                             }
 
@@ -2330,14 +2337,82 @@ impl Print for FuncAt<'_, ControlNode> {
                 cases.iter().map(|&case| self.at(case).print(printer)),
             ),
             ControlNodeKind::Loop {
+                initial_inputs,
                 body,
                 repeat_condition,
             } => {
+                let inputs = &self.at(*body).def().inputs;
+                assert_eq!(initial_inputs.len(), inputs.len());
+
+                // FIXME(eddyb) this avoids customizing how `body` is printed,
+                // by adding a `-> ...` suffix to it instead, e.g. this `body`:
+                // ```
+                // v3 = ...
+                // v4 = ...
+                // (v3, v4)
+                // ```
+                // may be printed like this, as part of a loop:
+                // ```
+                // loop(v1 <- 0, v2 <- false) {
+                //   v3 = ...
+                //   v4 = ...
+                //   (v3, v4) -> (v1, v2)
+                // }
+                // ```
+                // In the above example, `v1` and `v2` are the `inputs` of the
+                // `body`, which start at `0`/`false`, and are replaced with
+                // `v3`/`v4` after each iteration.
+                let (inputs_header, body_suffix) = if !inputs.is_empty() {
+                    let input_decls_and_uses =
+                        inputs.iter().enumerate().map(|(input_idx, input)| {
+                            (
+                                input,
+                                Value::ControlRegionInput {
+                                    region: *body,
+                                    input_idx: input_idx.try_into().unwrap(),
+                                },
+                            )
+                        });
+                    (
+                        pretty::join_comma_sep(
+                            "(",
+                            input_decls_and_uses.clone().zip(initial_inputs).map(
+                                |((input_decl, input_use), initial)| {
+                                    pretty::Fragment::new([
+                                        input_decl.print(printer).insert_name_before_def(
+                                            input_use.print_as_def(printer),
+                                        ),
+                                        " <- ".into(),
+                                        initial.print(printer),
+                                    ])
+                                },
+                            ),
+                            ")",
+                        ),
+                        pretty::Fragment::new([" -> ".into(), {
+                            let mut input_dests =
+                                input_decls_and_uses.map(|(_, input_use)| input_use.print(printer));
+                            if input_dests.len() == 1 {
+                                input_dests.next().unwrap()
+                            } else {
+                                pretty::join_comma_sep("(", input_dests, ")")
+                            }
+                        }]),
+                    )
+                } else {
+                    (pretty::Fragment::default(), pretty::Fragment::default())
+                };
+
                 // FIXME(eddyb) this is a weird mishmash of Rust and C syntax.
                 pretty::Fragment::new([
                     kw("loop"),
+                    inputs_header,
                     " {".into(),
-                    pretty::Node::IndentedBlock(vec![self.at(*body).print(printer)]).into(),
+                    pretty::Node::IndentedBlock(vec![pretty::Fragment::new([
+                        self.at(*body).print(printer),
+                        body_suffix,
+                    ])])
+                    .into(),
                     "} ".into(),
                     kw("while"),
                     " ".into(),
@@ -2346,6 +2421,18 @@ impl Print for FuncAt<'_, ControlNode> {
             }
         };
         pretty::Fragment::new([outputs_header, control_node_body])
+    }
+}
+
+impl Print for ControlRegionInputDecl {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+        let Self { attrs, ty } = *self;
+
+        AttrsAndDef {
+            attrs: attrs.print(printer),
+            def_without_name: printer.pretty_type_ascription_suffix(ty),
+        }
     }
 }
 

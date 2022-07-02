@@ -535,47 +535,53 @@ impl InnerInPlaceTransform for FuncAtMut<'_, Option<EntityListIter<ControlNode>>
     }
 }
 
+impl FuncAtMut<'_, ControlNode> {
+    fn child_regions(&mut self) -> &mut [ControlRegion] {
+        match &mut self.reborrow().def().kind {
+            ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => &mut [][..],
+
+            ControlNodeKind::Select { cases, .. } => cases,
+            ControlNodeKind::Loop { body, .. } => slice::from_mut(body),
+        }
+    }
+}
+
 impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         // HACK(eddyb) handle pre-child-regions parts of `kind` separately to
         // allow reborrowing `FuncAtMut` (for the child region recursion).
-        let num_child_regions = match &mut self.reborrow().def().kind {
-            ControlNodeKind::UnstructuredMerge => 0,
+        match &mut self.reborrow().def().kind {
+            ControlNodeKind::UnstructuredMerge => {}
             &mut ControlNodeKind::Block { insts } => {
                 let mut func_at_inst_iter = self.reborrow().at(insts).into_iter();
                 while let Some(func_at_inst) = func_at_inst_iter.next() {
                     transformer.in_place_transform_data_inst_def(func_at_inst.def());
                 }
-
-                0
             }
             ControlNodeKind::Select {
                 kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
                 scrutinee,
-                cases,
+                cases: _,
             } => {
                 transformer
                     .transform_value_use(scrutinee)
                     .apply_to(scrutinee);
-
-                cases.len()
             }
             ControlNodeKind::Loop {
+                initial_inputs,
                 body: _,
                 repeat_condition: _,
-            } => 1,
-        };
+            } => {
+                for v in initial_inputs {
+                    transformer.transform_value_use(v).apply_to(v);
+                }
+            }
+        }
 
         // FIXME(eddyb) represent the list of child regions without having them
         // in a `Vec` (or `SmallVec`), which requires workarounds like this.
-        for child_region_idx in 0..num_child_regions {
-            let child_regions = match &mut self.reborrow().def().kind {
-                ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => &mut [][..],
-
-                ControlNodeKind::Select { cases, .. } => cases,
-                ControlNodeKind::Loop { body, .. } => slice::from_mut(body),
-            };
-            let child_region = child_regions[child_region_idx];
+        for child_region_idx in 0..self.child_regions().len() {
+            let child_region = self.child_regions()[child_region_idx];
             self.reborrow()
                 .at(child_region)
                 .inner_in_place_transform_with(transformer);
@@ -594,6 +600,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
             } => {}
 
             ControlNodeKind::Loop {
+                initial_inputs: _,
                 body: _,
                 repeat_condition,
             } => {

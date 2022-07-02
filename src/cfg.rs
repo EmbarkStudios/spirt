@@ -3,9 +3,9 @@
 use crate::func_at::FuncAt;
 use crate::{
     spv, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode, ControlNodeDef,
-    ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef, EntityList,
-    EntityListIter, EntityOrientedDenseMap, EntityOrientedMapKey, FuncDefBody, FxIndexMap,
-    SelectionKind, Type, TypeCtor, TypeDef, Value,
+    ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
+    ControlRegionInputDecl, EntityList, EntityListIter, EntityOrientedDenseMap,
+    EntityOrientedMapKey, FuncDefBody, FxIndexMap, SelectionKind, Type, TypeCtor, TypeDef, Value,
 };
 use smallvec::SmallVec;
 use std::{mem, slice};
@@ -814,7 +814,7 @@ impl<'a> Structurizer<'a> {
 
     fn try_claim_edge_bundle(
         &mut self,
-        edge_bundle: IncomingEdgeBundle,
+        mut edge_bundle: IncomingEdgeBundle,
     ) -> Result<PartialControlRegion, DeferredEdgeBundle> {
         let target = edge_bundle.target;
 
@@ -872,37 +872,69 @@ impl<'a> Structurizer<'a> {
         // * repeat ("continue") edge: `backedge` (with its `condition`)
         // * exit ("break") edges: `region.successor` (must be `Deferred`)
         if let Some(backedge) = backedge {
-            // FIXME(eddyb) implement loop "state" with
-            // inputs/outputs on the body `ControlRegion`.
-            {
-                // Guaranteed by `structurize_region_from` handling `backedge`.
-                assert!(backedge.edge_bundle.target_merge_outputs.is_empty());
-                // Must be the case as it's the same target as `backedge`.
-                assert!(edge_bundle.target_merge_outputs.is_empty());
-            }
-
             let DeferredEdgeBundle {
                 condition: repeat_condition,
                 edge_bundle: backedge,
             } = backedge;
             assert!(backedge.target == target);
 
-            let children = region
+            // If the body starts with an `UnstructuredMerge`, receiving values
+            // from both the loop entry and the backedge, that has to become
+            // "loop state" (with values being passed to `body` `inputs`).
+            let body_inputs: SmallVec<[_; 2]> = {
+                let header_merge_output_decls = match target {
+                    ControlPoint::Exit(header_merge_node) => {
+                        let header_merge_node_def = self.func_def_body.at(header_merge_node).def();
+                        assert!(matches!(
+                            header_merge_node_def.kind,
+                            ControlNodeKind::UnstructuredMerge
+                        ));
+                        &header_merge_node_def.outputs
+                    }
+                    _ => &[][..],
+                };
+                header_merge_output_decls
+                    .iter()
+                    .map(
+                        |&ControlNodeOutputDecl { attrs, ty }| ControlRegionInputDecl { attrs, ty },
+                    )
+                    .collect()
+            };
+            let initial_inputs = edge_bundle.target_merge_outputs;
+            let body_outputs = backedge.target_merge_outputs;
+            assert_eq!(initial_inputs.len(), body_inputs.len());
+            assert_eq!(body_outputs.len(), body_inputs.len());
+
+            let body_children = region
                 .children
                 .unwrap_or_else(|| self.empty_control_region_children());
             let body = self.func_def_body.control_regions.define(
                 self.cx,
                 ControlRegionDef {
-                    inputs: [].into_iter().collect(),
-                    children,
-                    outputs: [].into_iter().collect(),
+                    inputs: body_inputs,
+                    children: body_children,
+                    outputs: body_outputs,
                 },
             );
+
+            // The last step of turning `edge_bundle` into the complete merge of
+            // the loop entry and its backedge, is to supply the structured
+            // `body` `inputs` as the `target_merge_outputs`, so that they can
+            // be inserted into `control_node_output_replacements` below.
+            edge_bundle.target_merge_outputs = initial_inputs
+                .iter()
+                .enumerate()
+                .map(|(input_idx, _)| Value::ControlRegionInput {
+                    region: body,
+                    input_idx: input_idx.try_into().unwrap(),
+                })
+                .collect();
 
             let loop_node = self.func_def_body.control_nodes.define(
                 self.cx,
                 ControlNodeDef {
                     kind: ControlNodeKind::Loop {
+                        initial_inputs,
                         body,
                         repeat_condition,
                     },
@@ -912,7 +944,7 @@ impl<'a> Structurizer<'a> {
             );
 
             // Replace the region with the whole loop, any exits out of the loop
-            // being encoded in `region.successor` being a non-empty `Deferred`.
+            // being encoded in `region.deferred_*`.
             region.children = Some(EntityList::insert_last(
                 None,
                 loop_node,
@@ -1216,21 +1248,10 @@ impl<'a> Structurizer<'a> {
         }
 
         // Try to extract (deferred) backedges (which later get turned into loops).
-        let backedge = match region.deferred_edges.target_to_deferred.get(&first_point) {
-            Some(backedge) => {
-                // FIXME(eddyb) implement loop "state" with
-                // inputs/outputs on the body `ControlRegion`.
-                if backedge.edge_bundle.target_merge_outputs.is_empty() {
-                    region
-                        .deferred_edges
-                        .target_to_deferred
-                        .remove(&first_point)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
+        let backedge = region
+            .deferred_edges
+            .target_to_deferred
+            .remove(&first_point);
 
         let old_state = self.structurize_region_state.insert(
             first_point,

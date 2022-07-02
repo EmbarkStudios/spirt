@@ -384,7 +384,6 @@ pub struct ControlRegionDef {
     ///     as it's both confusing regarding `Value::ControlRegionInput`, and
     ///     also there's nothing stopping body-defined values from directly being
     ///     used outside the loop (once that changes, this aspect can be flipped)
-    ///   * FIXME(eddyb) not yet implemented
     pub outputs: SmallVec<[Value; 2]>,
 }
 
@@ -450,17 +449,18 @@ pub enum ControlNodeKind {
 
     /// Execute `body` repeatedly, until `repeat_condition` evaluates to `false`.
     ///
+    /// To represent "loop state", `body` can take `inputs`, getting values from:
+    /// * on the first iteration: `initial_inputs`
+    /// * on later iterations: `body`'s own `outputs` (from the last iteration)
+    ///
     /// As the condition is checked only *after* the body, this type of loop is
     /// sometimes described as "tail-controlled", and is also equivalent to the
     /// C-like `do { body; } while(repeat_condition)` construct.
     ///
     /// This corresponds to "theta" (`θ`) nodes in (R)VSDG.
-    //
-    // FIXME(eddyb) introduce `ControlRegion` inputs (i.e. `ControlRegion` having
-    // a list of `ControlRegionInputDecl`s, and a `ControlRegionInput` variant in
-    // `Value`) and use it to pass values to the `body` which can either be some
-    // initial ones, or the last set of ("state") values *output* from `body`.
     Loop {
+        initial_inputs: SmallVec<[Value; 2]>,
+
         body: ControlRegion,
 
         // FIXME(eddyb) should this be kept in `body.outputs`? (that would not

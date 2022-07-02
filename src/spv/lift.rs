@@ -3,11 +3,11 @@
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeKind,
-    ControlNodeOutputDecl, ControlRegion, DataInst, DataInstDef, DataInstKind, DeclDef, EntityDefs,
-    EntityList, ExportKey, Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar,
-    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type,
-    TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
+    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl,
+    DataInst, DataInstDef, DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee,
+    Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -192,9 +192,6 @@ struct AllocatedIds<'a> {
 
 // FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
 struct FuncLifting<'a> {
-    // HACK(eddyb) allows lookup of `cfg::ControlPoint`s for `ControlRegion`s.
-    control_regions: Option<&'a EntityDefs<ControlRegion>>,
-
     func_id: spv::Id,
     param_ids: SmallVec<[spv::Id; 4]>,
     // FIXME(eddyb) use `EntityOrientedDenseMap` here.
@@ -203,6 +200,15 @@ struct FuncLifting<'a> {
     label_ids: FxHashMap<cfg::ControlPoint, spv::Id>,
     // FIXME(eddyb) use `EntityOrientedDenseMap` here (modulo iteration?).
     blocks: FxIndexMap<cfg::ControlPoint, BlockLifting<'a>>,
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
+    region_inputs_source: FxHashMap<ControlRegion, RegionInputsSource>,
+}
+
+/// What determines the values for `Value::ControlRegionInput`s, for a specific
+/// region (effectively the subset of "region parents" that support inputs).
+enum RegionInputsSource {
+    FuncParams,
+    LoopHeaderPhis(ControlNode),
 }
 
 struct BlockLifting<'a> {
@@ -217,7 +223,12 @@ struct Phi {
     ty: Type,
 
     result_id: spv::Id,
-    cases: SmallVec<[(Value, cfg::ControlPoint); 2]>,
+    cases: FxIndexMap<cfg::ControlPoint, Value>,
+
+    // HACK(eddyb) used for `Loop` `initial_inputs`, to indicate that any edge
+    // to the `Loop` (other than the backedge, which is already in `cases`)
+    // should automatically get an entry into `cases`, with this value.
+    default_value: Option<Value>,
 }
 
 #[derive(Copy, Clone)]
@@ -229,7 +240,11 @@ enum Merge<L> {
         loop_merge: L,
 
         /// The label just after the loop body, i.e. the `continue` target.
-        body_merge: L,
+        ///
+        /// Note that this cannot (always) be `Exit(body.children.last)`, as
+        /// that may very well be the merge of a `Select`/`Loop` at the end of
+        /// the body, and SPIR-V requires unique merge blocks.
+        loop_continue: L,
     },
 }
 
@@ -247,6 +262,26 @@ impl<'a> NeedsIdsCollector<'a> {
             global_vars_seen: _,
             funcs,
         } = self;
+
+        // HACK(eddyb) because CFG reconstruction refers only to `ControlNode`s
+        // (typically via `cfg::ControlPoint`), and the `FuncDefBody`s being
+        // lifted are immutable, any additional CFG points that may be needed
+        // (such as for the loop body "continue" merge) have to be represented
+        // in some other way, or `ControlNode`s be allocated hackily elsewhere
+        // (this does the latter, to avoid changing many type definitions).
+        let mut extra_control_node_defs = EntityDefs::new();
+        let mut alloc_extra_control_point = || {
+            cfg::ControlPoint::Exit(
+                extra_control_node_defs.define(
+                    cx,
+                    ControlNodeDef {
+                        kind: ControlNodeKind::UnstructuredMerge,
+                        outputs: Default::default(),
+                    }
+                    .into(),
+                ),
+            )
+        };
 
         Ok(AllocatedIds {
             ext_inst_imports: ext_inst_imports
@@ -266,7 +301,12 @@ impl<'a> NeedsIdsCollector<'a> {
                 .map(|func| {
                     Ok((
                         func,
-                        FuncLifting::from_func_decl(cx, &module.funcs[func], || alloc_id())?,
+                        FuncLifting::from_func_decl(
+                            cx,
+                            &module.funcs[func],
+                            || alloc_id(),
+                            || alloc_extra_control_point(),
+                        )?,
                     ))
                 })
                 .collect::<Result<_, _>>()?,
@@ -279,6 +319,7 @@ impl<'a> FuncLifting<'a> {
         cx: &Context,
         func_decl: &'a FuncDecl,
         mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
+        mut alloc_extra_control_point: impl FnMut() -> cfg::ControlPoint,
     ) -> Result<Self, E> {
         let wk = &spec::Spec::get().well_known;
 
@@ -292,19 +333,22 @@ impl<'a> FuncLifting<'a> {
         let func_def_body = match &func_decl.def {
             DeclDef::Imported(_) => {
                 return Ok(Self {
-                    control_regions: None,
                     func_id,
                     param_ids,
                     data_inst_output_ids: Default::default(),
                     label_ids: Default::default(),
                     blocks: Default::default(),
+                    region_inputs_source: Default::default(),
                 });
             }
             DeclDef::Present(def) => def,
         };
 
+        let mut region_inputs_source = FxHashMap::default();
+        region_inputs_source.insert(func_def_body.body, RegionInputsSource::FuncParams);
+
         // Create a SPIR-V block for every CFG point needing one.
-        let mut blocks = FxIndexMap::default();
+        let mut blocks = FxIndexMap::<_, BlockLifting>::default();
         let mut visit_point_range = |point_range: cfg::ControlPointRange| {
             let func_at_point_range = func_def_body.at(point_range);
             func_at_point_range.rev_post_order_try_for_each(|func_at_point_cursor| {
@@ -312,8 +356,52 @@ impl<'a> FuncLifting<'a> {
                 let point = point_cursor.position;
                 let control_node_def = &func_def_body.control_nodes[point.control_node()];
 
-                let phis = if let cfg::ControlPoint::Exit(_) = point {
-                    control_node_def
+                let unstructured_terminator = func_def_body
+                    .unstructured_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.control_insts.get(point));
+
+                let mut phis: SmallVec<[_; 2]> = match point {
+                    cfg::ControlPoint::Entry(_) => {
+                        assert!(unstructured_terminator.is_none());
+                        match &control_node_def.kind {
+                            // The backedge of a SPIR-V structured loop points to
+                            // the "loop header", i.e. the `Entry` of the `Loop`,
+                            // so that's where `body` `inputs` phis have to go.
+                            ControlNodeKind::Loop {
+                                initial_inputs,
+                                body,
+                                ..
+                            } => {
+                                let loop_body_def = func_at_point_cursor.at(*body).def();
+                                let loop_body_inputs = &loop_body_def.inputs;
+
+                                if !loop_body_inputs.is_empty() {
+                                    region_inputs_source.insert(
+                                        *body,
+                                        RegionInputsSource::LoopHeaderPhis(point.control_node()),
+                                    );
+                                }
+
+                                loop_body_inputs
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &ControlRegionInputDecl { attrs, ty })| {
+                                        Ok(Phi {
+                                            attrs,
+                                            ty,
+
+                                            result_id: alloc_id()?,
+                                            cases: FxIndexMap::default(),
+                                            default_value: Some(initial_inputs[i]),
+                                        })
+                                    })
+                                    .collect::<Result<_, _>>()?
+                            }
+                            _ => SmallVec::new(),
+                        }
+                    }
+                    cfg::ControlPoint::Exit(_) => control_node_def
                         .outputs
                         .iter()
                         .map(|&ControlNodeOutputDecl { attrs, ty }| {
@@ -322,12 +410,11 @@ impl<'a> FuncLifting<'a> {
                                 ty,
 
                                 result_id: alloc_id()?,
-                                cases: SmallVec::new(),
+                                cases: FxIndexMap::default(),
+                                default_value: None,
                             })
                         })
-                        .collect::<Result<_, _>>()?
-                } else {
-                    SmallVec::new()
+                        .collect::<Result<_, _>>()?,
                 };
 
                 let insts = match (point, &control_node_def.kind) {
@@ -338,11 +425,8 @@ impl<'a> FuncLifting<'a> {
                 };
 
                 let mut merge = None;
-                let terminator = match func_def_body
-                    .unstructured_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.control_insts.get(point))
-                {
+                let mut extra_block_to_append_after_current_one = None;
+                let terminator = match unstructured_terminator {
                     Some(terminator) => Cow::Borrowed(terminator),
 
                     // Structured control-flow, reconstruct a terminator.
@@ -379,23 +463,43 @@ impl<'a> FuncLifting<'a> {
                             }
 
                             ControlNodeKind::Loop {
+                                initial_inputs: _,
                                 body,
                                 repeat_condition: _,
                             } => {
                                 let func_at_loop_body = func_at_point_cursor.at(*body);
-                                let loop_body_children = func_at_loop_body.def().children.iter();
+                                let loop_body_def = func_at_loop_body.def();
+
+                                // HACK(eddyb) the loop body "continue" merge
+                                // cannot (always) be `Exit(body.children.last)`,
+                                // as that may very well be the merge of a
+                                // `Select`/`Loop` at the end of the body, and
+                                // SPIR-V requires unique merge blocks, so here
+                                // a fresh `cfg::ControlPoint` is allocated to
+                                // serve as a separate merge block.
+                                // To keep blocks in the right order, an entry
+                                // into `blocks` is only inserted later, just
+                                // after `Exit(body.body.children.last)`.
+                                let loop_continue = alloc_extra_control_point();
+
+                                // Forward `body` `outputs` to the loop phis.
+                                for (i, phi) in phis.iter_mut().enumerate() {
+                                    phi.cases.insert(loop_continue, loop_body_def.outputs[i]);
+                                }
 
                                 merge = Some(Merge::Loop {
                                     loop_merge: cfg::ControlPoint::Exit(point.control_node()),
-                                    body_merge: cfg::ControlPoint::Exit(loop_body_children.last),
+                                    loop_continue,
                                 });
                                 cfg::ControlInst {
                                     attrs: AttrSet::default(),
                                     kind: cfg::ControlInstKind::Branch,
                                     inputs: [].into_iter().collect(),
-                                    targets: [cfg::ControlPoint::Entry(loop_body_children.first)]
-                                        .into_iter()
-                                        .collect(),
+                                    targets: [cfg::ControlPoint::Entry(
+                                        loop_body_def.children.iter().first,
+                                    )]
+                                    .into_iter()
+                                    .collect(),
                                     target_merge_outputs: FxIndexMap::default(),
                                 }
                             }
@@ -441,12 +545,22 @@ impl<'a> FuncLifting<'a> {
                                 },
 
                                 ControlNodeKind::Loop {
+                                    initial_inputs: _,
                                     body: _,
                                     repeat_condition,
                                 } => {
-                                    // FIXME(eddyb) implement loop "state" with
-                                    // inputs/outputs on the body `ControlRegion`.
-                                    assert!(parent_region_outputs.is_empty());
+                                    // HACK(eddyb) see the `Loop` handling above
+                                    // for more details, but in short, the actual
+                                    // backedge has to be attached to a special
+                                    // merge block that is separate from the
+                                    // original `Exit(body.children.last)`
+                                    // (which is the current block being built).
+                                    let loop_entry_block =
+                                        &blocks[&cfg::ControlPoint::Entry(parent_node)];
+                                    let loop_continue = match loop_entry_block.merge {
+                                        Some(Merge::Loop { loop_continue, .. }) => loop_continue,
+                                        _ => unreachable!(),
+                                    };
 
                                     let is_infinite_loop = match repeat_condition {
                                         Value::Const(cond) => {
@@ -460,7 +574,7 @@ impl<'a> FuncLifting<'a> {
                                     let backedge = cfg::ControlPoint::Entry(parent_node);
                                     let break_point = cfg::ControlPoint::Exit(parent_node);
 
-                                    if is_infinite_loop {
+                                    let loop_continue_terminator = if is_infinite_loop {
                                         cfg::ControlInst {
                                             attrs: AttrSet::default(),
                                             kind: cfg::ControlInstKind::Branch,
@@ -478,6 +592,25 @@ impl<'a> FuncLifting<'a> {
                                             targets: [backedge, break_point].into_iter().collect(),
                                             target_merge_outputs: FxIndexMap::default(),
                                         }
+                                    };
+                                    extra_block_to_append_after_current_one = Some((
+                                        loop_continue,
+                                        BlockLifting {
+                                            phis: Default::default(),
+                                            insts: Default::default(),
+                                            merge: None,
+                                            terminator: Cow::Owned(loop_continue_terminator),
+                                        },
+                                    ));
+
+                                    // All the body exit (i.e. this block) needs
+                                    // to do is branch to `loop_continue`.
+                                    cfg::ControlInst {
+                                        attrs: AttrSet::default(),
+                                        kind: cfg::ControlInstKind::Branch,
+                                        inputs: [].into_iter().collect(),
+                                        targets: [loop_continue].into_iter().collect(),
+                                        target_merge_outputs: FxIndexMap::default(),
                                     }
                                 }
                             }
@@ -506,6 +639,8 @@ impl<'a> FuncLifting<'a> {
                         terminator,
                     },
                 );
+
+                blocks.extend(extra_block_to_append_after_current_one);
 
                 Ok(())
             })
@@ -541,7 +676,7 @@ impl<'a> FuncLifting<'a> {
                             Merge::Selection(a) => (a, None),
                             Merge::Loop {
                                 loop_merge: a,
-                                body_merge: b,
+                                loop_continue: b,
                             } => (a, Some(b)),
                         };
                         [a].into_iter().chain(b)
@@ -560,6 +695,10 @@ impl<'a> FuncLifting<'a> {
         // `abc` block, without knowing about `b` and `c` themselves
         // (this is possible because RPO will always output `[a, b, c]`, when
         // `b` and `c` only have one predecessor each).
+        //
+        // FIXME(eddyb) while this could theoretically fuse certain kinds of
+        // merge blocks (mostly loop bodies) into their unique precedessor, that
+        // would require adjusting the `Merge` that points to them.
         //
         // HACK(eddyb) this takes advantage of `blocks` being an `IndexMap`,
         // to iterate at the same time as mutating other entries.
@@ -637,12 +776,30 @@ impl<'a> FuncLifting<'a> {
 
             // FIXME(eddyb) cloning only needed because not all `ControlInst`s
             // are borrowed from the `Module`, some/most are synthesized above.
+            let targets = terminator.targets.clone();
             let target_merge_outputs = terminator.target_merge_outputs.clone();
 
-            for (target, outputs) in target_merge_outputs {
-                let target_block = blocks.get_mut(&cfg::ControlPoint::Exit(target)).unwrap();
-                for (target_phi, v) in target_block.phis.iter_mut().zip(outputs) {
-                    target_phi.cases.push((v, source_point));
+            for target in targets {
+                let source_values = match target {
+                    cfg::ControlPoint::Exit(target_node) => target_merge_outputs.get(&target_node),
+                    _ => None,
+                };
+                let target_block = blocks.get_mut(&target).unwrap();
+                for (i, target_phi) in target_block.phis.iter_mut().enumerate() {
+                    let phi_case = target_phi.cases.entry(source_point);
+                    if let Some(default_value) = target_phi.default_value {
+                        // HACK(eddyb) this is only used for `Loop`s, which
+                        // start with only the backedge in `cases`, and must
+                        // receive other `cases` through here.
+                        assert!(source_values.is_none());
+                        phi_case.or_insert(default_value);
+                    } else {
+                        let source_value = source_values.unwrap()[i];
+                        // NOTE(eddyb) the only reason duplicates are allowed,
+                        // is that `targets` may itself contain the same target
+                        // multiple times (which would result in the same value).
+                        assert!(*phi_case.or_insert(source_value) == source_value);
+                    }
                 }
             }
         }
@@ -655,7 +812,6 @@ impl<'a> FuncLifting<'a> {
             .map(|func_at_inst| func_at_inst.position);
 
         Ok(Self {
-            control_regions: Some(&func_def_body.control_regions),
             func_id,
             param_ids,
             data_inst_output_ids: all_insts_with_output
@@ -666,6 +822,7 @@ impl<'a> FuncLifting<'a> {
                 .map(|&point| Ok((point, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
             blocks: blocks,
+            region_inputs_source,
         })
     }
 }
@@ -768,12 +925,12 @@ impl LazyInst<'_, '_> {
             Value::Const(ct) => ids.globals[&Global::Const(ct)],
             Value::ControlRegionInput { region, input_idx } => {
                 let input_idx = usize::try_from(input_idx).unwrap();
-
-                let region_def = &parent_func.control_regions.unwrap()[region];
-                let region_entry = cfg::ControlPoint::Entry(region_def.children.iter().first);
-                match parent_func.blocks.get_full(&region_entry).unwrap() {
-                    (0, _, _) => parent_func.param_ids[input_idx],
-                    (_, _, region_entry_block) => region_entry_block.phis[input_idx].result_id,
+                match parent_func.region_inputs_source[&region] {
+                    RegionInputsSource::FuncParams => parent_func.param_ids[input_idx],
+                    RegionInputsSource::LoopHeaderPhis(loop_node) => {
+                        parent_func.blocks[&cfg::ControlPoint::Entry(loop_node)].phis[input_idx]
+                            .result_id
+                    }
                 }
             }
             Value::ControlNodeOutput {
@@ -904,7 +1061,7 @@ impl LazyInst<'_, '_> {
                 ids: phi
                     .cases
                     .iter()
-                    .flat_map(|&(v, source_point)| {
+                    .flat_map(|(&source_point, &v)| {
                         [
                             value_to_id(parent_func, v),
                             parent_func.label_ids[&source_point],
@@ -961,7 +1118,7 @@ impl LazyInst<'_, '_> {
             },
             Self::Merge(Merge::Loop {
                 loop_merge: merge_label_id,
-                body_merge: continue_label_id,
+                loop_continue: continue_label_id,
             }) => spv::InstWithIds {
                 without_ids: spv::Inst {
                     opcode: wk.OpLoopMerge,
@@ -1163,10 +1320,10 @@ impl Module {
                                 }
                                 Merge::Loop {
                                     loop_merge,
-                                    body_merge,
+                                    loop_continue,
                                 } => Merge::Loop {
                                     loop_merge: func_lifting.label_ids[&loop_merge],
-                                    body_merge: func_lifting.label_ids[&body_merge],
+                                    loop_continue: func_lifting.label_ids[&loop_continue],
                                 },
                             })
                         }))
