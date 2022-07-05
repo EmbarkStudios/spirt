@@ -735,6 +735,8 @@ impl<'a> Printer<'a> {
                                             wk.OpTypeVector,
                                         ]
                                         .contains(&inst.opcode),
+
+                                        TypeCtor::SpvStringLiteralForExtInst => true,
                                     };
 
                                     ty_def.attrs == AttrSet::default()
@@ -1875,6 +1877,12 @@ impl Print for TypeDef {
                         },
                         None,
                     ),
+                    TypeCtor::SpvStringLiteralForExtInst => pretty::Fragment::new([
+                        printer.error_style().apply("type_of"),
+                        "(".into(),
+                        printer.declarative_keyword_style().apply("OpString"),
+                        ")".into(),
+                    ]),
                 }
             },
         }
@@ -2024,6 +2032,14 @@ impl Print for ConstDef {
                         Print::print,
                         Some(*ty),
                     ),
+                    ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
+                        printer.declarative_keyword_style().apply("OpString"),
+                        "<".into(),
+                        printer
+                            .string_literal_style()
+                            .apply(format!("{:?}", &printer.cx[s])),
+                        ">".into(),
+                    ]),
                 }
             },
         }

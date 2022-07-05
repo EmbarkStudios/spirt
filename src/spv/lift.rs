@@ -119,7 +119,17 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         if self.globals.contains(&global) {
             return;
         }
-        self.visit_type_def(&self.cx[ty]);
+        let ty_def = &self.cx[ty];
+        match ty_def.ctor {
+            TypeCtor::SpvInst(_) => {}
+            TypeCtor::SpvStringLiteralForExtInst => {
+                unreachable!(
+                    "`TypeCtor::SpvStringLiteralForExtInst` should not be used \
+                     as a type outside of `ConstCtor::SpvStringLiteralForExtInst`"
+                );
+            }
+        }
+        self.visit_type_def(ty_def);
         self.globals.insert(global);
     }
     fn visit_const_use(&mut self, ct: Const) {
@@ -127,8 +137,38 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         if self.globals.contains(&global) {
             return;
         }
-        self.visit_const_def(&self.cx[ct]);
-        self.globals.insert(global);
+        let ct_def = &self.cx[ct];
+        match ct_def.ctor {
+            ConstCtor::PtrToGlobalVar(_) | ConstCtor::SpvInst(_) => {
+                self.visit_const_def(ct_def);
+                self.globals.insert(global);
+            }
+
+            // HACK(eddyb) because this is an `OpString` and needs to go earlier
+            // in the module than any `OpConstant*`, it needs to be special-cased,
+            // without visiting its type, or an entry in `self.globals`.
+            ConstCtor::SpvStringLiteralForExtInst(s) => {
+                let ConstDef {
+                    attrs,
+                    ty,
+                    ctor: _,
+                    ctor_args,
+                } = ct_def;
+
+                assert!(*attrs == AttrSet::default());
+                assert!(
+                    self.cx[*ty]
+                        == TypeDef {
+                            attrs: AttrSet::default(),
+                            ctor: TypeCtor::SpvStringLiteralForExtInst,
+                            ctor_args: SmallVec::new(),
+                        }
+                );
+                assert!(ctor_args.is_empty());
+
+                self.debug_strings.insert(&self.cx[s]);
+            }
+        }
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
@@ -885,6 +925,9 @@ impl LazyInst<'_, '_> {
                                 (gv_decl.attrs, import)
                             }
                             ConstCtor::SpvInst { .. } => (ct_def.attrs, None),
+
+                            // Not inserted into `globals` while visiting.
+                            ConstCtor::SpvStringLiteralForExtInst(_) => unreachable!(),
                         }
                     }
                 };
@@ -922,7 +965,11 @@ impl LazyInst<'_, '_> {
         let cx = module.cx_ref();
 
         let value_to_id = |parent_func: &FuncLifting, v| match v {
-            Value::Const(ct) => ids.globals[&Global::Const(ct)],
+            Value::Const(ct) => match cx[ct].ctor {
+                ConstCtor::SpvStringLiteralForExtInst(s) => ids.debug_strings[&cx[s]],
+
+                _ => ids.globals[&Global::Const(ct)],
+            },
             Value::ControlRegionInput { region, input_idx } => {
                 let input_idx = usize::try_from(input_idx).unwrap();
                 match parent_func.region_inputs_source[&region] {
@@ -965,6 +1012,9 @@ impl LazyInst<'_, '_> {
                                 })
                                 .collect(),
                         },
+
+                        // Not inserted into `globals` while visiting.
+                        TypeCtor::SpvStringLiteralForExtInst => unreachable!(),
                     }
                 }
                 Global::Const(ct) => {
@@ -1009,6 +1059,9 @@ impl LazyInst<'_, '_> {
                                 .map(|&ct| ids.globals[&Global::Const(ct)])
                                 .collect(),
                         },
+
+                        // Not inserted into `globals` while visiting.
+                        ConstCtor::SpvStringLiteralForExtInst(_) => unreachable!(),
                     }
                 }
             },

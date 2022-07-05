@@ -171,14 +171,10 @@ pub struct TypeDef {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TypeCtor {
     SpvInst(spv::Inst),
-}
 
-impl TypeCtor {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::SpvInst(inst) => inst.opcode.name(),
-        }
-    }
+    /// The type of a `ConstCtor::SpvStringLiteralForExtInst` constant, i.e.
+    /// a SPIR-V `OpString` with no actual type in SPIR-V.
+    SpvStringLiteralForExtInst,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -201,6 +197,11 @@ pub enum ConstCtor {
     PtrToGlobalVar(GlobalVar),
 
     SpvInst(spv::Inst),
+
+    /// SPIR-V `OpString`, but only when used as an operand for an `OpExtInst`,
+    /// which can't have literals itself - for non-string literals `OpConstant*`
+    /// are readily usable, but only `OpString` is supported for string literals.
+    SpvStringLiteralForExtInst(InternedStr),
 }
 
 /// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,

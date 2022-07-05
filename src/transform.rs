@@ -333,7 +333,8 @@ impl InnerTransform for TypeDef {
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
             ctor -> match ctor {
-                TypeCtor::SpvInst(_)  => Transformed::Unchanged,
+                TypeCtor::SpvInst(_)
+                | TypeCtor::SpvStringLiteralForExtInst => Transformed::Unchanged,
             },
             ctor_args -> Transformed::map_iter(ctor_args.iter(), |arg| match *arg {
                 TypeCtorArg::Type(ty) => transform!({
@@ -369,7 +370,8 @@ impl InnerTransform for ConstDef {
                     gv -> transformer.transform_global_var_use(*gv),
                 } => ConstCtor::PtrToGlobalVar(gv)),
 
-                ConstCtor::SpvInst(_)  => Transformed::Unchanged
+                ConstCtor::SpvInst(_)
+                | ConstCtor::SpvStringLiteralForExtInst(_) => Transformed::Unchanged
             },
             ctor_args -> Transformed::map_iter(
                 ctor_args.iter(),

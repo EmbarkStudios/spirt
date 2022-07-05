@@ -244,7 +244,7 @@ impl InnerVisit for TypeDef {
 
         visitor.visit_attr_set_use(*attrs);
         match ctor {
-            TypeCtor::SpvInst(_) => {}
+            TypeCtor::SpvInst(_) | TypeCtor::SpvStringLiteralForExtInst => {}
         }
         for &arg in ctor_args {
             match arg {
@@ -268,7 +268,7 @@ impl InnerVisit for ConstDef {
         visitor.visit_type_use(*ty);
         match *ctor {
             ConstCtor::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
-            ConstCtor::SpvInst(_) => {}
+            ConstCtor::SpvInst(_) | ConstCtor::SpvStringLiteralForExtInst(_) => {}
         }
         for &ct in ctor_args {
             visitor.visit_const_use(ct);

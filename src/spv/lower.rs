@@ -1120,10 +1120,31 @@ impl Module {
                             "unsupported use of {} outside `OpFunctionCall`",
                             id_def.descr(&cx),
                         ))),
-                        Some(id_def @ IdDef::SpvDebugString(_)) => Err(invalid(&format!(
-                            "unsupported use of {} outside `OpSource` or `OpLine`",
-                            id_def.descr(&cx),
-                        ))),
+                        Some(id_def @ IdDef::SpvDebugString(s)) => {
+                            if opcode == wk.OpExtInst {
+                                // HACK(eddyb) intern `OpString`s as `Const`s on
+                                // the fly, as it's a less likely usage than the
+                                // `OpLine` one.
+                                let ty = cx.intern(TypeDef {
+                                    attrs: AttrSet::default(),
+                                    ctor: TypeCtor::SpvStringLiteralForExtInst,
+                                    ctor_args: [].into_iter().collect(),
+                                });
+                                let ct = cx.intern(ConstDef {
+                                    attrs: AttrSet::default(),
+                                    ty,
+                                    ctor: ConstCtor::SpvStringLiteralForExtInst(*s),
+                                    ctor_args: [].into_iter().collect(),
+                                });
+                                Ok(LocalIdDef::Value(Value::Const(ct)))
+                            } else {
+                                Err(invalid(&format!(
+                                    "unsupported use of {} outside `OpSource`, \
+                                     `OpLine`, or `OpExtInst`",
+                                    id_def.descr(&cx),
+                                )))
+                            }
+                        }
                         Some(id_def @ IdDef::SpvExtInstImport(_)) => Err(invalid(&format!(
                             "unsupported use of {} outside `OpExtInst`",
                             id_def.descr(&cx),
