@@ -1,13 +1,14 @@
 //! SPIR-T to SPIR-V lifting.
 
+use crate::func_at::FuncAt;
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
     cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl,
-    DataInst, DataInstDef, DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee,
-    Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl, DataInst,
+    DataInstDef, DataInstKind, DeclDef, EntityList, ExportKey, Exportee, Func, FuncDecl, FuncParam,
+    FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
+    ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -15,7 +16,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::{io, iter, mem};
+use std::{io, iter, mem, slice};
 
 impl spv::Dialect {
     fn capability_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
@@ -234,28 +235,41 @@ struct AllocatedIds<'a> {
 struct FuncLifting<'a> {
     func_id: spv::Id,
     param_ids: SmallVec<[spv::Id; 4]>,
-    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
-    data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
-    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
-    label_ids: FxHashMap<cfg::ControlPoint, spv::Id>,
-    // FIXME(eddyb) use `EntityOrientedDenseMap` here (modulo iteration?).
-    blocks: FxIndexMap<cfg::ControlPoint, BlockLifting<'a>>,
+
     // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     region_inputs_source: FxHashMap<ControlRegion, RegionInputsSource>,
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
+    data_inst_output_ids: FxHashMap<DataInst, spv::Id>,
+
+    label_ids: FxHashMap<CfgPoint, spv::Id>,
+    blocks: FxIndexMap<CfgPoint, BlockLifting<'a>>,
 }
 
 /// What determines the values for `Value::ControlRegionInput`s, for a specific
 /// region (effectively the subset of "region parents" that support inputs).
+///
+/// Note that this is not used when a `cfg::ControlInst` has `target_inputs`,
+/// and the target `ControlRegion` itself has phis for its `inputs`.
 enum RegionInputsSource {
     FuncParams,
     LoopHeaderPhis(ControlNode),
 }
 
+/// Any of the possible points in structured or unstructured SPIR-T control-flow,
+/// that may require a separate SPIR-V basic block.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum CfgPoint {
+    RegionEntry(ControlRegion),
+    RegionExit(ControlRegion),
+
+    ControlNodeEntry(ControlNode),
+    ControlNodeExit(ControlNode),
+}
+
 struct BlockLifting<'a> {
     phis: SmallVec<[Phi; 2]>,
     insts: SmallVec<[EntityList<DataInst>; 1]>,
-    merge: Option<Merge<cfg::ControlPoint>>,
-    terminator: Cow<'a, cfg::ControlInst>,
+    terminator: Terminator<'a>,
 }
 
 struct Phi {
@@ -263,12 +277,36 @@ struct Phi {
     ty: Type,
 
     result_id: spv::Id,
-    cases: FxIndexMap<cfg::ControlPoint, Value>,
+    cases: FxIndexMap<CfgPoint, Value>,
 
     // HACK(eddyb) used for `Loop` `initial_inputs`, to indicate that any edge
     // to the `Loop` (other than the backedge, which is already in `cases`)
     // should automatically get an entry into `cases`, with this value.
     default_value: Option<Value>,
+}
+
+/// Similar to `cfg::ControlInst`, except:
+/// * `targets` use `CfgPoint`s instead of `ControlRegion`s, to be able to
+///   reach any of the SPIR-V blocks being created during lifting
+/// * φ ("phi") values can be provided for targets regardless of "which side" of
+///   the structured control-flow they are for ("region input" vs "node output")
+/// * optional `merge` (for `OpSelectionMerge`/`OpLoopMerge`)
+/// * existing data is borrowed (from the `FuncDefBody`) wherever possible
+struct Terminator<'a> {
+    attrs: AttrSet,
+
+    kind: Cow<'a, cfg::ControlInstKind>,
+
+    // FIXME(eddyb) use `Cow` or something, but ideally the "owned" case always
+    // has at most one input, so allocating a whole `Vec` for that seems unwise.
+    inputs: SmallVec<[Value; 2]>,
+
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    targets: SmallVec<[CfgPoint; 4]>,
+
+    target_phi_values: FxIndexMap<CfgPoint, &'a [Value]>,
+
+    merge: Option<Merge<CfgPoint>>,
 }
 
 #[derive(Copy, Clone)]
@@ -280,11 +318,7 @@ enum Merge<L> {
         loop_merge: L,
 
         /// The label just after the loop body, i.e. the `continue` target.
-        ///
-        /// Note that this cannot (always) be `Exit(body.children.last)`, as
-        /// that may very well be the merge of a `Select`/`Loop` at the end of
-        /// the body, and SPIR-V requires unique merge blocks.
-        loop_continue: L,
+        body_merge: L,
     },
 }
 
@@ -302,26 +336,6 @@ impl<'a> NeedsIdsCollector<'a> {
             global_vars_seen: _,
             funcs,
         } = self;
-
-        // HACK(eddyb) because CFG reconstruction refers only to `ControlNode`s
-        // (typically via `cfg::ControlPoint`), and the `FuncDefBody`s being
-        // lifted are immutable, any additional CFG points that may be needed
-        // (such as for the loop body "continue" merge) have to be represented
-        // in some other way, or `ControlNode`s be allocated hackily elsewhere
-        // (this does the latter, to avoid changing many type definitions).
-        let mut extra_control_node_defs = EntityDefs::new();
-        let mut alloc_extra_control_point = || {
-            cfg::ControlPoint::Exit(
-                extra_control_node_defs.define(
-                    cx,
-                    ControlNodeDef {
-                        kind: ControlNodeKind::UnstructuredMerge,
-                        outputs: Default::default(),
-                    }
-                    .into(),
-                ),
-            )
-        };
 
         Ok(AllocatedIds {
             ext_inst_imports: ext_inst_imports
@@ -341,15 +355,155 @@ impl<'a> NeedsIdsCollector<'a> {
                 .map(|func| {
                     Ok((
                         func,
-                        FuncLifting::from_func_decl(
-                            cx,
-                            &module.funcs[func],
-                            || alloc_id(),
-                            || alloc_extra_control_point(),
-                        )?,
+                        FuncLifting::from_func_decl(cx, &module.funcs[func], || alloc_id())?,
                     ))
                 })
                 .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+/// Helper type for deep traversal of the CFG (as a graph of `CfgPoint`s), which
+/// tracks the necessary context for navigating a `ControlRegion`/`ControlNode`.
+#[derive(Copy, Clone)]
+struct CfgCursor<'p, P = CfgPoint> {
+    point: P,
+    parent: Option<&'p CfgCursor<'p, ControlParent>>,
+}
+
+enum ControlParent {
+    Region(ControlRegion),
+    ControlNode(ControlNode),
+}
+
+impl<'a, 'p> FuncAt<'a, CfgCursor<'p>> {
+    /// Return the next `CfgPoint` (wrapped in `CfgCursor`) in a linear
+    /// chain within structured control-flow (i.e. no branching to child regions).
+    fn unique_successor(self) -> Option<CfgCursor<'p>> {
+        let cursor = self.position;
+        match cursor.point {
+            // Entering a `ControlRegion` enters its first `ControlNode` child.
+            CfgPoint::RegionEntry(region) => Some(CfgCursor {
+                point: CfgPoint::ControlNodeEntry(self.at(region).def().children.iter().first),
+                parent: cursor.parent,
+            }),
+
+            // Exiting a `ControlRegion` exits its parent `ControlNode`.
+            CfgPoint::RegionExit(_) => cursor.parent.map(|parent| match parent.point {
+                ControlParent::Region(_) => unreachable!(),
+                ControlParent::ControlNode(parent_control_node) => CfgCursor {
+                    point: CfgPoint::ControlNodeExit(parent_control_node),
+                    parent: parent.parent,
+                },
+            }),
+
+            // Entering a `ControlNode` depends entirely on the `ControlNodeKind`.
+            CfgPoint::ControlNodeEntry(control_node) => match self.at(control_node).def().kind {
+                ControlNodeKind::Block { .. } => Some(CfgCursor {
+                    point: CfgPoint::ControlNodeExit(control_node),
+                    parent: cursor.parent,
+                }),
+
+                ControlNodeKind::Select { .. } | ControlNodeKind::Loop { .. } => None,
+            },
+
+            // Exiting a `ControlNode` chains to a sibling/parent.
+            CfgPoint::ControlNodeExit(control_node) => {
+                Some(match self.control_nodes[control_node].next_in_list() {
+                    // Enter the next sibling in the `ControlRegion`, if one exists.
+                    Some(next_control_node) => CfgCursor {
+                        point: CfgPoint::ControlNodeEntry(next_control_node),
+                        parent: cursor.parent,
+                    },
+
+                    // Exit the parent `ControlRegion`.
+                    None => {
+                        let parent = cursor.parent.unwrap();
+                        match cursor.parent.unwrap().point {
+                            ControlParent::Region(parent_region) => CfgCursor {
+                                point: CfgPoint::RegionExit(parent_region),
+                                parent: parent.parent,
+                            },
+                            ControlParent::ControlNode(_) => unreachable!(),
+                        }
+                    }
+                })
+            }
+        }
+    }
+}
+
+impl<'a> FuncAt<'a, ControlRegion> {
+    /// Traverse every `CfgPoint` (deeply) contained in this `ControlRegion`,
+    /// in reverse post-order (RPO), with `f` receiving each `CfgPoint`
+    /// in turn (wrapped in `CfgCursor`, for further traversal flexibility),
+    /// and being able to stop iteration by returning `Err`.
+    ///
+    /// RPO iteration over a CFG provides certain guarantees, most importantly
+    /// that SSA definitions are visited before any of their uses.
+    fn rev_post_order_try_for_each<E>(
+        self,
+        mut f: impl FnMut(CfgCursor<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.rev_post_order_try_for_each_inner(&mut f, None)
+    }
+
+    fn rev_post_order_try_for_each_inner<E>(
+        self,
+        f: &mut impl FnMut(CfgCursor<'_>) -> Result<(), E>,
+        parent: Option<&CfgCursor<'_, ControlParent>>,
+    ) -> Result<(), E> {
+        let region = self.position;
+        f(CfgCursor {
+            point: CfgPoint::RegionEntry(region),
+            parent,
+        })?;
+        for func_at_control_node in self.at_children() {
+            func_at_control_node.rev_post_order_try_for_each_inner(
+                f,
+                &CfgCursor {
+                    point: ControlParent::Region(region),
+                    parent,
+                },
+            )?;
+        }
+        f(CfgCursor {
+            point: CfgPoint::RegionExit(region),
+            parent,
+        })
+    }
+}
+
+impl<'a> FuncAt<'a, ControlNode> {
+    fn rev_post_order_try_for_each_inner<E>(
+        self,
+        f: &mut impl FnMut(CfgCursor<'_>) -> Result<(), E>,
+        parent: &CfgCursor<'_, ControlParent>,
+    ) -> Result<(), E> {
+        let child_regions: &[_] = match &self.def().kind {
+            ControlNodeKind::Block { .. } => &[],
+            ControlNodeKind::Select { cases, .. } => cases,
+            ControlNodeKind::Loop { body, .. } => slice::from_ref(body),
+        };
+
+        let control_node = self.position;
+        let parent = Some(parent);
+        f(CfgCursor {
+            point: CfgPoint::ControlNodeEntry(control_node),
+            parent,
+        })?;
+        for &region in child_regions {
+            self.at(region).rev_post_order_try_for_each_inner(
+                f,
+                Some(&CfgCursor {
+                    point: ControlParent::ControlNode(control_node),
+                    parent,
+                }),
+            )?;
+        }
+        f(CfgCursor {
+            point: CfgPoint::ControlNodeExit(control_node),
+            parent,
         })
     }
 }
@@ -359,7 +513,6 @@ impl<'a> FuncLifting<'a> {
         cx: &Context,
         func_decl: &'a FuncDecl,
         mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
-        mut alloc_extra_control_point: impl FnMut() -> cfg::ControlPoint,
     ) -> Result<Self, E> {
         let wk = &spec::Spec::get().well_known;
 
@@ -375,10 +528,10 @@ impl<'a> FuncLifting<'a> {
                 return Ok(Self {
                     func_id,
                     param_ids,
+                    region_inputs_source: Default::default(),
                     data_inst_output_ids: Default::default(),
                     label_ids: Default::default(),
                     blocks: Default::default(),
-                    region_inputs_source: Default::default(),
                 });
             }
             DeclDef::Present(def) => def,
@@ -388,310 +541,299 @@ impl<'a> FuncLifting<'a> {
         region_inputs_source.insert(func_def_body.body, RegionInputsSource::FuncParams);
 
         // Create a SPIR-V block for every CFG point needing one.
-        let mut blocks = FxIndexMap::<_, BlockLifting>::default();
-        let mut visit_point_range = |point_range: cfg::ControlPointRange| {
-            let func_at_point_range = func_def_body.at(point_range);
-            func_at_point_range.rev_post_order_try_for_each(|func_at_point_cursor| {
-                let point_cursor = func_at_point_cursor.position;
-                let point = point_cursor.position;
-                let control_node_def = &func_def_body.control_nodes[point.control_node()];
+        let mut blocks = FxIndexMap::default();
+        let mut visit_cfg_point = |point_cursor: CfgCursor| {
+            let point = point_cursor.point;
 
-                let unstructured_terminator = func_def_body
-                    .unstructured_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.control_insts.get(point));
+            let phis = match point {
+                CfgPoint::RegionEntry(region) => {
+                    if region_inputs_source.contains_key(&region) {
+                        // Region inputs handled by the parent of the region.
+                        SmallVec::new()
+                    } else {
+                        func_def_body
+                            .at(region)
+                            .def()
+                            .inputs
+                            .iter()
+                            .map(|&ControlRegionInputDecl { attrs, ty }| {
+                                Ok(Phi {
+                                    attrs,
+                                    ty,
 
-                let mut phis: SmallVec<[_; 2]> = match point {
-                    cfg::ControlPoint::Entry(_) => {
-                        assert!(unstructured_terminator.is_none());
-                        match &control_node_def.kind {
-                            // The backedge of a SPIR-V structured loop points to
-                            // the "loop header", i.e. the `Entry` of the `Loop`,
-                            // so that's where `body` `inputs` phis have to go.
-                            ControlNodeKind::Loop {
-                                initial_inputs,
-                                body,
-                                ..
-                            } => {
-                                let loop_body_def = func_at_point_cursor.at(*body).def();
-                                let loop_body_inputs = &loop_body_def.inputs;
-
-                                if !loop_body_inputs.is_empty() {
-                                    region_inputs_source.insert(
-                                        *body,
-                                        RegionInputsSource::LoopHeaderPhis(point.control_node()),
-                                    );
-                                }
-
-                                loop_body_inputs
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, &ControlRegionInputDecl { attrs, ty })| {
-                                        Ok(Phi {
-                                            attrs,
-                                            ty,
-
-                                            result_id: alloc_id()?,
-                                            cases: FxIndexMap::default(),
-                                            default_value: Some(initial_inputs[i]),
-                                        })
-                                    })
-                                    .collect::<Result<_, _>>()?
-                            }
-                            _ => SmallVec::new(),
-                        }
-                    }
-                    cfg::ControlPoint::Exit(_) => control_node_def
-                        .outputs
-                        .iter()
-                        .map(|&ControlNodeOutputDecl { attrs, ty }| {
-                            Ok(Phi {
-                                attrs,
-                                ty,
-
-                                result_id: alloc_id()?,
-                                cases: FxIndexMap::default(),
-                                default_value: None,
+                                    result_id: alloc_id()?,
+                                    cases: FxIndexMap::default(),
+                                    default_value: None,
+                                })
                             })
-                        })
-                        .collect::<Result<_, _>>()?,
-                };
-
-                let insts = match (point, &control_node_def.kind) {
-                    (cfg::ControlPoint::Entry(_), &ControlNodeKind::Block { insts }) => {
-                        insts.into_iter().collect()
+                            .collect::<Result<_, _>>()?
                     }
-                    _ => SmallVec::new(),
-                };
+                }
+                CfgPoint::RegionExit(_) => SmallVec::new(),
 
-                let mut merge = None;
-                let mut extra_block_to_append_after_current_one = None;
-                let terminator = match unstructured_terminator {
-                    Some(terminator) => Cow::Borrowed(terminator),
+                CfgPoint::ControlNodeEntry(control_node) => {
+                    match &func_def_body.at(control_node).def().kind {
+                        // The backedge of a SPIR-V structured loop points to
+                        // the "loop header", i.e. the `Entry` of the `Loop`,
+                        // so that's where `body` `inputs` phis have to go.
+                        ControlNodeKind::Loop {
+                            initial_inputs,
+                            body,
+                            ..
+                        } => {
+                            let loop_body_def = func_def_body.at(*body).def();
+                            let loop_body_inputs = &loop_body_def.inputs;
 
-                    // Structured control-flow, reconstruct a terminator.
-                    None => Cow::Owned(match (point, func_at_point_cursor.unique_successor()) {
-                        // Entering a `ControlNode` with child `ControlRegion`s.
-                        (cfg::ControlPoint::Entry(_), None) => match &control_node_def.kind {
-                            ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => {
-                                unreachable!()
+                            if !loop_body_inputs.is_empty() {
+                                region_inputs_source.insert(
+                                    *body,
+                                    RegionInputsSource::LoopHeaderPhis(control_node),
+                                );
                             }
 
-                            ControlNodeKind::Select {
-                                kind,
-                                scrutinee,
-                                cases,
-                            } => {
-                                merge = Some(Merge::Selection(cfg::ControlPoint::Exit(
-                                    point.control_node(),
-                                )));
-                                cfg::ControlInst {
-                                    attrs: AttrSet::default(),
-                                    kind: cfg::ControlInstKind::SelectBranch(kind.clone()),
-                                    inputs: [*scrutinee].into_iter().collect(),
-                                    targets: cases
-                                        .iter()
-                                        .map(|&case| {
-                                            let func_at_case = func_at_point_cursor.at(case);
-                                            let case_children = func_at_case.def().children.iter();
+                            loop_body_inputs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &ControlRegionInputDecl { attrs, ty })| {
+                                    Ok(Phi {
+                                        attrs,
+                                        ty,
 
-                                            cfg::ControlPoint::Entry(case_children.first)
-                                        })
-                                        .collect(),
-                                    target_merge_outputs: FxIndexMap::default(),
-                                }
-                            }
+                                        result_id: alloc_id()?,
+                                        cases: FxIndexMap::default(),
+                                        default_value: Some(initial_inputs[i]),
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?
+                        }
+                        _ => SmallVec::new(),
+                    }
+                }
+                CfgPoint::ControlNodeExit(control_node) => func_def_body
+                    .at(control_node)
+                    .def()
+                    .outputs
+                    .iter()
+                    .map(|&ControlNodeOutputDecl { attrs, ty }| {
+                        Ok(Phi {
+                            attrs,
+                            ty,
 
-                            ControlNodeKind::Loop {
-                                initial_inputs: _,
-                                body,
-                                repeat_condition: _,
-                            } => {
-                                let func_at_loop_body = func_at_point_cursor.at(*body);
-                                let loop_body_def = func_at_loop_body.def();
+                            result_id: alloc_id()?,
+                            cases: FxIndexMap::default(),
+                            default_value: None,
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+            };
 
-                                // HACK(eddyb) the loop body "continue" merge
-                                // cannot (always) be `Exit(body.children.last)`,
-                                // as that may very well be the merge of a
-                                // `Select`/`Loop` at the end of the body, and
-                                // SPIR-V requires unique merge blocks, so here
-                                // a fresh `cfg::ControlPoint` is allocated to
-                                // serve as a separate merge block.
-                                // To keep blocks in the right order, an entry
-                                // into `blocks` is only inserted later, just
-                                // after `Exit(body.body.children.last)`.
-                                let loop_continue = alloc_extra_control_point();
+            let insts = match point {
+                CfgPoint::ControlNodeEntry(control_node) => {
+                    match func_def_body.at(control_node).def().kind {
+                        ControlNodeKind::Block { insts } => insts.into_iter().collect(),
+                        _ => SmallVec::new(),
+                    }
+                }
+                _ => SmallVec::new(),
+            };
 
-                                // Forward `body` `outputs` to the loop phis.
-                                for (i, phi) in phis.iter_mut().enumerate() {
-                                    phi.cases.insert(loop_continue, loop_body_def.outputs[i]);
-                                }
-
-                                merge = Some(Merge::Loop {
-                                    loop_merge: cfg::ControlPoint::Exit(point.control_node()),
-                                    loop_continue,
-                                });
-                                cfg::ControlInst {
-                                    attrs: AttrSet::default(),
-                                    kind: cfg::ControlInstKind::Branch,
-                                    inputs: [].into_iter().collect(),
-                                    targets: [cfg::ControlPoint::Entry(
-                                        loop_body_def.children.iter().first,
-                                    )]
-                                    .into_iter()
-                                    .collect(),
-                                    target_merge_outputs: FxIndexMap::default(),
-                                }
-                            }
-                        },
-
-                        // Exiting the root `ControlRegion` (function body).
-                        (cfg::ControlPoint::Exit(_), None) => cfg::ControlInst {
+            // Get the terminator, or reconstruct it from structured control-flow.
+            let terminator = match (point, func_def_body.at(point_cursor).unique_successor()) {
+                // Exiting a `ControlRegion` w/o a structured parent.
+                (CfgPoint::RegionExit(region), None) => {
+                    let unstructured_terminator = func_def_body
+                        .unstructured_cfg
+                        .as_ref()
+                        .and_then(|cfg| cfg.control_inst_on_exit_from.get(region));
+                    if let Some(terminator) = unstructured_terminator {
+                        let cfg::ControlInst {
+                            attrs,
+                            kind,
+                            inputs,
+                            targets,
+                            target_inputs,
+                        } = terminator;
+                        Terminator {
+                            attrs: *attrs,
+                            kind: Cow::Borrowed(kind),
+                            // FIXME(eddyb) borrow these whenever possible.
+                            inputs: inputs.clone(),
+                            targets: targets
+                                .iter()
+                                .map(|&target| CfgPoint::RegionEntry(target))
+                                .collect(),
+                            target_phi_values: target_inputs
+                                .iter()
+                                .map(|(&target, target_inputs)| {
+                                    (CfgPoint::RegionEntry(target), &target_inputs[..])
+                                })
+                                .collect(),
+                            merge: None,
+                        }
+                    } else {
+                        // Structured return out of the function body.
+                        assert!(region == func_def_body.body);
+                        Terminator {
                             attrs: AttrSet::default(),
-                            kind: cfg::ControlInstKind::Return,
+                            kind: Cow::Owned(cfg::ControlInstKind::Return),
                             inputs: func_def_body.at_body().def().outputs.clone(),
                             targets: [].into_iter().collect(),
-                            target_merge_outputs: FxIndexMap::default(),
+                            target_phi_values: FxIndexMap::default(),
+                            merge: None,
+                        }
+                    }
+                }
+
+                // Entering a `ControlNode` with child `ControlRegion`s.
+                (CfgPoint::ControlNodeEntry(control_node), None) => {
+                    let control_node_def = func_def_body.at(control_node).def();
+                    match &control_node_def.kind {
+                        ControlNodeKind::Block { .. } => {
+                            unreachable!()
+                        }
+
+                        ControlNodeKind::Select {
+                            kind,
+                            scrutinee,
+                            cases,
+                        } => Terminator {
+                            attrs: AttrSet::default(),
+                            kind: Cow::Owned(cfg::ControlInstKind::SelectBranch(kind.clone())),
+                            inputs: [*scrutinee].into_iter().collect(),
+                            targets: cases
+                                .iter()
+                                .map(|&case| CfgPoint::RegionEntry(case))
+                                .collect(),
+                            target_phi_values: FxIndexMap::default(),
+                            merge: Some(Merge::Selection(CfgPoint::ControlNodeExit(control_node))),
                         },
 
-                        // Exiting the parent `ControlRegion`.
-                        (_, Some((func_at_succ_cursor, Some(parent_region_outputs)))) => {
-                            assert!(matches!(point, cfg::ControlPoint::Exit(_)));
+                        ControlNodeKind::Loop {
+                            initial_inputs: _,
+                            body,
+                            repeat_condition: _,
+                        } => Terminator {
+                            attrs: AttrSet::default(),
+                            kind: Cow::Owned(cfg::ControlInstKind::Branch),
+                            inputs: [].into_iter().collect(),
+                            targets: [CfgPoint::RegionEntry(*body)].into_iter().collect(),
+                            target_phi_values: FxIndexMap::default(),
+                            merge: Some(Merge::Loop {
+                                loop_merge: CfgPoint::ControlNodeExit(control_node),
+                                body_merge: CfgPoint::RegionExit(*body),
+                            }),
+                        },
+                    }
+                }
 
-                            let succ_cursor = func_at_succ_cursor.position;
-                            assert!(matches!(succ_cursor.position, cfg::ControlPoint::Exit(_)));
+                // Exiting a `ControlRegion` to the parent `ControlNode`.
+                (CfgPoint::RegionExit(region), Some(parent_exit_cursor)) => {
+                    let region_outputs = Some(&func_def_body.at(region).def().outputs[..])
+                        .filter(|outputs| !outputs.is_empty());
 
-                            let parent_node = succ_cursor.position.control_node();
-                            let func_at_parent_node = func_at_succ_cursor.at(parent_node);
+                    let parent_exit = parent_exit_cursor.point;
+                    let parent_node = match parent_exit {
+                        CfgPoint::ControlNodeExit(parent_node) => parent_node,
+                        _ => unreachable!(),
+                    };
 
-                            match func_at_parent_node.def().kind {
-                                ControlNodeKind::UnstructuredMerge
-                                | ControlNodeKind::Block { .. } => {
-                                    unreachable!()
+                    match func_def_body.at(parent_node).def().kind {
+                        ControlNodeKind::Block { .. } => {
+                            unreachable!()
+                        }
+
+                        ControlNodeKind::Select { .. } => Terminator {
+                            attrs: AttrSet::default(),
+                            kind: Cow::Owned(cfg::ControlInstKind::Branch),
+                            inputs: [].into_iter().collect(),
+                            targets: [parent_exit].into_iter().collect(),
+                            target_phi_values: region_outputs
+                                .map(|outputs| (parent_exit, outputs))
+                                .into_iter()
+                                .collect(),
+                            merge: None,
+                        },
+
+                        ControlNodeKind::Loop {
+                            initial_inputs: _,
+                            body: _,
+                            repeat_condition,
+                        } => {
+                            let backedge = CfgPoint::ControlNodeEntry(parent_node);
+                            let target_phi_values = region_outputs
+                                .map(|outputs| (backedge, outputs))
+                                .into_iter()
+                                .collect();
+
+                            let is_infinite_loop = match repeat_condition {
+                                Value::Const(cond) => {
+                                    cx[cond].ctor == ConstCtor::SpvInst(wk.OpConstantTrue.into())
                                 }
 
-                                ControlNodeKind::Select { .. } => cfg::ControlInst {
+                                _ => false,
+                            };
+                            if is_infinite_loop {
+                                Terminator {
                                     attrs: AttrSet::default(),
-                                    kind: cfg::ControlInstKind::Branch,
+                                    kind: Cow::Owned(cfg::ControlInstKind::Branch),
                                     inputs: [].into_iter().collect(),
-                                    targets: [succ_cursor.position].into_iter().collect(),
-                                    target_merge_outputs: [(parent_node, parent_region_outputs)]
-                                        .into_iter()
-                                        .filter(|(_, outputs)| !outputs.is_empty())
-                                        .map(|(target, outputs)| {
-                                            (target, outputs.iter().copied().collect())
-                                        })
-                                        .collect(),
-                                },
-
-                                ControlNodeKind::Loop {
-                                    initial_inputs: _,
-                                    body: _,
-                                    repeat_condition,
-                                } => {
-                                    // HACK(eddyb) see the `Loop` handling above
-                                    // for more details, but in short, the actual
-                                    // backedge has to be attached to a special
-                                    // merge block that is separate from the
-                                    // original `Exit(body.children.last)`
-                                    // (which is the current block being built).
-                                    let loop_entry_block =
-                                        &blocks[&cfg::ControlPoint::Entry(parent_node)];
-                                    let loop_continue = match loop_entry_block.merge {
-                                        Some(Merge::Loop { loop_continue, .. }) => loop_continue,
-                                        _ => unreachable!(),
-                                    };
-
-                                    let is_infinite_loop = match repeat_condition {
-                                        Value::Const(cond) => {
-                                            cx[cond].ctor
-                                                == ConstCtor::SpvInst(wk.OpConstantTrue.into())
-                                        }
-
-                                        _ => false,
-                                    };
-
-                                    let backedge = cfg::ControlPoint::Entry(parent_node);
-                                    let break_point = cfg::ControlPoint::Exit(parent_node);
-
-                                    let loop_continue_terminator = if is_infinite_loop {
-                                        cfg::ControlInst {
-                                            attrs: AttrSet::default(),
-                                            kind: cfg::ControlInstKind::Branch,
-                                            inputs: [].into_iter().collect(),
-                                            targets: [backedge].into_iter().collect(),
-                                            target_merge_outputs: FxIndexMap::default(),
-                                        }
-                                    } else {
-                                        cfg::ControlInst {
-                                            attrs: AttrSet::default(),
-                                            kind: cfg::ControlInstKind::SelectBranch(
-                                                SelectionKind::BoolCond,
-                                            ),
-                                            inputs: [repeat_condition].into_iter().collect(),
-                                            targets: [backedge, break_point].into_iter().collect(),
-                                            target_merge_outputs: FxIndexMap::default(),
-                                        }
-                                    };
-                                    extra_block_to_append_after_current_one = Some((
-                                        loop_continue,
-                                        BlockLifting {
-                                            phis: Default::default(),
-                                            insts: Default::default(),
-                                            merge: None,
-                                            terminator: Cow::Owned(loop_continue_terminator),
-                                        },
-                                    ));
-
-                                    // All the body exit (i.e. this block) needs
-                                    // to do is branch to `loop_continue`.
-                                    cfg::ControlInst {
-                                        attrs: AttrSet::default(),
-                                        kind: cfg::ControlInstKind::Branch,
-                                        inputs: [].into_iter().collect(),
-                                        targets: [loop_continue].into_iter().collect(),
-                                        target_merge_outputs: FxIndexMap::default(),
-                                    }
+                                    targets: [backedge].into_iter().collect(),
+                                    target_phi_values,
+                                    merge: None,
+                                }
+                            } else {
+                                Terminator {
+                                    attrs: AttrSet::default(),
+                                    kind: Cow::Owned(cfg::ControlInstKind::SelectBranch(
+                                        SelectionKind::BoolCond,
+                                    )),
+                                    inputs: [repeat_condition].into_iter().collect(),
+                                    targets: [backedge, parent_exit].into_iter().collect(),
+                                    target_phi_values,
+                                    merge: None,
                                 }
                             }
                         }
+                    }
+                }
 
-                        // Siblings in the same `ControlRegion` (including the
-                        // implied edge from a `Block`'s `Entry` to its `Exit`).
-                        (_, Some((func_at_succ_cursor, None))) => cfg::ControlInst {
-                            attrs: AttrSet::default(),
-                            kind: cfg::ControlInstKind::Branch,
-                            inputs: [].into_iter().collect(),
-                            targets: [func_at_succ_cursor.position.position]
-                                .into_iter()
-                                .collect(),
-                            target_merge_outputs: FxIndexMap::default(),
-                        },
-                    }),
-                };
+                // Siblings in the same `ControlRegion` (including the
+                // implied edge from a `Block`'s `Entry` to its `Exit`).
+                (_, Some(succ_cursor)) => Terminator {
+                    attrs: AttrSet::default(),
+                    kind: Cow::Owned(cfg::ControlInstKind::Branch),
+                    inputs: [].into_iter().collect(),
+                    targets: [succ_cursor.point].into_iter().collect(),
+                    target_phi_values: FxIndexMap::default(),
+                    merge: None,
+                },
 
-                blocks.insert(
-                    point,
-                    BlockLifting {
-                        phis,
-                        insts,
-                        merge,
-                        terminator,
-                    },
-                );
+                // Impossible cases, they always return `(_, Some(_))`.
+                (CfgPoint::RegionEntry(_) | CfgPoint::ControlNodeExit(_), None) => {
+                    unreachable!()
+                }
+            };
 
-                blocks.extend(extra_block_to_append_after_current_one);
+            blocks.insert(
+                point,
+                BlockLifting {
+                    phis,
+                    insts,
+                    terminator,
+                },
+            );
 
-                Ok(())
-            })
+            Ok(())
         };
         match &func_def_body.unstructured_cfg {
-            None => visit_point_range(cfg::ControlPointRange::LinearChain(
-                func_def_body.at_body().def().children.iter(),
-            ))?,
+            None => func_def_body
+                .at_body()
+                .rev_post_order_try_for_each(visit_cfg_point)?,
             Some(cfg) => {
-                for point_range in cfg.rev_post_order(func_def_body) {
-                    visit_point_range(point_range)?;
+                for region in cfg.rev_post_order(func_def_body) {
+                    func_def_body
+                        .at(region)
+                        .rev_post_order_try_for_each(&mut visit_cfg_point)?
                 }
             }
         }
@@ -709,6 +851,7 @@ impl<'a> FuncLifting<'a> {
             .into_iter()
             .chain(blocks.values().flat_map(|block| {
                 block
+                    .terminator
                     .merge
                     .iter()
                     .flat_map(|merge| {
@@ -716,7 +859,7 @@ impl<'a> FuncLifting<'a> {
                             Merge::Selection(a) => (a, None),
                             Merge::Loop {
                                 loop_merge: a,
-                                loop_continue: b,
+                                body_merge: b,
                             } => (a, Some(b)),
                         };
                         [a].into_iter().chain(b)
@@ -744,25 +887,26 @@ impl<'a> FuncLifting<'a> {
         // to iterate at the same time as mutating other entries.
         for block_idx in (0..blocks.len()).rev() {
             let BlockLifting {
-                merge: original_merge,
                 terminator: original_terminator,
                 ..
             } = &blocks[block_idx];
 
-            let is_trivial_branch = original_merge.is_none() && {
-                let cfg::ControlInst {
+            let is_trivial_branch = {
+                let Terminator {
                     attrs,
                     kind,
                     inputs,
                     targets,
-                    target_merge_outputs,
-                } = &**original_terminator;
+                    target_phi_values,
+                    merge,
+                } = original_terminator;
 
                 *attrs == AttrSet::default()
-                    && matches!(kind, cfg::ControlInstKind::Branch)
+                    && matches!(**kind, cfg::ControlInstKind::Branch)
                     && inputs.is_empty()
                     && targets.len() == 1
-                    && target_merge_outputs.is_empty()
+                    && target_phi_values.is_empty()
+                    && merge.is_none()
             };
 
             if is_trivial_branch {
@@ -773,7 +917,6 @@ impl<'a> FuncLifting<'a> {
                     let BlockLifting {
                         phis: ref target_phis,
                         insts: ref mut extra_insts,
-                        merge: ref mut new_merge,
                         terminator: ref mut new_terminator,
                     } = blocks[&target];
 
@@ -781,22 +924,21 @@ impl<'a> FuncLifting<'a> {
                     // they start being tracked.
                     if target_phis.is_empty() {
                         let extra_insts = mem::take(extra_insts);
-                        let new_merge = new_merge.take();
                         let new_terminator = mem::replace(
                             new_terminator,
-                            Cow::Owned(cfg::ControlInst {
+                            Terminator {
                                 attrs: Default::default(),
-                                kind: cfg::ControlInstKind::Unreachable,
+                                kind: Cow::Owned(cfg::ControlInstKind::Unreachable),
                                 inputs: Default::default(),
                                 targets: Default::default(),
-                                target_merge_outputs: Default::default(),
-                            }),
+                                target_phi_values: Default::default(),
+                                merge: None,
+                            },
                         );
                         *target_use_count = 0;
 
                         let combined_block = &mut blocks[block_idx];
                         combined_block.insts.extend(extra_insts);
-                        combined_block.merge = new_merge;
                         combined_block.terminator = new_terminator;
                     }
                 }
@@ -810,35 +952,38 @@ impl<'a> FuncLifting<'a> {
         //
         // HACK(eddyb) this takes advantage of `blocks` being an `IndexMap`,
         // to iterate at the same time as mutating other entries.
-        for block_idx in 0..blocks.len() {
-            let (&source_point, BlockLifting { terminator, .. }) =
-                blocks.get_index(block_idx).unwrap();
-
-            // FIXME(eddyb) cloning only needed because not all `ControlInst`s
-            // are borrowed from the `Module`, some/most are synthesized above.
-            let targets = terminator.targets.clone();
-            let target_merge_outputs = terminator.target_merge_outputs.clone();
+        for source_block_idx in 0..blocks.len() {
+            let (&source_point, source_block) = blocks.get_index(source_block_idx).unwrap();
+            let targets = source_block.terminator.targets.clone();
 
             for target in targets {
-                let source_values = match target {
-                    cfg::ControlPoint::Exit(target_node) => target_merge_outputs.get(&target_node),
-                    _ => None,
+                let source_values = {
+                    let (_, source_block) = blocks.get_index(source_block_idx).unwrap();
+                    source_block
+                        .terminator
+                        .target_phi_values
+                        .get(&target)
+                        .copied()
                 };
                 let target_block = blocks.get_mut(&target).unwrap();
                 for (i, target_phi) in target_block.phis.iter_mut().enumerate() {
-                    let phi_case = target_phi.cases.entry(source_point);
-                    if let Some(default_value) = target_phi.default_value {
-                        // HACK(eddyb) this is only used for `Loop`s, which
-                        // start with only the backedge in `cases`, and must
-                        // receive other `cases` through here.
-                        assert!(source_values.is_none());
-                        phi_case.or_insert(default_value);
-                    } else {
-                        let source_value = source_values.unwrap()[i];
+                    use indexmap::map::Entry;
+
+                    let source_value = source_values
+                        .map(|values| values[i])
+                        .or(target_phi.default_value)
+                        .unwrap();
+                    match target_phi.cases.entry(source_point) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(source_value);
+                        }
+
                         // NOTE(eddyb) the only reason duplicates are allowed,
                         // is that `targets` may itself contain the same target
                         // multiple times (which would result in the same value).
-                        assert!(*phi_case.or_insert(source_value) == source_value);
+                        Entry::Occupied(entry) => {
+                            assert!(*entry.get() == source_value);
+                        }
                     }
                 }
             }
@@ -854,6 +999,7 @@ impl<'a> FuncLifting<'a> {
         Ok(Self {
             func_id,
             param_ids,
+            region_inputs_source,
             data_inst_output_ids: all_insts_with_output
                 .map(|inst| Ok((inst, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
@@ -861,8 +1007,7 @@ impl<'a> FuncLifting<'a> {
                 .keys()
                 .map(|&point| Ok((point, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
-            blocks: blocks,
-            region_inputs_source,
+            blocks,
         })
     }
 }
@@ -894,9 +1039,9 @@ enum LazyInst<'a, 'b> {
         data_inst_def: &'a DataInstDef,
     },
     Merge(Merge<spv::Id>),
-    ControlInst {
+    Terminator {
         parent_func: &'b FuncLifting<'a>,
-        control_inst: &'a cfg::ControlInst,
+        terminator: &'b Terminator<'a>,
     },
     OpFunctionEnd,
 }
@@ -952,10 +1097,10 @@ impl LazyInst<'_, '_> {
                 data_inst_def,
             } => (result_id, data_inst_def.attrs, None),
             Self::Merge(_) => (None, AttrSet::default(), None),
-            Self::ControlInst {
+            Self::Terminator {
                 parent_func: _,
-                control_inst,
-            } => (None, control_inst.attrs, None),
+                terminator,
+            } => (None, terminator.attrs, None),
             Self::OpFunctionEnd => (None, AttrSet::default(), None),
         }
     }
@@ -972,11 +1117,14 @@ impl LazyInst<'_, '_> {
             },
             Value::ControlRegionInput { region, input_idx } => {
                 let input_idx = usize::try_from(input_idx).unwrap();
-                match parent_func.region_inputs_source[&region] {
-                    RegionInputsSource::FuncParams => parent_func.param_ids[input_idx],
-                    RegionInputsSource::LoopHeaderPhis(loop_node) => {
-                        parent_func.blocks[&cfg::ControlPoint::Entry(loop_node)].phis[input_idx]
+                match parent_func.region_inputs_source.get(&region) {
+                    Some(RegionInputsSource::FuncParams) => parent_func.param_ids[input_idx],
+                    Some(&RegionInputsSource::LoopHeaderPhis(loop_node)) => {
+                        parent_func.blocks[&CfgPoint::ControlNodeEntry(loop_node)].phis[input_idx]
                             .result_id
+                    }
+                    None => {
+                        parent_func.blocks[&CfgPoint::RegionEntry(region)].phis[input_idx].result_id
                     }
                 }
             }
@@ -984,7 +1132,7 @@ impl LazyInst<'_, '_> {
                 control_node,
                 output_idx,
             } => {
-                parent_func.blocks[&cfg::ControlPoint::Exit(control_node)].phis
+                parent_func.blocks[&CfgPoint::ControlNodeExit(control_node)].phis
                     [usize::try_from(output_idx).unwrap()]
                 .result_id
             }
@@ -1171,7 +1319,7 @@ impl LazyInst<'_, '_> {
             },
             Self::Merge(Merge::Loop {
                 loop_merge: merge_label_id,
-                loop_continue: continue_label_id,
+                body_merge: continue_label_id,
             }) => spv::InstWithIds {
                 without_ids: spv::Inst {
                     opcode: wk.OpLoopMerge,
@@ -1181,14 +1329,14 @@ impl LazyInst<'_, '_> {
                 result_id: None,
                 ids: [merge_label_id, continue_label_id].into_iter().collect(),
             },
-            Self::ControlInst {
+            Self::Terminator {
                 parent_func,
-                control_inst,
+                terminator,
             } => {
-                let inst = match &control_inst.kind {
+                let inst = match &*terminator.kind {
                     cfg::ControlInstKind::Unreachable => wk.OpUnreachable.into(),
                     cfg::ControlInstKind::Return => {
-                        if control_inst.inputs.is_empty() {
+                        if terminator.inputs.is_empty() {
                             wk.OpReturn.into()
                         } else {
                             wk.OpReturnValue.into()
@@ -1211,12 +1359,12 @@ impl LazyInst<'_, '_> {
                     without_ids: inst,
                     result_type_id: None,
                     result_id: None,
-                    ids: control_inst
+                    ids: terminator
                         .inputs
                         .iter()
                         .map(|&v| value_to_id(parent_func, v))
                         .chain(
-                            control_inst
+                            terminator
                                 .targets
                                 .iter()
                                 .map(|&target| parent_func.label_ids[&target]),
@@ -1338,7 +1486,6 @@ impl Module {
                         let BlockLifting {
                             phis,
                             insts,
-                            merge,
                             terminator,
                         } = block;
 
@@ -1366,23 +1513,23 @@ impl Module {
                                     }
                                 }),
                         )
-                        .chain(merge.map(|merge| {
+                        .chain(terminator.merge.map(|merge| {
                             LazyInst::Merge(match merge {
                                 Merge::Selection(merge) => {
                                     Merge::Selection(func_lifting.label_ids[&merge])
                                 }
                                 Merge::Loop {
                                     loop_merge,
-                                    loop_continue,
+                                    body_merge,
                                 } => Merge::Loop {
                                     loop_merge: func_lifting.label_ids[&loop_merge],
-                                    loop_continue: func_lifting.label_ids[&loop_continue],
+                                    body_merge: func_lifting.label_ids[&body_merge],
                                 },
                             })
                         }))
-                        .chain([LazyInst::ControlInst {
+                        .chain([LazyInst::Terminator {
                             parent_func: func_lifting,
-                            control_inst: terminator,
+                            terminator,
                         }])
                     }))
                     .chain([LazyInst::OpFunctionEnd])

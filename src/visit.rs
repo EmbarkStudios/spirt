@@ -53,6 +53,9 @@ pub trait Visitor<'a>: Sized {
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         func_decl.inner_visit_with(self);
     }
+    fn visit_control_region_def(&mut self, func_at_control_region: FuncAt<'a, ControlRegion>) {
+        func_at_control_region.inner_visit_with(self);
+    }
     fn visit_control_node_def(&mut self, func_at_control_node: FuncAt<'a, ControlNode>) {
         func_at_control_node.inner_visit_with(self);
     }
@@ -343,13 +346,12 @@ impl InnerVisit for FuncParam {
 impl InnerVisit for FuncDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match &self.unstructured_cfg {
-            None => self.at_body().inner_visit_with(visitor),
+            None => visitor.visit_control_region_def(self.at_body()),
             Some(cfg) => {
-                for point_range in cfg.rev_post_order(self) {
-                    self.at(Some(point_range.control_nodes()))
-                        .inner_visit_with(visitor);
+                for region in cfg.rev_post_order(self) {
+                    visitor.visit_control_region_def(self.at(region));
 
-                    if let Some(control_inst) = cfg.control_insts.get(point_range.last()) {
+                    if let Some(control_inst) = cfg.control_inst_on_exit_from.get(region) {
                         control_inst.inner_visit_with(visitor);
                     }
                 }
@@ -361,7 +363,7 @@ impl InnerVisit for FuncDefBody {
 // FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ControlRegion>`.
 impl<'a> FuncAt<'a, ControlRegion> {
-    fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
+    pub fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
         let ControlRegionDef {
             inputs,
             children,
@@ -390,7 +392,7 @@ impl InnerVisit for ControlRegionInputDecl {
 // FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ...>`.
 impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
-    fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
+    pub fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
         for func_at_control_node in self {
             visitor.visit_control_node_def(func_at_control_node);
         }
@@ -404,7 +406,6 @@ impl<'a> FuncAt<'a, ControlNode> {
         let ControlNodeDef { kind, outputs } = self.def();
 
         match kind {
-            ControlNodeKind::UnstructuredMerge => {}
             ControlNodeKind::Block { insts } => {
                 for func_at_inst in self.at(*insts) {
                     visitor.visit_data_inst_def(func_at_inst.def());
@@ -417,7 +418,7 @@ impl<'a> FuncAt<'a, ControlNode> {
             } => {
                 visitor.visit_value_use(scrutinee);
                 for &case in cases {
-                    self.at(case).inner_visit_with(visitor);
+                    visitor.visit_control_region_def(self.at(case));
                 }
             }
             ControlNodeKind::Loop {
@@ -428,7 +429,7 @@ impl<'a> FuncAt<'a, ControlNode> {
                 for v in initial_inputs {
                     visitor.visit_value_use(v);
                 }
-                self.at(*body).inner_visit_with(visitor);
+                visitor.visit_control_region_def(self.at(*body));
                 visitor.visit_value_use(repeat_condition);
             }
         }
@@ -477,7 +478,7 @@ impl InnerVisit for cfg::ControlInst {
             kind,
             inputs,
             targets: _,
-            target_merge_outputs,
+            target_inputs,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
@@ -493,8 +494,8 @@ impl InnerVisit for cfg::ControlInst {
         for v in inputs {
             visitor.visit_value_use(v);
         }
-        for outputs in target_merge_outputs.values() {
-            for v in outputs {
+        for inputs in target_inputs.values() {
+            for v in inputs {
                 visitor.visit_value_use(v);
             }
         }

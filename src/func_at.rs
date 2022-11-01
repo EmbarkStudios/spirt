@@ -16,7 +16,7 @@ use crate::{
 /// Immutable traversal (i.e. visiting) helper for intra-function entities.
 ///
 /// The point/position type `P` should be an entity or a shallow entity wrapper
-/// (e.g. `EntityList<ControlNode>` or `cfg::ControlPoint`).
+/// (e.g. `EntityList<ControlNode>`).
 #[derive(Copy, Clone)]
 pub struct FuncAt<'a, P: Copy> {
     pub control_regions: &'a EntityDefs<ControlRegion>,
@@ -114,7 +114,7 @@ impl FuncAt<'_, Value> {
 /// Mutable traversal (i.e. transforming) helper for intra-function entities.
 ///
 /// The point/position type `P` should be an entity or a shallow entity wrapper
-/// (e.g. `EntityList<ControlNode>` or `cfg::ControlPoint`).
+/// (e.g. `EntityList<ControlNode>`).
 pub struct FuncAtMut<'a, P: Copy> {
     pub control_regions: &'a mut EntityDefs<ControlRegion>,
     pub control_nodes: &'a mut EntityDefs<ControlNode>,

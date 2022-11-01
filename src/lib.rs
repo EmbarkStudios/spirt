@@ -281,9 +281,9 @@ pub struct FuncDefBody {
     /// Only present if structurization wasn't attempted, or if was only partial
     /// (leaving behind a mix of structured and unstructured control-flow).
     ///
-    /// When present, it starts at `ControlPoint::Exit(body.children.last)`
-    /// (effectively replacing the structured return `body` otherwise implies),
-    /// with the rest of `body.children` always being fully structured.
+    /// When present, it starts at `body` (more specifically, its exit),
+    /// effectively replacing the structured return `body` otherwise implies,
+    /// with `body` (or rather, its `children`) always being fully structured.
     pub unstructured_cfg: Option<cfg::ControlFlowGraph>,
 }
 
@@ -293,10 +293,11 @@ pub struct FuncDefBody {
 /// # Control-flow
 ///
 /// In SPIR-T, two forms of control-flow are used:
-/// * "structured": `ControlNode`s which are linked together in a `ControlRegion`
-///   * each such `ControlNode` can only appear in exactly one region
-///   * a region is either the function's body, or used as part of another
-///     `ControlNode` (e.g. the "then" case of an `if`-`else`)
+/// * "structured": `ControlRegion`s and `ControlNode`s in a "mutual tree"
+///   * i.e. each such `ControlRegion` can only appear in exactly one `ControlNode`,
+///     and each `ControlNode` can only appear in exactly one `ControlRegion`
+///   * a region is either the function's body, or used as part of `ControlNode`
+///     (e.g. the "then" case of an `if`-`else`), itself part of a larger region
 ///   * when inside a region, reaching any other part of the function (or any
 ///     other function on call stack) requires leaving through the region's
 ///     single exit (also called "merge") point, i.e. its execution is either:
@@ -304,15 +305,15 @@ pub struct FuncDefBody {
 ///       `ControlNode`, or function (the latter being a "structured return")
 ///     * "divergent": execution gets stuck in the region (an infinite loop),
 ///       or is aborted (e.g. `OpTerminateInvocation` from SPIR-V)
-/// * "unstructured": `ControlNode`s which connect to other `ControlNode`s using
-///   `cfg::ControlInst`s (as described by a `cfg::ControlFlowGraph`)
+/// * "unstructured": `ControlRegion`s which connect to other `ControlRegion`s
+///   using `cfg::ControlInst`s (as described by a `cfg::ControlFlowGraph`)
 ///
-/// When a function's entire body can be described by a single `ControlRegion,
+/// When a function's entire body can be described by a single `ControlRegion`,
 /// that function is said to have (entirely) "structured control-flow".
 ///
 /// Mixing "structured" and "unstructured" control-flow is supported because:
 /// * during structurization, it allows structured subgraphs to remain connected
-///   by the same CFG edges that were connecting leaf `ControlNode`s before
+///   by the same CFG edges that were connecting smaller `ControlRegion`s before
 /// * structurization doesn't have to fail in the cases it doesn't fully support
 ///   yet, but can instead result in a "maximally structured" function
 ///
@@ -357,14 +358,8 @@ pub struct FuncDefBody {
 ///     "source" values in their respective paths (where they're dominated),
 ///     instead of in the merge (where phi nodes require special-casing, as
 ///     their "uses" of all the "source" values would normally be illegal)
-///   * in unstructured control-flow, a special-purpose kind of `ControlNode`
-///     (`UnstructuredMerge`) serves to bridge the gap, and allow referring to
-///     phi node outputs the same way as if they had come from a `Select`,
-///     while the "source" values are kept in the `cfg::ControlFlowGraph`
-///     * using region `inputs` for this may be an improvement, except that
-///       `cfg::ControlFlowGraph` describes edges relative to `ControlNode`s,
-///       not `ControlRegion`s, and for `Select`s they would still have to be
-///       rewritten into `outputs` anyway
+///   * in unstructured control-flow, region `inputs` are additionally used for
+///     phi nodes, as `cfg:ControlInst`s passing values to their target regions
 #[derive(Clone)]
 pub struct ControlRegionDef {
     /// Inputs to this `ControlRegion`:
@@ -416,12 +411,6 @@ pub struct ControlNodeOutputDecl {
 
 #[derive(Clone)]
 pub enum ControlNodeKind {
-    /// Helper `ControlNode` used for conversions between a CFG and structured regions,
-    /// potentially having `ControlNodeOutputDecl`s with values provided externally.
-    //
-    // FIXME(eddyb) is there a better way to do this?
-    UnstructuredMerge,
-
     /// Linear chain of `DataInst`s, executing in sequence.
     ///
     /// This is only an optimization over keeping `DataInst`s in `ControlRegion`

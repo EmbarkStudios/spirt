@@ -471,12 +471,12 @@ impl InnerInPlaceTransform for FuncDefBody {
                 // HACK(eddyb) have to compute this before borrowing any `self` fields.
                 let rpo = cfg.rev_post_order(self);
 
-                for point_range in rpo {
-                    self.at_mut(Some(point_range.control_nodes()))
+                for region in rpo {
+                    self.at_mut(region)
                         .inner_in_place_transform_with(transformer);
 
                     let cfg = self.unstructured_cfg.as_mut().unwrap();
-                    if let Some(control_inst) = cfg.control_insts.get_mut(point_range.last()) {
+                    if let Some(control_inst) = cfg.control_inst_on_exit_from.get_mut(region) {
                         control_inst.inner_in_place_transform_with(transformer);
                     }
                 }
@@ -540,7 +540,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, Option<EntityListIter<ControlNode>>
 impl FuncAtMut<'_, ControlNode> {
     fn child_regions(&mut self) -> &mut [ControlRegion] {
         match &mut self.reborrow().def().kind {
-            ControlNodeKind::UnstructuredMerge | ControlNodeKind::Block { .. } => &mut [][..],
+            ControlNodeKind::Block { .. } => &mut [][..],
 
             ControlNodeKind::Select { cases, .. } => cases,
             ControlNodeKind::Loop { body, .. } => slice::from_mut(body),
@@ -553,7 +553,6 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
         // HACK(eddyb) handle pre-child-regions parts of `kind` separately to
         // allow reborrowing `FuncAtMut` (for the child region recursion).
         match &mut self.reborrow().def().kind {
-            ControlNodeKind::UnstructuredMerge => {}
             &mut ControlNodeKind::Block { insts } => {
                 let mut func_at_inst_iter = self.reborrow().at(insts).into_iter();
                 while let Some(func_at_inst) = func_at_inst_iter.next() {
@@ -593,8 +592,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
 
         match kind {
             // Fully handled above, before recursing into any child regions.
-            ControlNodeKind::UnstructuredMerge
-            | ControlNodeKind::Block { insts: _ }
+            ControlNodeKind::Block { insts: _ }
             | ControlNodeKind::Select {
                 kind: _,
                 scrutinee: _,
@@ -662,7 +660,7 @@ impl InnerInPlaceTransform for cfg::ControlInst {
             kind,
             inputs,
             targets: _,
-            target_merge_outputs,
+            target_inputs,
         } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
@@ -678,8 +676,8 @@ impl InnerInPlaceTransform for cfg::ControlInst {
         for v in inputs {
             transformer.transform_value_use(v).apply_to(v);
         }
-        for outputs in target_merge_outputs.values_mut() {
-            for v in outputs {
+        for inputs in target_inputs.values_mut() {
+            for v in inputs {
                 transformer.transform_value_use(v).apply_to(v);
             }
         }

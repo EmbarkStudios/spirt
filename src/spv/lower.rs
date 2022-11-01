@@ -3,11 +3,11 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
-    ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegionDef,
-    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody,
-    Import, InternedStr, Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeDef,
+    ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
+    DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
+    FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
+    Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
-use std::{io, iter, mem};
+use std::{io, mem};
 
 /// SPIR-T definition of a SPIR-V ID.
 enum IdDef {
@@ -760,8 +760,8 @@ impl Module {
                     None => {
                         let mut control_regions = EntityDefs::default();
                         let mut control_nodes = EntityDefs::default();
-                        // HACK(eddyb) can't get a `ControlNode` without
-                        // defining it as an (empty) `ControlNodeDef` first.
+                        // HACK(eddyb) can't get an empty `ControlRegion` without
+                        // using an (empty) `ControlNode` as a sole child.
                         let entry = control_nodes.define(
                             &cx,
                             ControlNodeDef {
@@ -881,7 +881,7 @@ impl Module {
             #[derive(Copy, Clone)]
             enum LocalIdDef {
                 Value(Value),
-                BlockLabel(ControlNode),
+                BlockLabel(ControlRegion),
             }
 
             #[derive(PartialEq, Eq, Hash)]
@@ -893,16 +893,6 @@ impl Module {
 
             struct BlockDetails {
                 label_id: spv::Id,
-
-                /// For blocks with `OpPhi`s, an additional `ControlNode` is defined
-                /// (a `ControlNodeKind::UnstructuredMerge`), and used as the target
-                /// of incoming CFG edges, in order to have a separate merge point,
-                /// for which `OpPhi`s can be "outputs" instead of "inputs".
-                ///
-                /// In the CFG, this always branches directly to block `ControlNode`.
-                phi_merge_target: Option<ControlNode>,
-
-                // FIXME(eddyb) should this be in the `phi_merge_target` `Option`?
                 phi_count: u32,
             }
 
@@ -910,7 +900,7 @@ impl Module {
             let mut local_id_defs = FxIndexMap::default();
             // `OpPhi`s are also collected here, to assign them per-edge.
             let mut phi_to_values = FxIndexMap::<PhiKey, SmallVec<[spv::Id; 1]>>::default();
-            let mut block_details = FxIndexMap::<ControlNode, BlockDetails>::default();
+            let mut block_details = FxIndexMap::<ControlRegion, BlockDetails>::default();
             let mut has_blocks = false;
             {
                 let mut next_param_idx = 0u32;
@@ -948,16 +938,30 @@ impl Module {
 
                             if opcode == wk.OpLabel {
                                 let block = if is_entry_block {
-                                    // An empty `ControlNodeKind::Block` node was defined
+                                    // A `ControlRegion` (using an empty `Block`
+                                    // `ControlNode` as its sole child) was defined
                                     // earlier, to be able to create the `FuncDefBody`.
-                                    func_def_body.at_body().def().children.iter().first
+                                    func_def_body.body
                                 } else {
-                                    // HACK(eddyb) can't get a `ControlNode` without
-                                    // defining it as an (empty) `ControlNodeDef` first.
-                                    func_def_body.control_nodes.define(
+                                    // HACK(eddyb) can't get an empty `ControlRegion` without
+                                    // using an (empty) `ControlNode` as a sole child.
+                                    let block_node = func_def_body.control_nodes.define(
                                         &cx,
                                         ControlNodeDef {
                                             kind: ControlNodeKind::Block { insts: None },
+                                            outputs: SmallVec::new(),
+                                        }
+                                        .into(),
+                                    );
+                                    func_def_body.control_regions.define(
+                                        &cx,
+                                        ControlRegionDef {
+                                            inputs: SmallVec::new(),
+                                            children: EntityList::insert_last(
+                                                None,
+                                                block_node,
+                                                &mut func_def_body.control_nodes,
+                                            ),
                                             outputs: SmallVec::new(),
                                         }
                                         .into(),
@@ -967,7 +971,6 @@ impl Module {
                                     block,
                                     BlockDetails {
                                         label_id: id,
-                                        phi_merge_target: None,
                                         phi_count: 0,
                                     },
                                 );
@@ -979,41 +982,6 @@ impl Module {
                                     // Error will be emitted later, below.
                                     None => continue,
                                 };
-
-                                // If necessary, create the intermediary `ControlNode`
-                                // to serve as a merge point, and add the CFG edge
-                                // from it to the `ControlNode` for the block itself
-                                // (see also doc comment on `phi_merge_target`).
-                                let phi_merge_target =
-                                    *block_details.phi_merge_target.get_or_insert_with(|| {
-                                        let phi_merge_target = func_def_body.control_nodes.define(
-                                            &cx,
-                                            ControlNodeDef {
-                                                kind: ControlNodeKind::UnstructuredMerge,
-                                                outputs: SmallVec::new(),
-                                            }
-                                            .into(),
-                                        );
-                                        func_def_body
-                                            .unstructured_cfg
-                                            .as_mut()
-                                            .unwrap()
-                                            .control_insts
-                                            .insert(
-                                                cfg::ControlPoint::Exit(phi_merge_target),
-                                                cfg::ControlInst {
-                                                    attrs: AttrSet::default(),
-                                                    kind: cfg::ControlInstKind::Branch,
-                                                    inputs: SmallVec::new(),
-                                                    targets: iter::once(cfg::ControlPoint::Entry(
-                                                        current_block,
-                                                    ))
-                                                    .collect(),
-                                                    target_merge_outputs: FxIndexMap::default(),
-                                                },
-                                            );
-                                        phi_merge_target
-                                    });
 
                                 let phi_idx = block_details.phi_count;
                                 block_details.phi_count = phi_idx.checked_add(1).unwrap();
@@ -1034,9 +1002,9 @@ impl Module {
                                         .push(value_id);
                                 }
 
-                                LocalIdDef::Value(Value::ControlNodeOutput {
-                                    control_node: phi_merge_target,
-                                    output_idx: phi_idx,
+                                LocalIdDef::Value(Value::ControlRegionInput {
+                                    region: current_block,
+                                    input_idx: phi_idx,
                                 })
                             } else {
                                 // HACK(eddyb) can't get a `DataInst` without
@@ -1088,7 +1056,7 @@ impl Module {
                 None
             };
 
-            let mut current_block_control_node_and_details = None;
+            let mut current_block_control_region_and_details = None;
             for (raw_inst_idx, raw_inst) in raw_insts.iter().enumerate() {
                 let lookahead_raw_inst = |dist| {
                     raw_inst_idx
@@ -1156,7 +1124,7 @@ impl Module {
                     };
 
                 if opcode == wk.OpFunctionParameter {
-                    if current_block_control_node_and_details.is_some() {
+                    if current_block_control_region_and_details.is_some() {
                         return Err(invalid(
                             "out of order: `OpFunctionParameter`s should come \
                              before the function's blocks",
@@ -1187,22 +1155,30 @@ impl Module {
                         return Err(invalid("block lacks terminator instruction"));
                     }
 
-                    // An empty `ControlNodeKind::Block` node was defined earlier,
+                    // A `ControlRegion` (using an empty `Block` `ControlNode`
+                    // as its sole child) was defined earlier,
                     // to be able to have an entry in `local_id_defs`.
-                    let control_node = match local_id_defs[&result_id.unwrap()] {
-                        LocalIdDef::BlockLabel(control_node) => control_node,
+                    let control_region = match local_id_defs[&result_id.unwrap()] {
+                        LocalIdDef::BlockLabel(control_region) => control_region,
                         _ => unreachable!(),
                     };
-                    let current_block_details = &block_details[&control_node];
+                    let current_block_details = &block_details[&control_region];
                     assert_eq!(current_block_details.label_id, result_id.unwrap());
-                    current_block_control_node_and_details =
-                        Some((control_node, current_block_details));
+                    current_block_control_region_and_details =
+                        Some((control_region, current_block_details));
                     continue;
                 }
-                let (current_block_control_node, current_block_details) =
-                    current_block_control_node_and_details.ok_or_else(|| {
+                let (current_block_control_region, current_block_details) =
+                    current_block_control_region_and_details.ok_or_else(|| {
                         invalid("out of order: not expected before the function's blocks")
                     })?;
+                let current_block_control_region_def =
+                    &mut func_def_body.control_regions[current_block_control_region];
+                let current_block_control_node = {
+                    let children = current_block_control_region_def.children.iter();
+                    assert!(children.first == children.last);
+                    children.first
+                };
                 let current_control_node_def =
                     &mut func_def_body.control_nodes[current_block_control_node];
                 let current_block_insts = match &mut current_control_node_def.kind {
@@ -1220,7 +1196,7 @@ impl Module {
                         ));
                     }
 
-                    let mut target_merge_outputs = FxIndexMap::default();
+                    let mut target_inputs = FxIndexMap::default();
                     let descr_phi_case = |phi_key: &PhiKey| {
                         format!(
                             "`OpPhi` (#{} in %{})'s case for source block %{}",
@@ -1238,15 +1214,22 @@ impl Module {
                             ))),
                         }
                     };
-                    let mut process_cfg_edge = |target_block| -> io::Result<_> {
+                    let mut record_cfg_edge = |target_block| -> io::Result<()> {
                         use indexmap::map::Entry;
 
                         let target_block_details = &block_details[&target_block];
 
-                        // NOTE(eddyb) this iterator is only used when actually
-                        // inserting into `target_merge_outputs`, but is defined
-                        // early to avoid nesting all of it further in.
-                        let outputs = (0..target_block_details.phi_count).map(|target_phi_idx| {
+                        if target_block_details.phi_count == 0 {
+                            return Ok(());
+                        }
+
+                        // Only resolve `OpPhi`s exactly once (per target).
+                        let target_inputs_entry = match target_inputs.entry(target_block) {
+                            Entry::Occupied(_) => return Ok(()),
+                            Entry::Vacant(entry) => entry,
+                        };
+
+                        let inputs = (0..target_block_details.phi_count).map(|target_phi_idx| {
                             let phi_key = PhiKey {
                                 source_block_id: current_block_details.label_id,
                                 target_block_id: target_block_details.label_id,
@@ -1266,31 +1249,9 @@ impl Module {
                                 ))),
                             }
                         });
+                        target_inputs_entry.insert(inputs.collect::<Result<_, _>>()?);
 
-                        // The actual CFG edge might not point to `target_block`,
-                        // but an intermediary created as a merge point for
-                        // `OpPhi`s (see also doc comment on `phi_merge_target`).
-                        match target_block_details.phi_merge_target {
-                            Some(phi_merge_target) => {
-                                assert_ne!(target_block_details.phi_count, 0);
-
-                                match target_merge_outputs.entry(phi_merge_target) {
-                                    // Only resolve `OpPhi`s exactly once.
-                                    Entry::Occupied(_) => {}
-                                    Entry::Vacant(entry) => {
-                                        entry.insert(outputs.collect::<Result<_, _>>()?);
-                                    }
-                                }
-
-                                // `ControlNodeKind::UnstructuredMerge` only has an `Exit`
-                                // (see also `cfg::ControlPoint`'s doc comment).
-                                Ok(cfg::ControlPoint::Exit(phi_merge_target))
-                            }
-                            None => {
-                                assert_eq!(target_block_details.phi_count, 0);
-                                Ok(cfg::ControlPoint::Entry(target_block))
-                            }
-                        }
+                        Ok(())
                     };
 
                     // Split the operands into value inputs (e.g. a branch's
@@ -1309,7 +1270,8 @@ impl Module {
                                 inputs.push(v);
                             }
                             LocalIdDef::BlockLabel(target) => {
-                                targets.push(process_cfg_edge(target)?);
+                                record_cfg_edge(target)?;
+                                targets.push(target);
                             }
                         }
                     }
@@ -1342,15 +1304,15 @@ impl Module {
                         .unstructured_cfg
                         .as_mut()
                         .unwrap()
-                        .control_insts
+                        .control_inst_on_exit_from
                         .insert(
-                            cfg::ControlPoint::Exit(current_block_control_node),
+                            current_block_control_region,
                             cfg::ControlInst {
                                 attrs,
                                 kind,
                                 inputs,
                                 targets,
-                                target_merge_outputs,
+                                target_inputs,
                             },
                         );
                 } else if opcode == wk.OpPhi {
@@ -1360,11 +1322,10 @@ impl Module {
                              the rest of the block's instructions",
                         ));
                     }
-                    let phi_merge_control_node_def = &mut func_def_body.control_nodes
-                        [current_block_details.phi_merge_target.unwrap()];
-                    phi_merge_control_node_def
-                        .outputs
-                        .push(ControlNodeOutputDecl {
+
+                    current_block_control_region_def
+                        .inputs
+                        .push(ControlRegionInputDecl {
                             attrs,
                             ty: result_type.unwrap(),
                         });
@@ -1548,8 +1509,7 @@ impl Module {
 
             // Sanity-check the entry block.
             if let Some(func_def_body) = func_def_body {
-                let body_children = func_def_body.at_body().def().children.iter();
-                if block_details[&body_children.first].phi_count > 0 {
+                if block_details[&func_def_body.body].phi_count > 0 {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(

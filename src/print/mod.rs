@@ -152,7 +152,7 @@ enum Use {
 
     CxInterned(CxInterned),
 
-    ControlPointLabel(cfg::ControlPoint),
+    ControlRegionLabel(ControlRegion),
 
     // FIXME(eddyb) these are `Value`'s variants except `Const`, maybe `Use`
     // should just use `Value` and assert it's never `Const`?
@@ -191,7 +191,7 @@ impl Use {
         match self {
             Self::Node(node) => node.category().unwrap(),
             Self::CxInterned(interned) => interned.category(),
-            Self::ControlPointLabel(_) => "label",
+            Self::ControlRegionLabel(_) => "label",
             Self::ControlRegionInput { .. }
             | Self::ControlNodeOutput { .. }
             | Self::DataInstOutput(_) => "v",
@@ -393,12 +393,12 @@ impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         if let DeclDef::Present(func_def_body) = &func_decl.def {
             if let Some(cfg) = &func_def_body.unstructured_cfg {
-                for point_range in cfg.rev_post_order(func_def_body) {
-                    if let Some(control_inst) = cfg.control_insts.get(point_range.last()) {
+                for region in cfg.rev_post_order(func_def_body) {
+                    if let Some(control_inst) = cfg.control_inst_on_exit_from.get(region) {
                         for &target in &control_inst.targets {
                             *self
                                 .use_counts
-                                .entry(Use::ControlPointLabel(target))
+                                .entry(Use::ControlRegionLabel(target))
                                 .or_default() += 1;
                         }
                     }
@@ -653,7 +653,7 @@ pub struct Printer<'a> {
 enum UseStyle {
     /// Refer to the definition by its category and an `idx` (e.g. `"type123"`).
     Anon {
-        /// For intra-function `Use`s (i.e. `Use::ControlPointLabel` and values),
+        /// For intra-function `Use`s (i.e. `Use::ControlRegionLabel` and values),
         /// this disambiguates the parent function (for e.g. anchors).
         parent_func: Option<Func>,
 
@@ -685,7 +685,7 @@ impl<'a> Printer<'a> {
             .iter()
             .map(|(&use_kind, &use_count)| {
                 // HACK(eddyb) these are assigned later.
-                if let Use::ControlPointLabel(_)
+                if let Use::ControlRegionLabel(_)
                 | Use::ControlRegionInput { .. }
                 | Use::ControlNodeOutput { .. }
                 | Use::DataInstOutput(_) = use_kind
@@ -761,7 +761,7 @@ impl<'a> Printer<'a> {
                             }
                     }
                     Use::Node(_) => false,
-                    Use::ControlPointLabel(_)
+                    Use::ControlRegionLabel(_)
                     | Use::ControlRegionInput { .. }
                     | Use::ControlNodeOutput { .. }
                     | Use::DataInstOutput(_) => {
@@ -784,7 +784,7 @@ impl<'a> Printer<'a> {
                             | Node::ModuleDialect
                             | Node::ModuleDebugInfo,
                         )
-                        | Use::ControlPointLabel(_)
+                        | Use::ControlRegionLabel(_)
                         | Use::ControlRegionInput { .. }
                         | Use::ControlNodeOutput { .. }
                         | Use::DataInstOutput(_) => {
@@ -815,7 +815,7 @@ impl<'a> Printer<'a> {
                 Some(UseStyle::Anon { .. })
             ));
 
-            let mut control_pointer_label_counter = 0;
+            let mut control_region_label_counter = 0;
             let mut value_counter = 0;
 
             // Assign a new label/value index, but only if:
@@ -824,7 +824,7 @@ impl<'a> Printer<'a> {
             let mut define_label_or_value = |use_kind: Use| {
                 if let Some(use_style @ UseStyle::Inline) = use_styles.get_mut(&use_kind) {
                     let counter = match use_kind {
-                        Use::ControlPointLabel(_) => &mut control_pointer_label_counter,
+                        Use::ControlRegionLabel(_) => &mut control_region_label_counter,
                         _ => &mut value_counter,
                     };
                     let idx = *counter;
@@ -851,87 +851,67 @@ impl<'a> Printer<'a> {
                 });
 
             for func_def_body in func_def_bodies_across_versions {
-                for (i, _) in func_def_body.at_body().def().inputs.iter().enumerate() {
-                    define_label_or_value(Use::ControlRegionInput {
-                        region: func_def_body.body,
-                        input_idx: i.try_into().unwrap(),
-                    });
-                }
+                let visit_region = |func_at_region: FuncAt<ControlRegion>| {
+                    let region = func_at_region.position;
 
-                let mut visit_point_range = |point_range: cfg::ControlPointRange| {
-                    // The label is only for CFG edge destinations.
-                    let label_point = point_range.first();
+                    define_label_or_value(Use::ControlRegionLabel(region));
 
-                    define_label_or_value(Use::ControlPointLabel(label_point));
+                    let ControlRegionDef {
+                        inputs,
+                        children,
+                        outputs: _,
+                    } = func_def_body.at(region).def();
 
-                    // FIXME(eddyb) stop using `rev_post_order_try_for_each`.
-                    func_def_body
-                        .at(point_range)
-                        .rev_post_order_try_for_each(|func_at_point_cursor| -> Result<(), ()> {
-                            let point_cursor = func_at_point_cursor.position;
-                            let point = point_cursor.position;
+                    for (i, _) in inputs.iter().enumerate() {
+                        define_label_or_value(Use::ControlRegionInput {
+                            region,
+                            input_idx: i.try_into().unwrap(),
+                        });
+                    }
 
-                            // HACK(eddyb) this needs to visit `UnstructuredMerge`s on `Exit`
-                            // instead of `Entry`, because they don't have have `Entry`s.
-                            let can_uniquely_visit =
-                                match func_def_body.control_nodes[point.control_node()].kind {
-                                    ControlNodeKind::UnstructuredMerge => {
-                                        assert!(matches!(point, cfg::ControlPoint::Exit(_)));
-                                        true
-                                    }
-                                    _ => matches!(point, cfg::ControlPoint::Entry(_)),
-                                };
+                    for func_at_control_node in func_def_body.at(*children) {
+                        let control_node = func_at_control_node.position;
+                        let ControlNodeDef { kind, outputs } = func_at_control_node.def();
 
-                            if !can_uniquely_visit {
-                                return Ok(());
-                            }
-
-                            let control_node = point.control_node();
-                            let ControlNodeDef { kind, outputs } =
-                                &*func_def_body.control_nodes[control_node];
-
-                            if let ControlNodeKind::Loop { body, .. } = *kind {
-                                let loop_body_def = func_at_point_cursor.at(body).def();
-                                for (i, _) in loop_body_def.inputs.iter().enumerate() {
-                                    define_label_or_value(Use::ControlRegionInput {
-                                        region: body,
-                                        input_idx: i.try_into().unwrap(),
-                                    });
+                        if let ControlNodeKind::Block { insts } = *kind {
+                            for func_at_inst in func_def_body.at(insts) {
+                                if func_at_inst.def().output_type.is_some() {
+                                    define_label_or_value(Use::DataInstOutput(
+                                        func_at_inst.position,
+                                    ));
                                 }
                             }
+                        }
 
-                            if let ControlNodeKind::Block { insts } = *kind {
-                                for func_at_inst in func_def_body.at(insts) {
-                                    if func_at_inst.def().output_type.is_some() {
-                                        define_label_or_value(Use::DataInstOutput(
-                                            func_at_inst.position,
-                                        ));
-                                    }
-                                }
-                            }
-
-                            for (i, _) in outputs.iter().enumerate() {
-                                define_label_or_value(Use::ControlNodeOutput {
-                                    control_node,
-                                    output_idx: i.try_into().unwrap(),
-                                });
-                            }
-
-                            Ok(())
-                        })
-                        .unwrap()
-                };
-
-                match &func_def_body.unstructured_cfg {
-                    None => visit_point_range(cfg::ControlPointRange::LinearChain(
-                        func_def_body.at_body().def().children.iter(),
-                    )),
-                    Some(cfg) => {
-                        for point_range in cfg.rev_post_order(func_def_body) {
-                            visit_point_range(point_range);
+                        for (i, _) in outputs.iter().enumerate() {
+                            define_label_or_value(Use::ControlNodeOutput {
+                                control_node,
+                                output_idx: i.try_into().unwrap(),
+                            });
                         }
                     }
+                };
+
+                // FIXME(eddyb) maybe this should be provided by `visit`.
+                struct VisitAllRegions<F>(F);
+                impl<'a, F: FnMut(FuncAt<'a, ControlRegion>)> Visitor<'a> for VisitAllRegions<F> {
+                    // FIXME(eddyb) this is excessive, maybe different kinds of
+                    // visitors should exist for module-level and func-level?
+                    fn visit_attr_set_use(&mut self, _: AttrSet) {}
+                    fn visit_type_use(&mut self, _: Type) {}
+                    fn visit_const_use(&mut self, _: Const) {}
+                    fn visit_global_var_use(&mut self, _: GlobalVar) {}
+                    fn visit_func_use(&mut self, _: Func) {}
+
+                    fn visit_control_region_def(
+                        &mut self,
+                        func_at_control_region: FuncAt<'a, ControlRegion>,
+                    ) {
+                        self.0(func_at_control_region);
+                        func_at_control_region.inner_visit_with(self);
+                    }
                 }
+                func_def_body.inner_visit_with(&mut VisitAllRegions(visit_region));
             }
         }
 
@@ -1249,7 +1229,7 @@ impl Use {
                         node.category().unwrap_or_else(|s| s)
                     ))
                     .into(),
-                Self::ControlPointLabel(_)
+                Self::ControlRegionLabel(_)
                 | Self::ControlRegionInput { .. }
                 | Self::ControlNodeOutput { .. }
                 | Self::DataInstOutput(_) => "_".into(),
@@ -2163,16 +2143,46 @@ impl Print for FuncDecl {
                     None => vec![def.at_body().print(printer)],
                     Some(cfg) => cfg
                         .rev_post_order(def)
-                        .map(|point_range| {
-                            pretty::Fragment::new([
-                                def.at(point_range).print(printer),
-                                if let Some(control_inst) =
-                                    cfg.control_insts.get(point_range.last())
-                                {
-                                    control_inst.print(printer)
+                        .map(|region| {
+                            let label = Use::ControlRegionLabel(region);
+                            let label_header = if printer.use_styles.contains_key(&label) {
+                                let inputs = &def.at(region).def().inputs;
+                                let label_inputs = if !inputs.is_empty() {
+                                    pretty::join_comma_sep(
+                                        "(",
+                                        inputs.iter().enumerate().map(|(input_idx, input)| {
+                                            input.print(printer).insert_name_before_def(
+                                                Value::ControlRegionInput {
+                                                    region,
+                                                    input_idx: input_idx.try_into().unwrap(),
+                                                }
+                                                .print_as_def(printer),
+                                            )
+                                        }),
+                                        ")",
+                                    )
                                 } else {
                                     pretty::Fragment::default()
-                                },
+                                };
+
+                                // FIXME(eddyb) `:` as used here for C-like "label syntax"
+                                // interferes (in theory) with `e: T` "type ascription syntax".
+                                pretty::Fragment::new([
+                                    pretty::Node::ForceLineSeparation.into(),
+                                    label.print_as_def(printer),
+                                    label_inputs,
+                                    ":".into(),
+                                    pretty::Node::ForceLineSeparation.into(),
+                                ])
+                            } else {
+                                pretty::Fragment::default()
+                            };
+
+                            pretty::Fragment::new([
+                                label_header,
+                                pretty::Node::IndentedBlock(vec![def.at(region).print(printer)])
+                                    .into(),
+                                cfg.control_inst_on_exit_from[region].print(printer),
                             ])
                         })
                         .intersperse({
@@ -2251,39 +2261,6 @@ impl Print for FuncAt<'_, Option<EntityListIter<ControlNode>>> {
     }
 }
 
-impl Print for FuncAt<'_, cfg::ControlPointRange> {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        let point_range = self.position;
-
-        let control_nodes = pretty::Node::IndentedBlock(vec![
-            self.at(Some(point_range.control_nodes())).print(printer),
-        ])
-        .into();
-
-        // The label is only for CFG edge destinations.
-        let label_point = point_range.first();
-        let label = Use::ControlPointLabel(label_point);
-        if printer.use_styles.contains_key(&label) {
-            // FIXME(eddyb) `:` as used here for C-like "label syntax"
-            // interferes (in theory) with `e: T` "type ascription syntax".
-            let label_header = pretty::Fragment::new([
-                pretty::Node::ForceLineSeparation.into(),
-                label.print_as_def(printer),
-                ":".into(),
-                pretty::Node::ForceLineSeparation.into(),
-            ]);
-
-            pretty::Fragment::new(match label_point {
-                cfg::ControlPoint::Entry(_) => [label_header, control_nodes],
-                cfg::ControlPoint::Exit(_) => [control_nodes, label_header],
-            })
-        } else {
-            control_nodes
-        }
-    }
-}
-
 impl Print for FuncAt<'_, ControlNode> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
@@ -2315,10 +2292,6 @@ impl Print for FuncAt<'_, ControlNode> {
         let kw_style = printer.imperative_keyword_style();
         let kw = |kw| kw_style.clone().apply(kw).into();
         let control_node_body = match kind {
-            ControlNodeKind::UnstructuredMerge => printer
-                .comment_style()
-                .apply("/* unstructured merge */")
-                .into(),
             ControlNodeKind::Block { insts } => {
                 assert!(outputs.is_empty());
 
@@ -2357,6 +2330,8 @@ impl Print for FuncAt<'_, ControlNode> {
                 body,
                 repeat_condition,
             } => {
+                assert!(outputs.is_empty());
+
                 let inputs = &self.at(*body).def().inputs;
                 assert_eq!(initial_inputs.len(), inputs.len());
 
@@ -2538,7 +2513,7 @@ impl Print for cfg::ControlInst {
             kind,
             inputs,
             targets,
-            target_merge_outputs,
+            target_inputs,
         } = self;
 
         let attrs = attrs.print(printer);
@@ -2546,33 +2521,17 @@ impl Print for cfg::ControlInst {
         let kw_style = printer.imperative_keyword_style();
         let kw = |kw| kw_style.clone().apply(kw).into();
 
-        let mut targets = targets.iter().map(|&point| {
+        let mut targets = targets.iter().map(|&target_region| {
             let mut target = pretty::Fragment::new([
                 kw("branch"),
                 " ".into(),
-                Use::ControlPointLabel(point).print(printer),
+                Use::ControlRegionLabel(target_region).print(printer),
             ]);
-            if let cfg::ControlPoint::Exit(control_node) = point {
-                if let Some(outputs) = target_merge_outputs.get(&control_node) {
-                    target = pretty::Fragment::new([
-                        target,
-                        pretty::join_comma_sep(
-                            "(",
-                            outputs.iter().enumerate().map(|(output_idx, v)| {
-                                pretty::Fragment::new([
-                                    Value::ControlNodeOutput {
-                                        control_node: control_node,
-                                        output_idx: output_idx.try_into().unwrap(),
-                                    }
-                                    .print(printer),
-                                    " <- ".into(),
-                                    v.print(printer),
-                                ])
-                            }),
-                            ")",
-                        ),
-                    ]);
-                }
+            if let Some(inputs) = target_inputs.get(&target_region) {
+                target = pretty::Fragment::new([
+                    target,
+                    pretty::join_comma_sep("(", inputs.iter().map(|v| v.print(printer)), ")"),
+                ]);
             }
             target
         });
