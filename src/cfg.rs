@@ -313,10 +313,7 @@ struct DeferredEdgeBundleSet {
 /// Partially structurized `ControlRegion`, the result of combining together
 /// several smaller `ControlRegion`s, based on CFG edges between them.
 struct PartialControlRegion {
-    // FIXME(eddyb) maybe `EntityList` should really be able to be empty,
-    // and the main reason for it (distinguishing between entry and exit from
-    // an empty region) has been refactored away by having more explicit types
-    // where that distinction is necessary (e.g. `spv::lift::CfgPoint`).
+    // FIXME(eddyb) keep this in the original `ControlRegion` instead.
     children: Option<EntityList<ControlNode>>,
 
     /// When not all transitive targets could be claimed into the `ControlRegion`,
@@ -397,12 +394,8 @@ impl<'a> Structurizer<'a> {
             // is divergent, by generating undef constants (needs access to the
             // whole `FuncDecl`, not just `FuncDefBody`, to get the right types).
             if let Some(return_values) = body_region.deferred_return {
-                let body_children = body_region
-                    .children
-                    .unwrap_or_else(|| self.empty_control_region_children());
-
                 let body_def = self.func_def_body.at_mut_body().def();
-                body_def.children = body_children;
+                body_def.children = body_region.children;
                 body_def.outputs = return_values;
                 self.func_def_body.unstructured_cfg = None;
 
@@ -563,14 +556,11 @@ impl<'a> Structurizer<'a> {
             assert_eq!(initial_inputs.len(), body_inputs.len());
             assert_eq!(body_outputs.len(), body_inputs.len());
 
-            let body_children = region
-                .children
-                .unwrap_or_else(|| self.empty_control_region_children());
             let body = self.func_def_body.control_regions.define(
                 self.cx,
                 ControlRegionDef {
                     inputs: body_inputs,
-                    children: body_children,
+                    children: region.children,
                     outputs: body_outputs,
                 },
             );
@@ -750,12 +740,11 @@ impl<'a> Structurizer<'a> {
                 // HACK(eddyb) attach the unsupported `ControlInst` to a fresh
                 // new "proxy" `ControlRegion`, that can then be the target of
                 // a deferred edge, specially crafted to be unclaimable.
-                let children = self.empty_control_region_children();
                 let proxy = self.func_def_body.control_regions.define(
                     self.cx,
                     ControlRegionDef {
                         inputs: [].into_iter().collect(),
-                        children,
+                        children: None,
                         outputs: [].into_iter().collect(),
                     }
                     .into(),
@@ -794,11 +783,10 @@ impl<'a> Structurizer<'a> {
         // Prepend `unstructured_region`'s children to `region_from_control_inst`.
         let mut region = {
             let children = EntityList::concat(
-                Some(self.func_def_body.at(unstructured_region).def().children),
+                self.func_def_body.at(unstructured_region).def().children,
                 region_from_control_inst.children,
                 &mut self.func_def_body.control_nodes,
-            )
-            .unwrap();
+            );
 
             // HACK(eddyb) this updates `unstructured_region` just in case
             // `repair_unclaimed_region` needs to use it again. But it would be
@@ -809,7 +797,7 @@ impl<'a> Structurizer<'a> {
                 .children = children;
 
             PartialControlRegion {
-                children: Some(children),
+                children,
                 ..region_from_control_inst
             }
         };
@@ -1082,7 +1070,6 @@ impl<'a> Structurizer<'a> {
                 assert!(deferred_edges.target_to_deferred.is_empty() && deferred_return.is_none());
                 assert_eq!(outputs.len(), output_decls.len());
 
-                let children = children.unwrap_or_else(|| self.empty_control_region_children());
                 self.func_def_body.control_regions.define(
                     self.cx,
                     ControlRegionDef {
@@ -1189,12 +1176,13 @@ impl<'a> Structurizer<'a> {
         // HACK(eddyb) this'd be unnecessary if `PartialControlRegion` didn't
         // hold `children` (and the original `ControlRegion` was relied upon).
         {
-            let list_eq_key = |list: EntityList<_>| (list.iter().first, list.iter().last);
+            let list_eq_key = |list: Option<EntityList<_>>| {
+                list.map(|list| list.iter())
+                    .map(|iter| (iter.first, iter.last))
+            };
             assert!(
-                children.map(list_eq_key)
-                    == Some(list_eq_key(
-                        self.func_def_body.at(unstructured_region).def().children
-                    ))
+                list_eq_key(children)
+                    == list_eq_key(self.func_def_body.at(unstructured_region).def().children)
             );
         }
 
@@ -1224,12 +1212,11 @@ impl<'a> Structurizer<'a> {
                     // Either more branches, or a deferred return, are needed, so
                     // the "else" case must be a `ControlRegion` that itself can
                     // have a `ControlInst` attached to it later on.
-                    let children = self.empty_control_region_children();
                     let new_empty_region = self.func_def_body.control_regions.define(
                         self.cx,
                         ControlRegionDef {
                             inputs: [].into_iter().collect(),
-                            children,
+                            children: None,
                             outputs: [].into_iter().collect(),
                         }
                         .into(),
@@ -1302,22 +1289,6 @@ impl<'a> Structurizer<'a> {
                 .insert(final_source, final_control_inst)
                 .is_none()
         );
-    }
-
-    /// Create an empty `Block` `ControlNode` to use as the single child of an
-    /// otherwise empty `ControlRegion`.
-    //
-    // FIXME(eddyb) should `ControlRegion`s just allowed to be empty?
-    fn empty_control_region_children(&mut self) -> EntityList<ControlNode> {
-        let dummy_block = self.func_def_body.control_nodes.define(
-            self.cx,
-            ControlNodeDef {
-                kind: ControlNodeKind::Block { insts: None },
-                outputs: [].into_iter().collect(),
-            }
-            .into(),
-        );
-        EntityList::insert_last(None, dummy_block, &mut self.func_def_body.control_nodes)
     }
 
     /// Create an undefined constant (as a placeholder where a value needs to be

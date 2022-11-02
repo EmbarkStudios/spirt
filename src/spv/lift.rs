@@ -382,9 +382,13 @@ impl<'a, 'p> FuncAt<'a, CfgCursor<'p>> {
     fn unique_successor(self) -> Option<CfgCursor<'p>> {
         let cursor = self.position;
         match cursor.point {
-            // Entering a `ControlRegion` enters its first `ControlNode` child.
+            // Entering a `ControlRegion` enters its first `ControlNode` child,
+            // or exits the region right away (if it has no children).
             CfgPoint::RegionEntry(region) => Some(CfgCursor {
-                point: CfgPoint::ControlNodeEntry(self.at(region).def().children.iter().first),
+                point: match self.at(region).def().children.map(|list| list.iter().first) {
+                    Some(first_child) => CfgPoint::ControlNodeEntry(first_child),
+                    None => CfgPoint::RegionExit(region),
+                },
                 parent: cursor.parent,
             }),
 

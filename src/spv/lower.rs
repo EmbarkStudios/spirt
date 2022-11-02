@@ -759,28 +759,17 @@ impl Module {
                     Some(import) => DeclDef::Imported(import),
                     None => {
                         let mut control_regions = EntityDefs::default();
-                        let mut control_nodes = EntityDefs::default();
-                        // HACK(eddyb) can't get an empty `ControlRegion` without
-                        // using an (empty) `ControlNode` as a sole child.
-                        let entry = control_nodes.define(
-                            &cx,
-                            ControlNodeDef {
-                                kind: ControlNodeKind::Block { insts: None },
-                                outputs: SmallVec::new(),
-                            }
-                            .into(),
-                        );
                         let body = control_regions.define(
                             &cx,
                             ControlRegionDef {
                                 inputs: SmallVec::new(),
-                                children: EntityList::insert_last(None, entry, &mut control_nodes),
+                                children: None,
                                 outputs: SmallVec::new(),
                             },
                         );
                         DeclDef::Present(FuncDefBody {
                             control_regions,
-                            control_nodes,
+                            control_nodes: Default::default(),
                             data_insts: Default::default(),
                             body,
                             unstructured_cfg: Some(cfg::ControlFlowGraph::default()),
@@ -938,30 +927,15 @@ impl Module {
 
                             if opcode == wk.OpLabel {
                                 let block = if is_entry_block {
-                                    // A `ControlRegion` (using an empty `Block`
-                                    // `ControlNode` as its sole child) was defined
-                                    // earlier, to be able to create the `FuncDefBody`.
+                                    // A `ControlRegion` was defined earlier,
+                                    // to be able to create the `FuncDefBody`.
                                     func_def_body.body
                                 } else {
-                                    // HACK(eddyb) can't get an empty `ControlRegion` without
-                                    // using an (empty) `ControlNode` as a sole child.
-                                    let block_node = func_def_body.control_nodes.define(
-                                        &cx,
-                                        ControlNodeDef {
-                                            kind: ControlNodeKind::Block { insts: None },
-                                            outputs: SmallVec::new(),
-                                        }
-                                        .into(),
-                                    );
                                     func_def_body.control_regions.define(
                                         &cx,
                                         ControlRegionDef {
                                             inputs: SmallVec::new(),
-                                            children: EntityList::insert_last(
-                                                None,
-                                                block_node,
-                                                &mut func_def_body.control_nodes,
-                                            ),
+                                            children: None,
                                             outputs: SmallVec::new(),
                                         }
                                         .into(),
@@ -1174,17 +1148,6 @@ impl Module {
                     })?;
                 let current_block_control_region_def =
                     &mut func_def_body.control_regions[current_block_control_region];
-                let current_block_control_node = {
-                    let children = current_block_control_region_def.children.iter();
-                    assert!(children.first == children.last);
-                    children.first
-                };
-                let current_control_node_def =
-                    &mut func_def_body.control_nodes[current_block_control_node];
-                let current_block_insts = match &mut current_control_node_def.kind {
-                    ControlNodeKind::Block { insts } => insts,
-                    _ => unreachable!(),
-                };
 
                 if is_last_in_block {
                     if opcode.def().category != spec::InstructionCategory::ControlFlow
@@ -1316,7 +1279,7 @@ impl Module {
                             },
                         );
                 } else if opcode == wk.OpPhi {
-                    if !current_block_insts.is_none() {
+                    if !current_block_control_region_def.children.is_none() {
                         return Err(invalid(
                             "out of order: `OpPhi`s should come before \
                              the rest of the block's instructions",
@@ -1444,11 +1407,43 @@ impl Module {
                         },
                         None => func_def_body.data_insts.define(&cx, data_inst_def.into()),
                     };
-                    *current_block_insts = Some(EntityList::insert_last(
-                        *current_block_insts,
-                        inst,
-                        &mut func_def_body.data_insts,
-                    ));
+
+                    let current_block_control_node = current_block_control_region_def
+                        .children
+                        .map(|list| list.iter().last)
+                        .filter(|&last_node| {
+                            matches!(
+                                func_def_body.control_nodes[last_node].kind,
+                                ControlNodeKind::Block { .. }
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            let block_node = func_def_body.control_nodes.define(
+                                &cx,
+                                ControlNodeDef {
+                                    kind: ControlNodeKind::Block { insts: None },
+                                    outputs: SmallVec::new(),
+                                }
+                                .into(),
+                            );
+                            current_block_control_region_def.children =
+                                Some(EntityList::insert_last(
+                                    current_block_control_region_def.children,
+                                    block_node,
+                                    &mut func_def_body.control_nodes,
+                                ));
+                            block_node
+                        });
+                    match &mut func_def_body.control_nodes[current_block_control_node].kind {
+                        ControlNodeKind::Block { insts } => {
+                            *insts = Some(EntityList::insert_last(
+                                *insts,
+                                inst,
+                                &mut func_def_body.data_insts,
+                            ));
+                        }
+                        _ => unreachable!(),
+                    }
                 }
             }
 

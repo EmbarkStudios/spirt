@@ -43,16 +43,16 @@ impl<'a> FuncAt<'a, ControlRegion> {
         &self.control_regions[self.position]
     }
 
-    pub fn at_children(self) -> FuncAt<'a, EntityList<ControlNode>> {
+    pub fn at_children(self) -> FuncAt<'a, Option<EntityList<ControlNode>>> {
         self.at(self.def().children)
     }
 }
 
-impl<'a> IntoIterator for FuncAt<'a, EntityList<ControlNode>> {
+impl<'a> IntoIterator for FuncAt<'a, Option<EntityList<ControlNode>>> {
     type IntoIter = FuncAt<'a, Option<EntityListIter<ControlNode>>>;
     type Item = FuncAt<'a, ControlNode>;
     fn into_iter(self) -> Self::IntoIter {
-        self.at(Some(self.position.iter()))
+        self.at(self.position.map(|list| list.iter()))
     }
 }
 
@@ -150,16 +150,16 @@ impl<'a> FuncAtMut<'a, ControlRegion> {
         &mut self.control_regions[self.position]
     }
 
-    pub fn at_children(mut self) -> FuncAtMut<'a, EntityList<ControlNode>> {
+    pub fn at_children(mut self) -> FuncAtMut<'a, Option<EntityList<ControlNode>>> {
         let children = self.reborrow().def().children;
         self.at(children)
     }
 }
 
 // HACK(eddyb) can't implement `IntoIterator` because `next` borrows `self`.
-impl<'a> FuncAtMut<'a, EntityList<ControlNode>> {
+impl<'a> FuncAtMut<'a, Option<EntityList<ControlNode>>> {
     pub fn into_iter(self) -> FuncAtMut<'a, Option<EntityListIter<ControlNode>>> {
-        let iter = Some(self.position.iter());
+        let iter = self.position.map(|list| list.iter());
         self.at(iter)
     }
 }

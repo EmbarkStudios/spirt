@@ -368,7 +368,7 @@ pub struct ControlRegionDef {
     ///   * when this is the function body: the function's parameters
     pub inputs: SmallVec<[ControlRegionInputDecl; 2]>,
 
-    pub children: EntityList<ControlNode>,
+    pub children: Option<EntityList<ControlNode>>,
 
     /// Output values from this `ControlRegion`, provided to the parent:
     /// * when this is the function body: these are the structured return values
