@@ -280,6 +280,7 @@ impl ModuleParser {
         Self::read_from_spv_bytes(fs::read(path)?)
     }
 
+    // FIXME(eddyb) also add `from_spv_words`.
     pub fn read_from_spv_bytes(spv_bytes: Vec<u8>) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
 

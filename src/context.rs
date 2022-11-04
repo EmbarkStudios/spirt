@@ -34,6 +34,9 @@ mod sealed {
         fn cx_interner(cx: &super::Context) -> &Interner<Self>;
     }
 
+    // FIXME(eddyb) one `Box` per element is inefficient, figure out if e.g.
+    // the `rental` crate could allow keeping an `arena: TypedArena<I::Def>`
+    // alongside the `FrozenIndexSet` (which would then use `&'arena I::Def`).
     pub struct Interner<I: Interned>(
         elsa::FrozenIndexSet<Box<I::Def>, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>,
     );

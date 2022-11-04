@@ -91,6 +91,9 @@ fn invalid(reason: &str) -> io::Error {
 // FIXME(eddyb) provide more information about any normalization that happened:
 // * stats about deduplication that occured through interning
 // * sets of unused global vars and functions (and types+consts only they use)
+// FIXME(eddyb) consider introducing a "deferred error" system, where `spv::lower`
+// (and more directproducers) can keep around errors in the SPIR-T IR, and still
+// have the opportunity of silencing them e.g. by removing dead code.
 impl Module {
     pub fn lower_from_spv_file(cx: Rc<Context>, path: impl AsRef<Path>) -> io::Result<Self> {
         Self::lower_from_spv_module_parser(cx, spv::read::ModuleParser::read_from_spv_file(path)?)

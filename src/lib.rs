@@ -218,6 +218,11 @@ pub enum Import {
     LinkName(InternedStr),
 }
 
+// FIXME(eddyb) mark any `GlobalVar` not *controlled* by the SPIR-V module
+// (roughly: storage classes that don't allow initializers, i.e. most of them),
+// as an "import" from "the shader interface", and therefore "externally visible",
+// to implicitly distinguish it from `GlobalVar`s internal to the module
+// (such as any constants that may need to be reshaped for legalization).
 #[derive(Clone)]
 pub struct GlobalVarDecl {
     pub attrs: AttrSet,
@@ -261,6 +266,7 @@ pub struct FuncParam {
     pub ty: Type,
 }
 
+// FIXME(eddyb) `FuncDefBody`/`func_def_body` are too long, find shorter names.
 #[derive(Clone)]
 pub struct FuncDefBody {
     pub control_regions: EntityDefs<ControlRegion>,

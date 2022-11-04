@@ -183,6 +183,31 @@ impl ControlFlowGraph {
     }
 }
 
+/// Control-flow "structurizer", which attempts to convert as much of the CFG
+/// as possible into structural control-flow (regions).
+///
+/// See `StructurizeRegionState`'s docs for more details on the algorithm.
+//
+// FIXME(eddyb) document this (instead of having it on `StructurizeRegionState`).
+//
+// NOTE(eddyb) CFG structurizer has these stages (per-region):
+//   1. absorb any deferred exits that finally have 100% refcount
+//   2. absorb a single backedge deferred exit to the same region
+//
+//   What we could add is a third step, to handle irreducible controlflow:
+//   3. check for groups of exits that have fully satisfied refcounts iff the
+//     rest of the exits in the group are all added together - if so, the group
+//     is *irreducible* and a single "loop header" can be created, that gets
+//     the group of deferred exits, and any other occurrence of the deferred
+//     exits (in either the original region, or amongst themselves) can be
+//     replaced with the "loop header" with appropriate selector inputs
+//
+//   Sadly 3. requires a bunch of tests that are hard to craft (can rustc MIR
+//   even end up in the right shape?).
+//   OpenCL has `goto` so maybe it can also be used for this worse-than-diamond
+//   example: `entry -> a,b,d` `a,b -> c` `a,b,c -> d` `a,b,c,d <-> a,b,c,d`
+//   (the goal is avoiding a "flat group", i.e. where there is only one step
+//   between every exit in the group and another exit)
 pub struct Structurizer<'a> {
     cx: &'a Context,
 
