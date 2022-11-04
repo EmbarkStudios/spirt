@@ -377,9 +377,18 @@ impl Spec {
     pub fn get() -> &'static Spec {
         lazy_static! {
             static ref SPEC: Spec = {
-                let raw_core_grammar: raw::CoreGrammar = serde_json::from_str(include_str!(
+                // NOTE(eddyb) the comment inside the invocation below exists to
+                // show up when the file is missing (due to git submodules not
+                // being checked out), which is why it's styled the way it is.
+                const SPIRV_CORE_GRAMMAR_JSON: &str = include_str!(
+                    // help: when building from a git checkout, git submodules
+                    //     also need to be initialized/checked out, by running:
+                    //     `git submodule update --init`
+                    // note: if the error persists, please open an issue
                     "../../khronos-spec/SPIRV-Headers/include/spirv/unified1/spirv.core.grammar.json"
-                ))
+                );
+
+                let raw_core_grammar: raw::CoreGrammar = serde_json::from_str(SPIRV_CORE_GRAMMAR_JSON)
                 .unwrap();
                 Spec::from_raw(raw_core_grammar)
             };
