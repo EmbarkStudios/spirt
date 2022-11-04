@@ -314,7 +314,7 @@ struct DeferredEdgeBundleSet {
 /// several smaller `ControlRegion`s, based on CFG edges between them.
 struct PartialControlRegion {
     // FIXME(eddyb) keep this in the original `ControlRegion` instead.
-    children: Option<EntityList<ControlNode>>,
+    children: EntityList<ControlNode>,
 
     /// When not all transitive targets could be claimed into the `ControlRegion`,
     /// some remain as deferred exits, blocking further structurization until
@@ -470,7 +470,7 @@ impl<'a> Structurizer<'a> {
             target_inputs,
         })
         .unwrap_or_else(|deferred| PartialControlRegion {
-            children: None,
+            children: EntityList::empty(),
             deferred_edges: DeferredEdgeBundleSet {
                 target_to_deferred: [(deferred.edge_bundle.target, deferred)]
                     .into_iter()
@@ -596,11 +596,10 @@ impl<'a> Structurizer<'a> {
 
             // Replace the region with the whole loop, any exits out of the loop
             // being encoded in `region.deferred_*`.
-            region.children = Some(EntityList::insert_last(
-                None,
-                loop_node,
-                &mut self.func_def_body.control_nodes,
-            ));
+            region.children = EntityList::empty();
+            region
+                .children
+                .insert_last(loop_node, &mut self.func_def_body.control_nodes);
         }
 
         if !edge_bundle.target_inputs.is_empty() {
@@ -683,7 +682,7 @@ impl<'a> Structurizer<'a> {
                     // (e.g. a new `ControlKind`, or replacing region `outputs`),
                     // but it's simpler to handle it like this.
                     Ok(PartialControlRegion {
-                        children: None,
+                        children: EntityList::empty(),
                         deferred_edges: DeferredEdgeBundleSet {
                             target_to_deferred: [].into_iter().collect(),
                         },
@@ -708,7 +707,7 @@ impl<'a> Structurizer<'a> {
                     assert_eq!(child_regions.len(), 0);
 
                     Ok(PartialControlRegion {
-                        children: None,
+                        children: EntityList::empty(),
                         deferred_edges: DeferredEdgeBundleSet {
                             target_to_deferred: [].into_iter().collect(),
                         },
@@ -744,7 +743,7 @@ impl<'a> Structurizer<'a> {
                     self.cx,
                     ControlRegionDef {
                         inputs: [].into_iter().collect(),
-                        children: None,
+                        children: EntityList::empty(),
                         outputs: [].into_iter().collect(),
                     }
                     .into(),
@@ -769,7 +768,7 @@ impl<'a> Structurizer<'a> {
                 };
 
                 PartialControlRegion {
-                    children: None,
+                    children: EntityList::empty(),
                     deferred_edges: DeferredEdgeBundleSet {
                         target_to_deferred: [deferred_proxy]
                             .into_iter()
@@ -782,8 +781,9 @@ impl<'a> Structurizer<'a> {
 
         // Prepend `unstructured_region`'s children to `region_from_control_inst`.
         let mut region = {
-            let children = EntityList::concat(
-                self.func_def_body.at(unstructured_region).def().children,
+            let mut children = self.func_def_body.at(unstructured_region).def().children;
+
+            children.append(
                 region_from_control_inst.children,
                 &mut self.func_def_body.control_nodes,
             );
@@ -836,7 +836,7 @@ impl<'a> Structurizer<'a> {
             try_claim_any_deferred_edge(self, &mut region.deferred_edges)
         {
             let else_region = PartialControlRegion {
-                children: None,
+                children: EntityList::empty(),
                 ..region
             };
             let else_is_unreachable = else_region.deferred_edges.target_to_deferred.is_empty()
@@ -844,7 +844,7 @@ impl<'a> Structurizer<'a> {
 
             // `then_region` is only taken if `condition` holds, except that
             // `condition` can be ignored when `else_region` is unreachable.
-            let merged_region = if else_is_unreachable {
+            let mut merged_region = if else_is_unreachable {
                 then_region
             } else {
                 self.structurize_select(
@@ -855,14 +855,11 @@ impl<'a> Structurizer<'a> {
             };
 
             // Prepend the original children to the freshly merged region.
-            region = PartialControlRegion {
-                children: EntityList::concat(
-                    region.children,
-                    merged_region.children,
-                    &mut self.func_def_body.control_nodes,
-                ),
-                ..merged_region
-            };
+            merged_region
+                .children
+                .prepend(region.children, &mut self.func_def_body.control_nodes);
+
+            region = merged_region;
         }
 
         // Try to extract (deferred) backedges (which later get turned into loops).
@@ -903,7 +900,7 @@ impl<'a> Structurizer<'a> {
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| PartialControlRegion {
-                    children: None,
+                    children: EntityList::empty(),
                     deferred_edges: DeferredEdgeBundleSet {
                         target_to_deferred: [].into_iter().collect(),
                     },
@@ -1139,12 +1136,10 @@ impl<'a> Structurizer<'a> {
             }
         }
 
+        let mut children = EntityList::empty();
+        children.insert_last(select_node, &mut self.func_def_body.control_nodes);
         PartialControlRegion {
-            children: Some(EntityList::insert_last(
-                None,
-                select_node,
-                &mut self.func_def_body.control_nodes,
-            )),
+            children,
             deferred_edges,
             deferred_return,
         }
@@ -1176,10 +1171,7 @@ impl<'a> Structurizer<'a> {
         // HACK(eddyb) this'd be unnecessary if `PartialControlRegion` didn't
         // hold `children` (and the original `ControlRegion` was relied upon).
         {
-            let list_eq_key = |list: Option<EntityList<_>>| {
-                list.map(|list| list.iter())
-                    .map(|iter| (iter.first, iter.last))
-            };
+            let list_eq_key = |l: EntityList<_>| (l.iter().first, l.iter().last);
             assert!(
                 list_eq_key(children)
                     == list_eq_key(self.func_def_body.at(unstructured_region).def().children)
@@ -1216,7 +1208,7 @@ impl<'a> Structurizer<'a> {
                         self.cx,
                         ControlRegionDef {
                             inputs: [].into_iter().collect(),
-                            children: None,
+                            children: EntityList::empty(),
                             outputs: [].into_iter().collect(),
                         }
                         .into(),

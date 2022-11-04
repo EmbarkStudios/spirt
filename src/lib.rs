@@ -368,7 +368,7 @@ pub struct ControlRegionDef {
     ///   * when this is the function body: the function's parameters
     pub inputs: SmallVec<[ControlRegionInputDecl; 2]>,
 
-    pub children: Option<EntityList<ControlNode>>,
+    pub children: EntityList<ControlNode>,
 
     /// Output values from this `ControlRegion`, provided to the parent:
     /// * when this is the function body: these are the structured return values
@@ -416,13 +416,9 @@ pub enum ControlNodeKind {
     /// This is only an optimization over keeping `DataInst`s in `ControlRegion`
     /// linear chains directly, or even merging `DataInst` with `ControlNode`.
     Block {
-        // FIXME(eddyb) should empty blocks be allowed? should their usecases be
-        // handled by a different `ControlNodeKind`? they mainly exist so that
-        // an empty `ControlRegion` can still have an entry & exit, but that
-        // itself might not be necessary (ironically, that's the main reason for
-        // `EntityList` being non-empty, so there's a kind of "balancing act").
-        // (OTOH, empty blocks could easily arise through e.g. dead code removal)
-        insts: Option<EntityList<DataInst>>,
+        // FIXME(eddyb) should empty blocks be allowed? should `DataInst`s be
+        // linked directly into the `ControlRegion` `children` list?
+        insts: EntityList<DataInst>,
     },
 
     /// Choose one `ControlRegion` out of `cases` to execute, based on a single

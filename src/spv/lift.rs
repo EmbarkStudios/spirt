@@ -385,7 +385,7 @@ impl<'a, 'p> FuncAt<'a, CfgCursor<'p>> {
             // Entering a `ControlRegion` enters its first `ControlNode` child,
             // or exits the region right away (if it has no children).
             CfgPoint::RegionEntry(region) => Some(CfgCursor {
-                point: match self.at(region).def().children.map(|list| list.iter().first) {
+                point: match self.at(region).def().children.iter().first {
                     Some(first_child) => CfgPoint::ControlNodeEntry(first_child),
                     None => CfgPoint::RegionExit(region),
                 },
@@ -634,7 +634,7 @@ impl<'a> FuncLifting<'a> {
             let insts = match point {
                 CfgPoint::ControlNodeEntry(control_node) => {
                     match func_def_body.at(control_node).def().kind {
-                        ControlNodeKind::Block { insts } => insts.into_iter().collect(),
+                        ControlNodeKind::Block { insts } => [insts].into_iter().collect(),
                         _ => SmallVec::new(),
                     }
                 }
@@ -996,7 +996,7 @@ impl<'a> FuncLifting<'a> {
         let all_insts_with_output = blocks
             .values()
             .flat_map(|block| block.insts.iter().copied())
-            .flat_map(|insts| func_def_body.at(Some(insts)))
+            .flat_map(|insts| func_def_body.at(insts))
             .filter(|&func_at_inst| func_at_inst.def().output_type.is_some())
             .map(|func_at_inst| func_at_inst.position);
 
@@ -1504,7 +1504,7 @@ impl Module {
                             insts
                                 .iter()
                                 .copied()
-                                .flat_map(move |insts| func_def_body.unwrap().at(Some(insts)))
+                                .flat_map(move |insts| func_def_body.unwrap().at(insts))
                                 .map(move |func_at_inst| {
                                     let data_inst_def = func_at_inst.def();
                                     LazyInst::DataInst {

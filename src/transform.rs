@@ -528,7 +528,7 @@ impl InnerTransform for ControlRegionInputDecl {
     }
 }
 
-impl InnerInPlaceTransform for FuncAtMut<'_, Option<EntityListIter<ControlNode>>> {
+impl InnerInPlaceTransform for FuncAtMut<'_, EntityListIter<ControlNode>> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         let mut iter = self.reborrow();
         while let Some(func_at_control_node) = iter.next() {

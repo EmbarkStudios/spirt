@@ -2251,7 +2251,7 @@ impl Print for FuncAt<'_, ControlRegion> {
     }
 }
 
-impl Print for FuncAt<'_, Option<EntityListIter<ControlNode>>> {
+impl Print for FuncAt<'_, EntityListIter<ControlNode>> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         pretty::Fragment::new(

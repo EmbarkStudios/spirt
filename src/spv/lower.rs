@@ -763,7 +763,7 @@ impl Module {
                             &cx,
                             ControlRegionDef {
                                 inputs: SmallVec::new(),
-                                children: None,
+                                children: EntityList::empty(),
                                 outputs: SmallVec::new(),
                             },
                         );
@@ -935,7 +935,7 @@ impl Module {
                                         &cx,
                                         ControlRegionDef {
                                             inputs: SmallVec::new(),
-                                            children: None,
+                                            children: EntityList::empty(),
                                             outputs: SmallVec::new(),
                                         }
                                         .into(),
@@ -1279,7 +1279,7 @@ impl Module {
                             },
                         );
                 } else if opcode == wk.OpPhi {
-                    if !current_block_control_region_def.children.is_none() {
+                    if !current_block_control_region_def.children.is_empty() {
                         return Err(invalid(
                             "out of order: `OpPhi`s should come before \
                              the rest of the block's instructions",
@@ -1410,7 +1410,8 @@ impl Module {
 
                     let current_block_control_node = current_block_control_region_def
                         .children
-                        .map(|list| list.iter().last)
+                        .iter()
+                        .last
                         .filter(|&last_node| {
                             matches!(
                                 func_def_body.control_nodes[last_node].kind,
@@ -1421,26 +1422,21 @@ impl Module {
                             let block_node = func_def_body.control_nodes.define(
                                 &cx,
                                 ControlNodeDef {
-                                    kind: ControlNodeKind::Block { insts: None },
+                                    kind: ControlNodeKind::Block {
+                                        insts: EntityList::empty(),
+                                    },
                                     outputs: SmallVec::new(),
                                 }
                                 .into(),
                             );
-                            current_block_control_region_def.children =
-                                Some(EntityList::insert_last(
-                                    current_block_control_region_def.children,
-                                    block_node,
-                                    &mut func_def_body.control_nodes,
-                                ));
+                            current_block_control_region_def
+                                .children
+                                .insert_last(block_node, &mut func_def_body.control_nodes);
                             block_node
                         });
                     match &mut func_def_body.control_nodes[current_block_control_node].kind {
                         ControlNodeKind::Block { insts } => {
-                            *insts = Some(EntityList::insert_last(
-                                *insts,
-                                inst,
-                                &mut func_def_body.data_insts,
-                            ));
+                            insts.insert_last(inst, &mut func_def_body.data_insts);
                         }
                         _ => unreachable!(),
                     }

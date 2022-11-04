@@ -65,6 +65,13 @@ mod sealed {
         }
     }
 
+    // FIXME(eddyb) reflect "is an `Entity`" in a non-sealed way, by having an
+    // e.g. `pub trait IsEntity: Entity {}` w/ a blanket impl, that users could
+    // not implement themselves because of the `Entity` requirement, but could
+    // still bound on, and it would imply `Entity` as needed - this could even
+    // be named `Entity`, with `sealed::Entity` only used (by `context`) for:
+    // - `impl sealed::Entity for $name` to define an entity
+    // - `use sealed::Entity as _;` to use associated items from the trait
     pub trait Entity: Sized + Copy + Eq + std::hash::Hash + 'static {
         type Def;
 
@@ -446,44 +453,52 @@ impl<K: EntityOrientedMapKey<V>, V> std::ops::IndexMut<K> for EntityOrientedDens
     }
 }
 
-/// Doubly-linked non-empty list, "intrusively" going through `E::Def`, which
-/// must be a `EntityListNode<E, _>`.
+/// Doubly-linked list, "intrusively" going through `E::Def`, which must be an
+/// `EntityListNode<E, _>` (to hold the "previous/next node" links).
 ///
 /// Fields are private to avoid arbitrary user interactions.
-///
-/// For a possibly-empty list, wrap an `EntityList` in `Option`.
-//
-// FIXME(eddyb) the non-empty aspect is very handy for `ControlRegion`, but
-// should it exist generally? maybe two types are needed instead?
 #[derive(Copy, Clone)]
-pub struct EntityList<E: sealed::Entity> {
-    first: E,
-    last: E,
+pub struct EntityList<E: sealed::Entity>(Option<FirstLast<E, E>>);
+
+// HACK(eddyb) this only exists to give field names to the non-empty case.
+#[derive(Copy, Clone)]
+struct FirstLast<F, L> {
+    first: F,
+    last: L,
+}
+
+impl<E: sealed::Entity> Default for EntityList<E> {
+    fn default() -> Self {
+        Self(None)
+    }
 }
 
 impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0.is_none()
+    }
+
     pub fn iter(self) -> EntityListIter<E> {
         EntityListIter {
-            first: self.first,
-            last: self.last,
+            first: self.0.map(|list| list.first),
+            last: self.0.map(|list| list.last),
         }
     }
 
-    /// Insert `new_node` (defined in `defs`) at the start of `old_list`, producing
-    /// a new list. This does not rely on `&mut self` because of the assymmetry
-    /// between `old_list` and the new list (which doesn't need `Option`).
-    //
-    // FIXME(eddyb) the awkwardness of this API could be alleviated by not
-    // requiring `EntityList` to be non-empty.
+    /// Insert `new_node` (defined in `defs`) at the start of `self`.
     #[track_caller]
-    pub fn insert_first(old_list: Option<Self>, new_node: E, defs: &mut EntityDefs<E>) -> Self {
+    pub fn insert_first(&mut self, new_node: E, defs: &mut EntityDefs<E>) {
         let new_node_def = &mut defs[new_node];
         assert!(
             new_node_def.prev.is_none() && new_node_def.next.is_none(),
             "EntityList::insert_first: new node already linked into a (different?) list"
         );
 
-        new_node_def.next = old_list.map(|ol| ol.first);
+        new_node_def.next = self.0.map(|this| this.first);
         if let Some(old_first) = new_node_def.next {
             let old_first_def = &mut defs[old_first];
 
@@ -497,27 +512,22 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             old_first_def.prev = Some(new_node);
         }
 
-        Self {
+        self.0 = Some(FirstLast {
             first: new_node,
-            last: old_list.map_or(new_node, |ol| ol.last),
-        }
+            last: self.0.map_or(new_node, |this| this.last),
+        });
     }
 
-    /// Insert `new_node` (defined in `defs`) at the end of `old_list`, producing
-    /// a new list. This does not rely on `&mut self` because of the assymmetry
-    /// between `old_list` and the new list (which doesn't need `Option`).
-    //
-    // FIXME(eddyb) the awkwardness of this API could be alleviated by not
-    // requiring `EntityList` to be non-empty.
+    /// Insert `new_node` (defined in `defs`) at the end of `self`.
     #[track_caller]
-    pub fn insert_last(old_list: Option<Self>, new_node: E, defs: &mut EntityDefs<E>) -> Self {
+    pub fn insert_last(&mut self, new_node: E, defs: &mut EntityDefs<E>) {
         let new_node_def = &mut defs[new_node];
         assert!(
             new_node_def.prev.is_none() && new_node_def.next.is_none(),
             "EntityList::insert_last: new node already linked into a (different?) list"
         );
 
-        new_node_def.prev = old_list.map(|ol| ol.last);
+        new_node_def.prev = self.0.map(|this| this.last);
         if let Some(old_last) = new_node_def.prev {
             let old_last_def = &mut defs[old_last];
 
@@ -531,22 +541,30 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             old_last_def.next = Some(new_node);
         }
 
-        Self {
-            first: old_list.map_or(new_node, |ol| ol.first),
+        self.0 = Some(FirstLast {
+            first: self.0.map_or(new_node, |this| this.first),
             last: new_node,
-        }
+        });
     }
 
-    /// Concatenate lists `a` and `b`, producing a new list.
-    //
-    // FIXME(eddyb) the awkwardness of this API could be alleviated by not
-    // requiring `EntityList` to be non-empty.
+    /// Insert all of `list_to_prepend`'s nodes at the start of `self`.
     #[track_caller]
-    pub fn concat(a: Option<Self>, b: Option<Self>, defs: &mut EntityDefs<E>) -> Option<Self> {
-        let (a, b) = match (a, b) {
-            (None, None) => return None,
-            (Some(list), None) | (None, Some(list)) => return Some(list),
+    pub fn prepend(&mut self, list_to_prepend: Self, defs: &mut EntityDefs<E>) {
+        *self = Self::concat(list_to_prepend, *self, defs);
+    }
+
+    /// Insert all of `list_to_append`'s nodes at the end of `self`.
+    #[track_caller]
+    pub fn append(&mut self, list_to_append: Self, defs: &mut EntityDefs<E>) {
+        *self = Self::concat(*self, list_to_append, defs);
+    }
+
+    /// Private helper for `prepend`/`append`.
+    #[track_caller]
+    fn concat(a: Self, b: Self, defs: &mut EntityDefs<E>) -> Self {
+        let (a, b) = match (a.0, b.0) {
             (Some(a), Some(b)) => (a, b),
+            (a, b) => return Self(a.or(b)),
         };
 
         {
@@ -574,31 +592,27 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             b_first_def.prev = Some(a.last);
         }
 
-        Some(Self {
+        Self(Some(FirstLast {
             first: a.first,
             last: b.last,
-        })
+        }))
     }
 }
 
-/// Non-empty `EntityList<E>` iterator, but with a different API than `Iterator`.
+/// `EntityList<E>` iterator, but with a different API than `Iterator`.
 ///
 /// This can also be considered a (non-random-access) "subslice" of the list.
-///
-/// For a possibly-empty iterator, wrap an `EntityListIter` in `Option`.
 #[derive(Copy, Clone)]
 pub struct EntityListIter<E: sealed::Entity> {
-    pub first: E,
-    pub last: E,
+    pub first: Option<E>,
+    pub last: Option<E>,
 }
 
 impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityListIter<E> {
     #[track_caller]
-    pub fn split_first(self, defs: &EntityDefs<E>) -> (E, Option<Self>) {
-        let Self {
-            first: current,
-            last,
-        } = self;
+    pub fn split_first(self, defs: &EntityDefs<E>) -> Option<(E, Self)> {
+        let Self { first, last } = self;
+        let current = first?;
         let next = defs[current].next;
         match next {
             // FIXME(eddyb) this situation should be impossible anyway, as it
@@ -609,19 +623,17 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityListIter<E> {
             ),
 
             None => assert!(
-                current == last,
+                Some(current) == last,
                 "invalid EntityListIter: `first->next->...->next != last`"
             ),
         }
-        (current, next.map(|next| Self { first: next, last }))
+        Some((current, Self { first: next, last }))
     }
 
     #[track_caller]
-    pub fn split_last(self, defs: &EntityDefs<E>) -> (E, Option<Self>) {
-        let Self {
-            first,
-            last: current,
-        } = self;
+    pub fn split_last(self, defs: &EntityDefs<E>) -> Option<(E, Self)> {
+        let Self { first, last } = self;
+        let current = last?;
         let prev = defs[current].prev;
         match prev {
             // FIXME(eddyb) this situation should be impossible anyway, as it
@@ -632,11 +644,11 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityListIter<E> {
             ),
 
             None => assert!(
-                current == first,
+                Some(current) == first,
                 "invalid EntityListIter: `last->prev->...->prev != first`"
             ),
         }
-        (current, prev.map(|prev| Self { first, last: prev }))
+        Some((current, Self { first, last: prev }))
     }
 }
 

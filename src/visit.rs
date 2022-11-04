@@ -391,7 +391,7 @@ impl InnerVisit for ControlRegionInputDecl {
 
 // FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ...>`.
-impl<'a> FuncAt<'a, Option<EntityListIter<ControlNode>>> {
+impl<'a> FuncAt<'a, EntityListIter<ControlNode>> {
     pub fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
         for func_at_control_node in self {
             visitor.visit_control_node_def(func_at_control_node);
