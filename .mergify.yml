@@ -1,0 +1,24 @@
+pull_request_rules:
+  - name: automatic merge when CI passes and 1 reviews
+    conditions:
+      - "#approved-reviews-by>=1"
+      - "#review-requested=0"
+      - "#changes-requested-reviews-by=0"
+      - "#review-threads-unresolved=0"
+      - base=main
+      - label!=block-automerge
+      # TODO: If you're not a Rust project and aren't using the bundled rust-ci workflows,
+      # remove these or change them to the relevant CI job names:
+      - check-success=Lint
+      - check-success=Build & Test (ubuntu-latest)
+      - check-success=Build & Test (windows-latest)
+      - check-success=Build & Test (macOS-latest)
+      - check-success=Publish Check
+    actions:
+      merge:
+        method: squash
+  - name: delete head branch after merge
+    conditions:
+      - merged
+    actions:
+      delete_head_branch: {}
