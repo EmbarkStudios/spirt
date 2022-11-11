@@ -31,7 +31,9 @@ fn main() -> std::io::Result<()> {
                 r
             }
 
-            eprint_duration(|| spirt::spv::spec::Spec::get());
+            eprint_duration(|| {
+                let _ = spirt::spv::spec::Spec::get();
+            });
             eprintln!("spv::spec::Spec::get");
 
             let cx = Rc::new(spirt::Context::new());

@@ -374,6 +374,7 @@ pub enum LiteralSize {
 impl Spec {
     /// Return a lazily-loaded `Spec` (only does significant work for the first call).
     #[inline(always)]
+    #[must_use]
     pub fn get() -> &'static Spec {
         lazy_static! {
             static ref SPEC: Spec = {

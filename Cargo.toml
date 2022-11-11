@@ -7,6 +7,7 @@ description = "Shader-focused IR to target, transform and translate from."
 
 [dependencies]
 arrayvec = "0.7.1"
+bytemuck = "1.12.3"
 elsa = { version = "1.6.0", features = ["indexmap"] }
 indexmap = "1.7.0"
 itertools = "0.10.3"

@@ -278,22 +278,6 @@ fn invalid(reason: &str) -> io::Error {
     )
 }
 
-// FIXME(eddyb) find a safe wrapper crate for these.
-fn u8_slice_to_u32_slice_mut(xs: &mut [u8]) -> &mut [u32] {
-    unsafe {
-        let (prefix, out, suffix) = xs.align_to_mut();
-        assert_eq!((prefix, suffix), (&mut [][..], &mut [][..]));
-        out
-    }
-}
-fn u8_slice_to_u32_slice(xs: &[u8]) -> &[u32] {
-    unsafe {
-        let (prefix, out, suffix) = xs.align_to();
-        assert_eq!((prefix, suffix), (&[][..], &[][..]));
-        out
-    }
-}
-
 impl ModuleParser {
     pub fn read_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
         Self::read_from_spv_bytes(fs::read(path)?)
@@ -308,7 +292,7 @@ impl ModuleParser {
         }
         // May need to mutate the bytes (to normalize endianness) later below.
         let mut spv_bytes = spv_bytes;
-        let spv_words = u8_slice_to_u32_slice_mut(&mut spv_bytes);
+        let spv_words = bytemuck::cast_slice_mut::<u8, u32>(&mut spv_bytes);
 
         if spv_words.len() < spec::HEADER_LEN {
             return Err(invalid("truncated header"));
@@ -344,7 +328,7 @@ impl Iterator for ModuleParser {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
-        let words = &u8_slice_to_u32_slice(&self.word_bytes)[self.next_word..];
+        let words = &bytemuck::cast_slice::<u8, u32>(&self.word_bytes)[self.next_word..];
         let &opcode = words.get(0)?;
 
         let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);

@@ -248,17 +248,6 @@ impl ModuleEmitter {
     }
 
     pub fn write_to_spv_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let spv_bytes = {
-            // FIXME(eddyb) find a safe wrapper crate for this.
-            fn u32_slice_to_u8_slice(xs: &[u32]) -> &[u8] {
-                unsafe {
-                    let (prefix, out, suffix) = xs.align_to();
-                    assert_eq!((prefix, suffix), (&[][..], &[][..]));
-                    out
-                }
-            }
-            u32_slice_to_u8_slice(&self.words)
-        };
-        fs::write(path, spv_bytes)
+        fs::write(path, bytemuck::cast_slice::<u32, u8>(&self.words))
     }
 }
