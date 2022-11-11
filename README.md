@@ -6,36 +6,73 @@
 
 <div align="center">
 
-<!--- FIXME: Pick an emoji and name your project! --->
-# `🌻 opensource-template`
+# `SPIR-🇹`
 
-<!--- FIXME: Write short catchy description/tagline of project --->
-**Template for creating new open source repositories that follow the Embark open source guidelines**
-
-<!--- FIXME: Update crate, repo and CI workflow names here! Remove any that are not relevant --->
+**⋯🢒 🇹arget 🠆 🇹ransform 🠆 🇹ranslate ⋯🢒**
 
 [![Embark](https://img.shields.io/badge/embark-open%20source-blueviolet.svg)](https://embark.dev)
-[![Embark](https://img.shields.io/badge/discord-ark-%237289da.svg?logo=discord)](https://discord.gg/dAuKfZS)
-[![Crates.io](https://img.shields.io/crates/v/rust-gpu.svg)](https://crates.io/crates/rust-gpu)
-[![Docs](https://docs.rs/rust-gpu/badge.svg)](https://docs.rs/rust-gpu)
-[![Git Docs](https://img.shields.io/badge/git%20main%20docs-published-blue)](https://embarkstudios.github.io/presser/presser/index.html)
-[![dependency status](https://deps.rs/repo/github/EmbarkStudios/rust-gpu/status.svg)](https://deps.rs/repo/github/EmbarkStudios/rust-gpu)
-[![Build status](https://github.com/EmbarkStudios/physx-rs/workflows/CI/badge.svg)](https://github.com/EmbarkStudios/physx-rs/actions)
+[![Crates.io](https://img.shields.io/crates/v/spirt.svg)](https://crates.io/crates/spirt)
+[![Docs](https://docs.rs/spirt/badge.svg)](https://docs.rs/spirt)
+[![Git Docs](https://img.shields.io/badge/git%20main%20docs-published-blue)](https://embarkstudios.github.io/spirt/spirt/index.html)
+[![dependency status](https://deps.rs/repo/github/EmbarkStudios/spirt/status.svg)](https://deps.rs/repo/github/EmbarkStudios/spirt)
+[![Build status](https://github.com/EmbarkStudios/spirt/workflows/CI/badge.svg)](https://github.com/EmbarkStudios/spirt/actions)
 </div>
 
-## TEMPLATE INSTRUCTIONS
+**SPIR-🇹** is a research project aimed at exploring shader-oriented IR designs derived from SPIR-V, and producing a framework around such an IR to facilitate advanced compilation pipelines, beyond what existing SPIR-V tooling allows for.
 
-1. Create a new repository under EmbarkStudios using this template.
-1. **Title:** Change the first line of this README to the name of your project, and replace the sunflower with an emoji that represents your project. 🚨 Your emoji selection is critical.
-1. **Badges:** In the badges section above, change the repo name in each URL. If you are creating something other than a Rust crate, remove the crates.io and docs badges (and feel free to add more appropriate ones for your language).
-1. **CI:** In `./github/workflows/` rename `rust-ci.yml` (or the appropriate config for your language) to `ci.yml`. And go over it and adapt it to work for your project
-    - If you aren't using or customized the CI workflow, also see the TODO in `.mergify.yml`
-    - If you want to use the automatic rustdoc publishing to github pages for git main, see `rustdoc-pages.yml`
-1. **Issue & PR Templates**: Review the files in `.github/ISSUE_TEMPLATE` and `.github/pull_request_template`. Adapt them
-to suit your needs, removing or re-wording any sections that don't make sense for your use case.
-1. **CHANGELOG.md:** Change the `$REPO_NAME` in the links at the bottom to the name of the repository, and replace the example template lines with the actual notes for the repository/crate.
-1. **release.toml:** in `./release.toml` change the `$REPO_NAME` to the name of the repository
-1. **Cleanup:** Remove this section of the README and any unused files (such as configs for other languages) from the repo.
+This need arose in the [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu) project, which requires a variety of legalization transformations to turn general-purpose code operating on *untyped* memory, into GPU-friendly direct data-flow.
+Rust is not unique in its needs here, and more languages (or IRs) could eventually make use of such a framework, but the initial design and implementation work has focused on [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu).
+
+## Status
+
+🚧 *This project is in active design and development, many details can and will change* 🚧
+
+### Designed and implemented so far
+
+**IR datatypes**:
+* allowing near-arbitrary SPIR-V instructions for any unrecognized opcodes
+  * IDs are replaced with interned/"entity" handles (see below)
+* interning for attributes (decorations & similar), types and constants
+  * i.e. automatic deduplication, efficient indexing, and no concept of "definition"
+    (only uses of interned handles can lead to a module being considered to contain a specific type/constant)
+* "entity" system for e.g. definitions in a module, instructions in a function, etc.
+  * disallows iteration in favor of/forcing the use of efficient indexing
+* structured control-flow "regions" inspired by RVSDG, stricter than SPIR-V
+  (see `ControlRegionDef`'s docs for more details)
+
+**Framework utilities**:
+* `visit`/`transform`: immutable/mutable IR traversal
+* `print`: pretty-printer with (syntax-highlighted and hyperlinked) HTML output
+
+**Passes (to/from/on SPIR-🇹)**:
+* `spv::lower`: "lowering" from SPIR-V, normalizing away many irrelevant details
+  * lossy for some relevant details (these are bugs, though many are non-semantic so lower priority)
+* `spv::lift`: "lifting" back up to SPIR-V, making arbitrary choices where necessary
+  * comparable to e.g. generating GLSL syntax from SPIR-V, just one level down
+* `cfg::Structurizer`: (re)structurization, from arbitrary control-flow to the stricter structured "regions"
+* `passes::link`: mapping (linkage) imports to relevant exports
+
+<!--
+## Quick example
+
+**TODO(eddyb) compare GLSL/SPIR-V/WGSL/SPIR-T, likely for something w/ a simple loop + conditionals**
+-->
+
+## GPU (shader) IR landscape overview
+*(and the vision of how SPIR-T fits into it)*
+
+![](docs/landscape.svg)
+
+The distinction being made here is between:
+* **Interchange IRs** (standards that many tools can use to interoperate)
+  * SPIR-V was very much intended as such a standard
+    (outside of the GPU space, wasm is also a great example)
+  * they only need to encode the right concepts, not straying too far away from what tools understand, but the design effort is often oriented around being a "serialization" format
+* **Compiler IRs** (non-standard implementation details of compilers)
+  * LLVM is quite well-known, but Mesa's NIR is even closer to **SPIR-🇹**
+    (both being shader-oriented, and having similar specialized choices of e.g. handling control-flow)
+  * these _have to_ handle legalization/optimization passes quite well, and in general a lot of on-the-fly transformations - as their main purpose is to _expedite_ such operations
+  * this is where **SPIR-🇹** sits, as a kind of "relative"/dialect of SPIR-V, but making trade-offs in favor of the "intra-compiler" usage
 
 ## Contribution
 

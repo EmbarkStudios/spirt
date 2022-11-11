@@ -1,9 +1,23 @@
 [package]
 name = "spirt"
+description = "Shader-focused IR to target, transform and translate from."
+repository = "https://github.com/EmbarkStudios/spirt"
+homepage = "https://github.com/EmbarkStudios/spirt"
 version = "0.1.0"
+authors = ["Embark <opensource@embark-studios.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Shader-focused IR to target, transform and translate from."
+readme = "README.md"
+# FIXME(eddyb) should this point to the version built from `git`?
+documentation = "https://docs.rs/spirt"
+keywords = ["shader", "spir-v", "spirv", "ir", "compiler"]
+categories = [
+    "compilers",
+
+    # FIXME(eddyb) `spirv-tools-sys` uses this but should it?
+    "rendering::data-formats"
+]
+exclude = [".github", "release.toml", "tests/data"]
 
 [dependencies]
 arrayvec = "0.7.1"

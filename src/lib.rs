@@ -1,3 +1,14 @@
+//! # `SPIR-🇹`
+//!
+//! **⋯🢒 🇹arget 🠆 🇹ransform 🠆 🇹ranslate ⋯🢒**
+//!
+//! Shader-focused IR to facilitate working with SPIR-V in a compiler setting.
+//!
+//! 🚧 *This project is in active design and development, check out
+//! [the GitHub repository](https://github.com/EmbarkStudios/spirt).* 🚧
+
+// FIXME(eddyb) should crate docs use `#[doc = include!("../README.md")]`?
+
 // BEGIN - Embark standard lints v6 for Rust 1.55+
 // do not change or add/remove here, but one can add exceptions after this section
 // for more info see: <https://github.com/EmbarkStudios/rust-ecosystem/issues/59>

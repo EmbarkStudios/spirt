@@ -7,10 +7,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-<!-- next-header -->
-## [Unreleased] - ReleaseDate
+<!-- NOTE(eddyb) sections from the original template:
 
-## [0.1.1] - 2019-09-03
 ### Added
 - New features go here in a bullet list
 
@@ -29,11 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Changes/fixes related to security vulnerabilities in a bullet list
 
-## [0.1.0] - 2019-09-02
+-->
+
+<!-- next-header -->
+## [Unreleased] - ReleaseDate
+*Initial public release of SPIR-T for minimal Rust-GPU integration.*
 ### Added
-- Initial add of the thing
+- Conversions from/to SPIR-V (`spv::lower`/`spv::lift`).
+- Control-flow structurizer, from CFGs to SPIR-T's stricter structured control-flow.
+- Pretty-printer with (syntax-highlighted and hyperlinked) HTML output.
 
 <!-- next-url -->
-[Unreleased]: https://github.com/EmbarkStudios/$REPO_NAME/compare/0.1.1...HEAD
-[0.1.1]: https://github.com/EmbarkStudios/$REPO_NAME/compare/0.1.0...0.1.1
-[0.1.0]: https://github.com/EmbarkStudios/$REPO_NAME/releases/tag/0.1.0
+[Unreleased]: https://github.com/EmbarkStudios/spirt/compare/0.0.0...HEAD

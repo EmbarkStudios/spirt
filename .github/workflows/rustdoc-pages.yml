@@ -1,16 +1,13 @@
 # Publishes docs built off latest git main branch to a GitHub Pages site.
-# The docs root will then be served at https://$YOUR_USERNAME.github.io/$REPO_NAME/$CRATE_NAME/index.html
-# For example, https://embarkstudios.github.io/presser/presser/index.html
+# The docs root will then be served at https://embarkstudios.github.io/spirt/spirt/index.html
 #
 # You must also go to the Pages settings for your repo and set it to serve from Actions for this to work
 name: Publish Docs
 
-# TODO: Replace this line with the commented ones to actually run the action in your repo(s)
-on: public
-# on:
-#   workflow_dispatch:
-#   push:
-#     branches: [ "main" ]
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,9 +39,9 @@ jobs:
 
   deploy:
     name: Deploy to Pages
-  
+
     needs: build
-    
+
     # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
     permissions:
       pages: write      # to deploy to Pages
@@ -57,7 +54,7 @@ jobs:
 
     # Specify runner + deployment step
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
