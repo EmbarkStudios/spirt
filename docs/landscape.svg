@@ -7,7 +7,7 @@
    viewBox="0 0 1366 768"
    version="1.1"
    id="svg5"
-   sodipodi:docname="diagram.inkscape.svg"
+   sodipodi:docname="landscape.svg"
    inkscape:version="1.2.1 (9c6d41e410, 2022-07-14)"
    inkscape:export-filename="diagram.svg"
    inkscape:export-xdpi="96"
@@ -28,14 +28,14 @@
      inkscape:document-units="mm"
      showgrid="true"
      inkscape:zoom="2.06"
-     inkscape:cx="626.94175"
+     inkscape:cx="627.42718"
      inkscape:cy="348.05825"
      inkscape:window-width="3840"
      inkscape:window-height="2102"
      inkscape:window-x="0"
      inkscape:window-y="0"
      inkscape:window-maximized="1"
-     inkscape:current-layer="svg5">
+     inkscape:current-layer="layer2">
     <inkscape:grid
        type="xygrid"
        id="grid301"
@@ -55,26 +55,6 @@
          offset="0"
          id="stop5787" />
     </linearGradient>
-    <marker
-       style="overflow:visible"
-       id="Arrow3"
-       refX="0"
-       refY="0"
-       orient="auto-start-reverse"
-       inkscape:stockid="Arrow3"
-       markerWidth="4.2071066"
-       markerHeight="6.9999995"
-       viewBox="0 0 4.2071068 7"
-       inkscape:isstock="true"
-       inkscape:collect="always"
-       preserveAspectRatio="xMidYMid">
-      <path
-         style="fill:none;stroke:context-stroke;stroke-width:1;stroke-linecap:round"
-         d="M 3,-3 0,0 3,3"
-         id="arrow3"
-         transform="rotate(180,0.125,0)"
-         sodipodi:nodetypes="ccc" />
-    </marker>
     <marker
        style="overflow:visible"
        id="Arrow3_Fnone_S-000000"
@@ -455,7 +435,7 @@
          y="86.152916">HLSL</tspan></text>
     <text
        xml:space="preserve"
-       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#4194ff;fill-opacity:1;stroke:#000000;stroke-opacity:1"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#39e539;fill-opacity:1;stroke:#000000;stroke-opacity:1"
        x="640.44348"
        y="305.74173"
        id="text175"><tspan
@@ -465,7 +445,7 @@
          y="305.74173">SPIR-V</tspan></text>
     <text
        xml:space="preserve"
-       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#4194ff;fill-opacity:1;stroke:#000000;stroke-opacity:1"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#39e539;fill-opacity:1;stroke:#000000;stroke-opacity:1"
        x="955.98425"
        y="298.58267"
        id="text179"><tspan
@@ -475,7 +455,7 @@
          y="298.58267">WGSL</tspan></text>
     <text
        xml:space="preserve"
-       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:53.3333px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#3ae63a;fill-opacity:1;stroke:#000000;stroke-opacity:1"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:53.3333px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#409eff;fill-opacity:1;stroke:#000000;stroke-opacity:1"
        x="384.38132"
        y="548.15662"
        id="text183"><tspan
@@ -485,7 +465,7 @@
          y="548.15662">SPIR-T</tspan></text>
     <text
        xml:space="preserve"
-       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#3ae63a;fill-opacity:1;stroke:#000000;stroke-opacity:1"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#409eff;fill-opacity:1;stroke:#000000;stroke-opacity:1"
        x="778.526"
        y="555.59058"
        id="text187"><tspan
@@ -495,7 +475,7 @@
          y="555.59058">NIR</tspan></text>
     <text
        xml:space="preserve"
-       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#3ae63a;fill-opacity:1;stroke:#000000;stroke-opacity:1"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:40px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;letter-spacing:0px;word-spacing:0px;fill:#409eff;fill-opacity:1;stroke:#000000;stroke-opacity:1"
        x="1097.1335"
        y="555.59058"
        id="text191"><tspan
@@ -543,7 +523,7 @@
          id="tspan3616">languages</tspan></text>
     <text
        xml:space="preserve"
-       style="font-size:26.6667px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans';text-align:end;letter-spacing:0px;word-spacing:0px;text-anchor:end;fill:#4194ff;fill-opacity:1;stroke:#000000;stroke-width:0.666667;stroke-dasharray:none;stroke-opacity:1"
+       style="font-size:26.6667px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans';text-align:end;letter-spacing:0px;word-spacing:0px;text-anchor:end;fill:#39e539;fill-opacity:1;stroke:#000000;stroke-width:0.666667;stroke-dasharray:none;stroke-opacity:1"
        x="170.9454"
        y="285.16696"
        id="text3620"><tspan
@@ -557,7 +537,7 @@
          id="tspan3622">IRs</tspan></text>
     <text
        xml:space="preserve"
-       style="font-size:26.6667px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans';text-align:end;letter-spacing:0px;word-spacing:0px;text-anchor:end;fill:#3ae63a;fill-opacity:1;stroke:#000000;stroke-width:0.666667;stroke-dasharray:none;stroke-opacity:1"
+       style="font-size:26.6667px;line-height:1.25;font-family:'Noto Sans';-inkscape-font-specification:'Noto Sans';text-align:end;letter-spacing:0px;word-spacing:0px;text-anchor:end;fill:#409eff;fill-opacity:1;stroke:#000000;stroke-width:0.666667;stroke-dasharray:none;stroke-opacity:1"
        x="170.07875"
        y="510.23624"
        id="text3626"><tspan
