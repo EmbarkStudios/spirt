@@ -1,13 +1,12 @@
 //! Low-level parsing of SPIR-V binary form.
 
 use crate::spv::{self, spec};
-use owning_ref::{VecRef, VecRefMut};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::{fs, io, iter, mem, slice};
+use std::{fs, io, iter, slice};
 
 /// Defining instruction of an ID.
 ///
@@ -260,8 +259,12 @@ pub struct ModuleParser {
     // FIXME(eddyb) add a `spec::Header` or `spv::Header` struct with named fields.
     pub header: [u32; spec::HEADER_LEN],
 
-    /// Remaining (instructions') words in the module.
-    words: VecRef<u8, [u32]>,
+    /// The entire module's bytes, representing "native endian" SPIR-V words.
+    // FIXME(eddyb) could this be allocated as `Vec<u32>` in the first place?
+    word_bytes: Vec<u8>,
+
+    /// Next (instructions') word position in the module.
+    next_word: usize,
 
     /// IDs defined so far in the module.
     known_ids: FxHashMap<spv::Id, KnownIdDef>,
@@ -275,6 +278,22 @@ fn invalid(reason: &str) -> io::Error {
     )
 }
 
+// FIXME(eddyb) find a safe wrapper crate for these.
+fn u8_slice_to_u32_slice_mut(xs: &mut [u8]) -> &mut [u32] {
+    unsafe {
+        let (prefix, out, suffix) = xs.align_to_mut();
+        assert_eq!((prefix, suffix), (&mut [][..], &mut [][..]));
+        out
+    }
+}
+fn u8_slice_to_u32_slice(xs: &[u8]) -> &[u32] {
+    unsafe {
+        let (prefix, out, suffix) = xs.align_to();
+        assert_eq!((prefix, suffix), (&[][..], &[][..]));
+        out
+    }
+}
+
 impl ModuleParser {
     pub fn read_from_spv_file(path: impl AsRef<Path>) -> io::Result<Self> {
         Self::read_from_spv_bytes(fs::read(path)?)
@@ -284,21 +303,12 @@ impl ModuleParser {
     pub fn read_from_spv_bytes(spv_bytes: Vec<u8>) -> io::Result<Self> {
         let spv_spec = spec::Spec::get();
 
-        let spv_bytes = VecRefMut::new(spv_bytes);
         if spv_bytes.len() % 4 != 0 {
             return Err(invalid("not a multiple of 4 bytes"));
         }
-        let mut spv_words = {
-            // FIXME(eddyb) find a safe wrapper crate for this.
-            fn u8_slice_to_u32_slice_mut(xs: &mut [u8]) -> &mut [u32] {
-                unsafe {
-                    let (prefix, out, suffix) = xs.align_to_mut();
-                    assert_eq!((prefix, suffix), (&mut [][..], &mut [][..]));
-                    out
-                }
-            }
-            spv_bytes.map_mut(u8_slice_to_u32_slice_mut)
-        };
+        // May need to mutate the bytes (to normalize endianness) later below.
+        let mut spv_bytes = spv_bytes;
+        let spv_words = u8_slice_to_u32_slice_mut(&mut spv_bytes);
 
         if spv_words.len() < spec::HEADER_LEN {
             return Err(invalid("truncated header"));
@@ -320,7 +330,8 @@ impl ModuleParser {
 
         Ok(Self {
             header: spv_words[..spec::HEADER_LEN].try_into().unwrap(),
-            words: spv_words.map(|words| &words[spec::HEADER_LEN..]),
+            word_bytes: spv_bytes,
+            next_word: spec::HEADER_LEN,
 
             known_ids: FxHashMap::default(),
         })
@@ -333,7 +344,8 @@ impl Iterator for ModuleParser {
         let spv_spec = spec::Spec::get();
         let wk = &spv_spec.well_known;
 
-        let &opcode = self.words.get(0)?;
+        let words = &u8_slice_to_u32_slice(&self.word_bytes)[self.next_word..];
+        let &opcode = words.get(0)?;
 
         let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
@@ -344,13 +356,13 @@ impl Iterator for ModuleParser {
 
         let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
 
-        if self.words.len() < inst_len {
+        if words.len() < inst_len {
             return Some(Err(invalid("truncated instruction")));
         }
 
         let parser = InstParser {
             known_ids: &self.known_ids,
-            words: self.words[1..inst_len].iter().copied(),
+            words: words[1..inst_len].iter().copied(),
             inst: spv::InstWithIds {
                 without_ids: opcode.into(),
                 result_type_id: None,
@@ -403,9 +415,7 @@ impl Iterator for ModuleParser {
             return Some(Err(e));
         }
 
-        let empty_placeholder_vec_ref = VecRef::new(vec![]).map(|_| &[][..]);
-        self.words = mem::replace(&mut self.words, empty_placeholder_vec_ref)
-            .map(|words| &words[inst_len..]);
+        self.next_word += inst_len;
 
         Some(Ok(inst))
     }
