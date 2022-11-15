@@ -20,18 +20,28 @@
 
 **SPIR-🇹** is a research project aimed at exploring shader-oriented IR designs derived from SPIR-V, and producing a framework around such an IR to facilitate advanced compilation pipelines, beyond what existing SPIR-V tooling allows for.
 
-Such a need arose in the [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu) project, which requires a variety of legalization passes to turn general-purpose (Rust<sup>1</sup>) code operating on *untyped* memory, into GPU-friendly direct data-flow.
-Our goal is to replace the existing [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu) SPIR-V legalizations passes with **SPIR-🇹** equivalents - but even more imporantly, **SPIR-🇹** should allow writing much more powerful legalization/optimization passes, that would've been unfathomable<sup>2</sup> for direct SPIR-V manipulation.
+Such a need arose in the [Rust-GPU] project, which requires a variety of legalization passes to turn general-purpose (Rust<sup>1</sup>) code operating on *untyped* memory, into GPU-friendly direct data-flow.  
+Our goal is to replace the existing [Rust-GPU] SPIR-V legalizations passes with **SPIR-🇹** equivalents - but even more imporantly, **SPIR-🇹** should allow writing much more powerful legalization/optimization passes, that would've been unfathomable<sup>2</sup> for direct SPIR-V manipulation.
 
 ---
 
-<sub><sup>1</sup> Rust is not unique in its needs here, and more languages (or IRs) could eventually make use of such a framework, but the initial design and implementation work has focused on [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu)</sub>
+<sub><sup>1</sup> Rust is not unique in its needs here, and more languages (or IRs) could eventually make use of such a framework, but the initial design and implementation work has focused on [Rust-GPU]</sub>
 
 <sub><sup>2</sup> not outright impossible, but requiring excessive development/maintenance cost, having to constantly balance correctness and power (more conservative passes are easier to trust), etc.</sub>
+
+## Disclaimer
+
+This project is not affiliated, associated, authorized, endorsed by, or in any way officially connected with Khronos Group Inc., or any of its subsidiaries or its affiliates. The official Khronos Group Inc. website can be found at https://www.khronos.org.  
+The names SPIR, SPIR-V, as well as related names, marks, emblems and images are trademarks of their respective owners.
+
+<sub><i>Additional context: the name of this project is a pun on SPIR-V, and entirely unrelated to SPIR (the older IR standard).</i></sub>
 
 ## Status
 
 🚧 *This project is in active design and development, many details can and will change* 🚧
+
+If you're interested in using **SPIR-🇹** yourself, you may want to first take a look at [the issue tracker](https://github.com/EmbarkStudios/spirt/issues) for relevant issues, and even open new ones describing your usecase.  
+With the initial focus being on [Rust-GPU]'s usecase, various (otherwise desirable) functionality/APIs/docs may be lacking, or rapidly changing - at the same time, discussions around widening the scope and usability of **SPIR-🇹** _in the long term_ are still welcome.
 
 ### Non-goals (at least in the short term)
 
@@ -203,3 +213,5 @@ This contribution is dual licensed under EITHER OF
 at your option.
 
 For clarity, "your" refers to Embark or any other licensee/user of the contribution.
+
+[Rust-GPU]: https://github.com/EmbarkStudios/rust-gpu
