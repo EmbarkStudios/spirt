@@ -167,7 +167,7 @@ OpFunctionEnd
 </td></tr></table>
 
 ## GPU (shader) IR landscape overview
-*(and the vision of how SPIR-T fits into it)*
+*(and the vision of how **SPIR-🇹** fits into it)*
 
 ![](docs/landscape.svg)
 
