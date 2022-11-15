@@ -17,7 +17,10 @@ jobs:
           submodules: true
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          # HACK(eddyb) only nightly supports setting `version = "Two"`
+          # in `rustfmt.toml`, which is needed to format array/slice patterns
+          # at all (see https://github.com/rust-lang/rustfmt/pull/4994).
+          toolchain: nightly
           override: true
 
       # make sure all code has been formatted with rustfmt
