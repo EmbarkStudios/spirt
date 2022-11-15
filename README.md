@@ -91,6 +91,8 @@ With the initial focus being on [Rust-GPU]'s usecase, various (otherwise desirab
 <div align="center">
 
 **GLSL** ([`for-loop.vert.glsl`](tests/data/for-loop.vert.glsl))</div>
+<sup>
+
 ```glsl
 #version 450
 out int output0;
@@ -101,10 +103,13 @@ void main() {
     output0 = o;
 }
 ```
+</sup>
 <div align="center">
 
 **WGSL** ([`for-loop.wgsl`](tests/data/for-loop.wgsl))</div>
 <!--FIXME(eddyb) this is WGSL but GitHub can't syntax-highlight it yet -->
+<sup>
+
 ```glsl
 @vertex
 fn main() -> @location(0) i32 {
@@ -115,6 +120,7 @@ fn main() -> @location(0) i32 {
     return o;
 }
 ```
+</sup>
 </td><td>
 
 <!--FIXME(eddyb) link to GH pages having a `.spirt.html` render of this -->
@@ -122,6 +128,8 @@ fn main() -> @location(0) i32 {
 
 **SPIR-🇹**</div>
 <!--FIXME(eddyb) this is SPIR-T but GitHub can't syntax-highlight it (ever?) -->
+<sup>
+
 ```cxx
 #{
   OpDecorate<Decoration.Flat>,
@@ -144,12 +152,15 @@ func0() -> OpTypeVoid {
   } while v7
 }
 ```
+</sup>
 </td><td>
 
 <div align="center">
 
 **SPIR-V** ([`for-loop.wgsl.spvasm`](tests/data/for-loop.wgsl.spvasm))</div>
 <!--FIXME(eddyb) this is SPIR-V assembly but GitHub can't syntax-highlight it yet -->
+<sup>
+
 ```llvm
 %typeof_output0 = OpTypePointer Output %i32
 %output0 = OpVariable %typeof_output0 Output
@@ -182,6 +193,7 @@ func0() -> OpTypeVoid {
     OpReturn
 OpFunctionEnd
 ```
+</sup>
 </td></tr></table>
 
 ## GPU (shader) IR landscape overview
