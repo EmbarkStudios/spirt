@@ -88,7 +88,9 @@ With the initial focus being on [Rust-GPU]'s usecase, various (otherwise desirab
 <table>
 <tr><td>
 
-**GLSL** ([`for-loop.vert.glsl`](tests/data/for-loop.vert.glsl))
+<div align="center">
+
+**GLSL** ([`for-loop.vert.glsl`](tests/data/for-loop.vert.glsl))</div>
 ```glsl
 #version 450
 out int output0;
@@ -99,7 +101,9 @@ void main() {
     output0 = o;
 }
 ```
-**WGSL** ([`for-loop.wgsl`](tests/data/for-loop.wgsl))
+<div align="center">
+
+**WGSL** ([`for-loop.wgsl`](tests/data/for-loop.wgsl))</div>
 <!--FIXME(eddyb) this is WGSL but GitHub can't syntax-highlight it yet -->
 ```glsl
 @vertex
@@ -114,7 +118,9 @@ fn main() -> @location(0) i32 {
 </td><td>
 
 <!--FIXME(eddyb) link to GH pages having a `.spirt.html` render of this -->
-**SPIR-🇹**:
+<div align="center">
+
+**SPIR-🇹**</div>
 <!--FIXME(eddyb) this is SPIR-T but GitHub can't syntax-highlight it (ever?) -->
 ```cxx
 #{
@@ -140,7 +146,9 @@ func0() -> OpTypeVoid {
 ```
 </td><td>
 
-**SPIR-V** ([`for-loop.wgsl.spvasm`](tests/data/for-loop.wgsl.spvasm))
+<div align="center">
+
+**SPIR-V** ([`for-loop.wgsl.spvasm`](tests/data/for-loop.wgsl.spvasm))</div>
 <!--FIXME(eddyb) this is SPIR-V assembly but GitHub can't syntax-highlight it yet -->
 ```llvm
 %typeof_output0 = OpTypePointer Output %i32
