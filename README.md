@@ -29,6 +29,9 @@ Rust is not unique in its needs here, and more languages (or IRs) could eventual
 
 ### Designed and implemented so far
 
+<table>
+<tr><td>
+
 **IR datatypes**:
 * allowing near-arbitrary SPIR-V instructions for any unrecognized opcodes
   * IDs are replaced with interned/"entity" handles (see below)
@@ -39,6 +42,8 @@ Rust is not unique in its needs here, and more languages (or IRs) could eventual
   * disallows iteration in favor of/forcing the use of efficient indexing
 * structured control-flow "regions" inspired by RVSDG, stricter than SPIR-V
   (see `ControlRegionDef`'s docs for more details)
+
+</td><td>
 
 **Framework utilities**:
 * `visit`/`transform`: immutable/mutable IR traversal
@@ -52,11 +57,100 @@ Rust is not unique in its needs here, and more languages (or IRs) could eventual
 * `cfg::Structurizer`: (re)structurization, from arbitrary control-flow to the stricter structured "regions"
 * `passes::link`: mapping (linkage) imports to relevant exports
 
-<!--
-## Quick example
+</td></tr></table>
 
-**TODO(eddyb) compare GLSL/SPIR-V/WGSL/SPIR-T, likely for something w/ a simple loop + conditionals**
--->
+## Simple example (with non-trivial control-flow)
+
+<table>
+<tr><td>
+
+**GLSL** ([`for-loop.vert.glsl`](tests/data/for-loop.vert.glsl))
+```glsl
+#version 450
+out int output0;
+void main() {
+    int o = 1;
+    for(int i = 1; i < 10; i++)
+    	  o *= i;
+    output0 = o;
+}
+```
+**WGSL** ([`for-loop.wgsl`](tests/data/for-loop.wgsl))
+<!--FIXME(eddyb) this is WGSL but GitHub can't syntax-highlight it yet -->
+```glsl
+@vertex
+fn main() -> @location(0) i32 {
+    var o: i32 = 1;
+    for(var i: i32 = 1; i < 10; i++) {
+    	o *= i;
+    }
+    return o;
+}
+```
+</td><td>
+
+<!--FIXME(eddyb) link to GH pages having a `.spirt.html` render of this -->
+**SPIR-🇹**:
+<!--FIXME(eddyb) this is SPIR-T but GitHub can't syntax-highlight it (ever?) -->
+```cxx
+#{
+  OpDecorate<Decoration.Flat>,
+  OpDecorate<Decoration.Location(0)>,
+}
+global_var0 in StorageClass.Output: s32
+
+func0() -> OpTypeVoid {
+  loop(v5: s32 <- 1s32, v6: s32 <- 1s32) {
+    v2 = OpSLessThan(v6, 10s32): bool
+    (v7: bool, v8: s32, v9: s32) = if v2 {
+      v3 = OpIMul(v5, v6): s32
+      v4 = OpIAdd(v6, 1s32): s32
+      (true, v3, v4)
+    } else {
+      OpStore(&global_var0, v5)
+      (false, OpUndef: s32, OpUndef: s32)
+    }
+    (v8, v9) -> (v5, v6)
+  } while v7
+}
+```
+</td><td>
+
+**SPIR-V** ([`for-loop.wgsl.spvasm`](tests/data/for-loop.wgsl.spvasm))
+<!--FIXME(eddyb) this is SPIR-V assembly but GitHub can't syntax-highlight it yet -->
+```llvm
+%typeof_output0 = OpTypePointer Output %i32
+%output0 = OpVariable %typeof_output0 Output
+
+%typeof_main = OpTypeFunction %void
+%main = OpFunction %void None %typeof_main
+  %entry = OpLabel
+    OpBranch %bb0
+  %bb0 = OpLabel
+    OpBranch %bb1
+  %bb1 = OpLabel
+    %o = OpPhi %i32 %1_i32 %bb0 %o_next %bb5
+    %i = OpPhi %i32 %0_i32 %bb0 %i_next %bb5
+    OpLoopMerge %bb6 %bb5 None
+    OpBranch %bb2
+  %bb2 = OpLabel
+    %cond = OpSLessThan %bool %i %10_i32
+    OpSelectionMerge %bb4 None
+  OpBranchConditional %cond %bb4 %bb3
+  %bb3 = OpLabel
+    OpBranch %bb6
+  %bb4 = OpLabel
+    %o_next = OpIMul %i32 %o %i
+    OpBranch %bb5
+  %bb5 = OpLabel
+    %i_next = OpIAdd %i32 %i %1_i32
+    OpBranch %bb1
+  %bb6 = OpLabel
+    OpStore %output0 %o
+    OpReturn
+OpFunctionEnd
+```
+</td></tr></table>
 
 ## GPU (shader) IR landscape overview
 *(and the vision of how SPIR-T fits into it)*
