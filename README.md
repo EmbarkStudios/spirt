@@ -20,17 +20,31 @@
 
 **SPIR-🇹** is a research project aimed at exploring shader-oriented IR designs derived from SPIR-V, and producing a framework around such an IR to facilitate advanced compilation pipelines, beyond what existing SPIR-V tooling allows for.
 
-This need arose in the [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu) project, which requires a variety of legalization transformations to turn general-purpose code operating on *untyped* memory, into GPU-friendly direct data-flow.
-Rust is not unique in its needs here, and more languages (or IRs) could eventually make use of such a framework, but the initial design and implementation work has focused on [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu).
+Such a need arose in the [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu) project, which requires a variety of legalization passes to turn general-purpose (Rust<sup>1</sup>) code operating on *untyped* memory, into GPU-friendly direct data-flow.
+Our goal is to replace the existing [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu) SPIR-V legalizations passes with **SPIR-🇹** equivalents - but even more imporantly, **SPIR-🇹** should allow writing much more powerful legalization/optimization passes, that would've been unfathomable<sup>2</sup> for direct SPIR-V manipulation.
+
+---
+
+<sub><sup>1</sup> Rust is not unique in its needs here, and more languages (or IRs) could eventually make use of such a framework, but the initial design and implementation work has focused on [Rust-GPU](https://github.com/EmbarkStudios/rust-gpu)</sub>
+
+<sub><sup>2</sup> not outright impossible, but requiring excessive development/maintenance cost, having to constantly balance correctness and power (more conservative passes are easier to trust), etc.</sub>
 
 ## Status
 
 🚧 *This project is in active design and development, many details can and will change* 🚧
 
+### Non-goals (at least in the short term)
+
+* supporting the ("OpenCL") `Kernel` dialect of SPIR-V
+  * `Kernel` SPIR-V is much closer to LLVM IR, than `Shader` SPIR-V, and
+    as such tooling oriented around LLVM is more likely to be a better fit
+* textual syntax that can be parsed back
+  * i.e. the pretty-printer output is purely a visualization
+
 ### Designed and implemented so far
 
 <table>
-<tr><td>
+<tr><td width="50%">
 
 **IR datatypes**:
 * allowing near-arbitrary SPIR-V instructions for any unrecognized opcodes
