@@ -553,6 +553,16 @@ impl Module {
                 } else {
                     Seq::Decoration
                 }
+            } else if [
+                wk.OpDecorationGroup,
+                wk.OpGroupDecorate,
+                wk.OpGroupMemberDecorate,
+            ]
+            .contains(&opcode)
+            {
+                return Err(invalid(
+                    "unsupported decoration groups (officially deprecated)",
+                ));
             } else if opcode == wk.OpTypeForwardPointer {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (id, sc) = match (&inst.imms[..], &inst.ids[..]) {

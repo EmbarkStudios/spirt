@@ -71,6 +71,11 @@ def_well_known! {
         OpDecorateString,
         OpMemberDecorateString,
 
+        // Deprecated in favor of `OpDecorate`/`OpMemberDecorate`.
+        OpDecorationGroup,
+        OpGroupDecorate,
+        OpGroupMemberDecorate,
+
         OpLine,
         OpNoLine,
 
