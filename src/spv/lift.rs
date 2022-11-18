@@ -317,8 +317,14 @@ enum Merge<L> {
         /// The label just after the whole loop, i.e. the `break` target.
         loop_merge: L,
 
-        /// The label just after the loop body, i.e. the `continue` target.
-        body_merge: L,
+        /// A label that the back-edge block post-dominates, i.e. some point in
+        /// the loop body where looping around is inevitable (modulo `break`ing
+        /// out of the loop through a `do`-`while`-style conditional back-edge).
+        ///
+        /// SPIR-V calls this "the `continue` target", but unlike other aspects
+        /// of SPIR-V "structured control-flow", there can be multiple valid
+        /// choices (any that fit the post-dominator/"inevitability" definition).
+        loop_continue: L,
     },
 }
 
@@ -724,7 +730,12 @@ impl<'a> FuncLifting<'a> {
                             target_phi_values: FxIndexMap::default(),
                             merge: Some(Merge::Loop {
                                 loop_merge: CfgPoint::ControlNodeExit(control_node),
-                                body_merge: CfgPoint::RegionExit(*body),
+                                // NOTE(eddyb) this may seem weird, but see the
+                                // note on `Merge::Loop`'s `loop_continue`
+                                // field - in particular, for SPIR-T loops, we
+                                // can pick any point before/after/between
+                                // `body`'s `children` and it should be valid.
+                                loop_continue: CfgPoint::RegionEntry(*body),
                             }),
                         },
                     }
@@ -863,7 +874,7 @@ impl<'a> FuncLifting<'a> {
                             Merge::Selection(a) => (a, None),
                             Merge::Loop {
                                 loop_merge: a,
-                                body_merge: b,
+                                loop_continue: b,
                             } => (a, Some(b)),
                         };
                         [a].into_iter().chain(b)
@@ -1323,7 +1334,7 @@ impl LazyInst<'_, '_> {
             },
             Self::Merge(Merge::Loop {
                 loop_merge: merge_label_id,
-                body_merge: continue_label_id,
+                loop_continue: continue_label_id,
             }) => spv::InstWithIds {
                 without_ids: spv::Inst {
                     opcode: wk.OpLoopMerge,
@@ -1524,10 +1535,10 @@ impl Module {
                                 }
                                 Merge::Loop {
                                     loop_merge,
-                                    body_merge,
+                                    loop_continue,
                                 } => Merge::Loop {
                                     loop_merge: func_lifting.label_ids[&loop_merge],
-                                    body_merge: func_lifting.label_ids[&body_merge],
+                                    loop_continue: func_lifting.label_ids[&loop_continue],
                                 },
                             })
                         }))
