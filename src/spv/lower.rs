@@ -1014,7 +1014,7 @@ impl Module {
                 }
             }
 
-            let mut params = vec![];
+            let mut params = SmallVec::<[_; 8]>::new();
 
             let mut func_def_body = if has_blocks {
                 match &mut func_decl.def {
@@ -1471,10 +1471,11 @@ impl Module {
                     )));
                 }
 
-                for (i, (func_type_param, param)) in
+                for (i, (func_decl_param, param)) in
                     func_decl.params.iter_mut().zip(params).enumerate()
                 {
-                    if func_type_param.ty != param.ty {
+                    func_decl_param.attrs = param.attrs;
+                    if func_decl_param.ty != param.ty {
                         // FIXME(remove) embed IDs in errors by moving them to the
                         // `let invalid = |...| ...;` closure that wraps insts.
                         return Err(invalid(&format!(
@@ -1486,7 +1487,7 @@ impl Module {
                             print::Plan::for_root(
                                 &cx,
                                 &print::ExpectedVsFound {
-                                    expected: func_type_param.ty,
+                                    expected: func_decl_param.ty,
                                     found: param.ty,
                                 }
                             )
