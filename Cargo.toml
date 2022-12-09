@@ -30,3 +30,7 @@ rustc-hash = "1.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = { version = "1.7.0", features = ["serde", "union"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--document-private-items"]
