@@ -92,8 +92,11 @@
     // NOTE(eddyb) ignored for readability (`match` used when `if let` is too long).
     clippy::single_match_else,
 
-    // FIXME(eddyb) review all of these (some of them are intentional, sadly).
+    // NOTE(eddyb) ignored because it's misguided to suggest `let mut s = ...;`
+    // and `s.push_str(...);` when `+` is equivalent and does not require `let`.
     clippy::string_add,
+
+    // FIXME(eddyb) review all of these (some of them are intentional, sadly).
     clippy::unimplemented,
     clippy::unnested_or_patterns,
     clippy::unused_self,
