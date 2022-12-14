@@ -2560,7 +2560,7 @@ impl Print for cfg::ControlInst {
 
             cfg::ControlInstKind::Branch => {
                 assert_eq!((targets.len(), inputs.len()), (1, 0));
-                targets.nth(0).unwrap()
+                targets.next().unwrap()
             }
 
             cfg::ControlInstKind::SelectBranch(kind) => {

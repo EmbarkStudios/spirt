@@ -743,7 +743,7 @@ impl<'a> Structurizer<'a> {
                 ControlInstKind::Branch => {
                     assert_eq!((inputs.len(), child_regions.len()), (0, 1));
 
-                    Ok(child_regions.into_iter().nth(0).unwrap())
+                    Ok(child_regions.into_iter().next().unwrap())
                 }
 
                 ControlInstKind::SelectBranch(kind) => {
