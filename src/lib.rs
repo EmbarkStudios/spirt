@@ -90,7 +90,6 @@
 // crate-specific exceptions:
 #![allow(
     // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::comparison_to_empty,
     clippy::get_first,
     clippy::iter_nth_zero,
     clippy::map_err_ignore,

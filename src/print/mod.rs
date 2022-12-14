@@ -1340,7 +1340,7 @@ impl Print for Plan<'_> {
             });
 
         // Unversioned, flatten the nodes.
-        if num_versions == 1 && self.per_version_name_and_node_defs[0].0 == "" {
+        if num_versions == 1 && self.per_version_name_and_node_defs[0].0.is_empty() {
             Versions::Single(pretty::Fragment::new(
                 per_node_versions_with_repeat_count
                     .map(|mut versions_with_repeat_count| {
