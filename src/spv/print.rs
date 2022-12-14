@@ -89,10 +89,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) {
         let mut first = true;
         for (mode, kind) in enumerant.all_params() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
 
             self.out
@@ -255,10 +253,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
     fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = TokensForOperand<ID>> {
         opcode.def().all_operands().map_while(move |(mode, kind)| {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    return None;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                return None;
             }
             self.operand(kind);
             Some(mem::take(&mut self.out))

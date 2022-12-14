@@ -109,10 +109,8 @@ impl InstParser<'_> {
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), InstParseError> {
         for (mode, kind) in enumerant.all_params() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
             self.operand(kind)?;
         }
@@ -237,10 +235,8 @@ impl InstParser<'_> {
         }
 
         for (mode, kind) in def.all_operands() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
             self.operand(kind)?;
         }
