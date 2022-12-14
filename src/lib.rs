@@ -89,8 +89,10 @@
 // END - Embark standard lints v6 for Rust 1.55+
 // crate-specific exceptions:
 #![allow(
-    // FIXME(eddyb) review all of these (some of them are intentional, sadly).
+    // NOTE(eddyb) ignored for readability (`match` used when `if let` is too long).
     clippy::single_match_else,
+
+    // FIXME(eddyb) review all of these (some of them are intentional, sadly).
     clippy::string_add,
     clippy::unimplemented,
     clippy::unnested_or_patterns,
