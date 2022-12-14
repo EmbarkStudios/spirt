@@ -128,8 +128,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 .take_while(|&byte| byte != 0)
                 .collect();
             match str::from_utf8(&bytes) {
-                Ok(s) => Token::StringLiteral(format!("{:?}", s)),
-                Err(e) => Token::Error(format!("/* {} in {:?} */", e, bytes)),
+                Ok(s) => Token::StringLiteral(format!("{s:?}")),
+                Err(e) => Token::Error(format!("/* {e} in {bytes:?} */")),
             }
         } else {
             let mut words_msb_to_lsb = words
@@ -143,11 +143,11 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
             // how to print integer(?) literals.
             let mut s;
             if words_msb_to_lsb.peek().is_none() && most_significant_word <= 0xffff {
-                s = format!("{}", most_significant_word);
+                s = format!("{most_significant_word}");
             } else {
-                s = format!("0x{:x}", most_significant_word);
+                s = format!("0x{most_significant_word:x}");
                 for word in words_msb_to_lsb {
-                    write!(s, "_{:08x}", word).unwrap();
+                    write!(s, "_{word:08x}").unwrap();
                 }
             }
             Token::NumericLiteral(s)
@@ -174,7 +174,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         let emit_missing_error = |this: &mut Self| {
             this.out
                 .tokens
-                .push(Token::Error(format!("/* missing {} */", name)))
+                .push(Token::Error(format!("/* missing {name} */")))
         };
 
         let mut maybe_get_enum_word = || match self.imms.next() {

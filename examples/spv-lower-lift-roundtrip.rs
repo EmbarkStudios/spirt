@@ -25,9 +25,9 @@ fn main() -> std::io::Result<()> {
                 eprint!("  ");
 
                 if let Some(id) = inst.result_id {
-                    eprint!("%{}", id);
+                    eprint!("%{id}");
                     if let Some(type_id) = inst.result_type_id {
-                        eprint!(": %{}", type_id);
+                        eprint!(": %{type_id}");
                     }
                     eprint!(" = ");
                 }
@@ -36,7 +36,7 @@ fn main() -> std::io::Result<()> {
                 spirt::spv::print::inst_operands(
                     inst.opcode,
                     inst.imms.iter().copied(),
-                    inst.ids.iter().map(|id| format!("%{}", id)),
+                    inst.ids.iter().map(|id| format!("%{id}")),
                 )
                 .for_each(|operand_parts| eprint!(" {}", operand_parts.concat_to_plain_text()));
 

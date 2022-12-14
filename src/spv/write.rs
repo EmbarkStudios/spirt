@@ -50,11 +50,11 @@ impl OperandEmitError {
                         let unsupported = spec::BitIdx::of_all_set_bits(word)
                             .filter(|&bit_idx| bits.get(bit_idx).is_none())
                             .fold(0u32, |x, i| x | (1 << i.0));
-                        format!("unsupported {} bit-pattern 0x{:08x}", name, unsupported).into()
+                        format!("unsupported {name} bit-pattern 0x{unsupported:08x}").into()
                     }
 
                     spec::OperandKindDef::ValueEnum { .. } => {
-                        format!("unsupported {} value {}", name, word).into()
+                        format!("unsupported {name} value {word}").into()
                     }
 
                     _ => unreachable!(),
@@ -187,7 +187,7 @@ pub struct ModuleEmitter {
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V ({})", reason),
+        format!("malformed SPIR-V ({reason})"),
     )
 }
 
@@ -202,7 +202,7 @@ impl ModuleEmitter {
     // FIXME(eddyb) sanity-check the operands against the definition of `inst.opcode`.
     pub fn push_inst(&mut self, inst: &spv::InstWithIds) -> io::Result<()> {
         let (inst_name, def) = inst.opcode.name_and_def();
-        let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
+        let invalid = |msg: &str| invalid(&format!("in {inst_name}: {msg}"));
 
         // FIXME(eddyb) make these errors clearer (or turn them into asserts?).
         if inst.result_type_id.is_some() != def.has_result_type_id {

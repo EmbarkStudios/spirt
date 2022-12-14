@@ -84,7 +84,7 @@ struct IntraFuncInst {
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V ({})", reason),
+        format!("malformed SPIR-V ({reason})"),
     )
 }
 
@@ -137,8 +137,7 @@ impl Module {
 
             if (version_reserved_lo, version_reserved_hi) != (0, 0) {
                 return Err(invalid(&format!(
-                    "version 0x{:08x} is not in expected (0.major.minor.0) form",
-                    version
+                    "version 0x{version:08x} is not in expected (0.major.minor.0) form"
                 )));
             }
 
@@ -147,8 +146,7 @@ impl Module {
 
             if reserved_inst_schema != 0 {
                 return Err(invalid(&format!(
-                    "unknown instruction schema {} - only 0 is supported",
-                    reserved_inst_schema
+                    "unknown instruction schema {reserved_inst_schema} - only 0 is supported"
                 )));
             }
 
@@ -228,8 +226,7 @@ impl Module {
                                 Some(&IdDef::SpvDebugString(s)) => s,
                                 _ => {
                                     return Err(invalid(&format!(
-                                        "%{} is not an OpString",
-                                        file_path_id
+                                        "%{file_path_id} is not an OpString"
                                     )));
                                 }
                             };
@@ -300,7 +297,7 @@ impl Module {
                         type_id,
                         id_def.descr(&cx)
                     ))),
-                    None => Err(invalid(&format!("result type %{} not defined", type_id))),
+                    None => Err(invalid(&format!("result type %{type_id} not defined"))),
                 })
                 .transpose()?;
 
@@ -409,8 +406,7 @@ impl Module {
                             Some(&IdDef::SpvDebugString(s)) => s,
                             _ => {
                                 return Err(invalid(&format!(
-                                    "%{} is not an OpString",
-                                    file_path_id
+                                    "%{file_path_id} is not an OpString"
                                 )));
                             }
                         };
@@ -594,11 +590,11 @@ impl Module {
                         Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
                         Some(&IdDef::Const(ct)) => Ok(TypeCtorArg::Const(ct)),
                         Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("a forward reference to %{}", id)),
+                        None => Err(format!("a forward reference to %{id}")),
                     })
                     .map(|result| {
                         result.map_err(|descr| {
-                            invalid(&format!("unsupported use of {} in a type", descr))
+                            invalid(&format!("unsupported use of {descr} in a type"))
                         })
                     })
                     .collect::<Result<_, _>>()?;
@@ -619,11 +615,11 @@ impl Module {
                     .map(|&id| match id_defs.get(&id) {
                         Some(&IdDef::Const(ct)) => Ok(ct),
                         Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("a forward reference to %{}", id)),
+                        None => Err(format!("a forward reference to %{id}")),
                     })
                     .map(|result| {
                         result.map_err(|descr| {
-                            invalid(&format!("unsupported use of {} in a constant", descr))
+                            invalid(&format!("unsupported use of {descr} in a constant"))
                         })
                     })
                     .collect::<Result<_, _>>()?;
@@ -668,13 +664,12 @@ impl Module {
                     .map(|id| match id_defs.get(&id) {
                         Some(&IdDef::Const(ct)) => Ok(ct),
                         Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("a forward reference to %{}", id)),
+                        None => Err(format!("a forward reference to %{id}")),
                     })
                     .transpose()
                     .map_err(|descr| {
                         invalid(&format!(
-                            "unsupported use of {} as the initializer of a global variable",
-                            descr
+                            "unsupported use of {descr} as the initializer of a global variable"
                         ))
                     })?;
 
@@ -745,8 +740,7 @@ impl Module {
                     }
                     .ok_or_else(|| {
                         invalid(&format!(
-                            "function type %{} not an `OpTypeFunction`",
-                            func_type_id
+                            "function type %{func_type_id} not an `OpTypeFunction`"
                         ))
                     })?;
 
@@ -846,8 +840,7 @@ impl Module {
             };
             if !(seq <= Some(next_seq)) {
                 return Err(invalid(&format!(
-                    "out of order: {:?} instructions must precede {:?} instructions",
-                    next_seq, seq
+                    "out of order: {next_seq:?} instructions must precede {seq:?} instructions"
                 )));
             }
             seq = Some(next_seq);
@@ -863,7 +856,7 @@ impl Module {
 
         if !pending_attrs.is_empty() {
             let ids = pending_attrs.keys().collect::<BTreeSet<_>>();
-            return Err(invalid(&format!("decorated IDs never defined: {:?}", ids)));
+            return Err(invalid(&format!("decorated IDs never defined: {ids:?}")));
         }
 
         if current_func_body.is_some() {
@@ -1033,9 +1026,8 @@ impl Module {
                         // FIXME(remove) embed IDs in errors by moving them to the
                         // `let invalid = |...| ...;` closure that wraps insts.
                         return Err(invalid(&format!(
-                            "function %{} lacks any blocks, \
-                             but isn't an import either",
-                            func_id
+                            "function %{func_id} lacks any blocks, \
+                             but isn't an import either"
                         )));
                     }
                 }
@@ -1107,7 +1099,7 @@ impl Module {
                         None => local_id_defs
                             .get(&id)
                             .copied()
-                            .ok_or_else(|| invalid(&format!("undefined ID %{}", id,))),
+                            .ok_or_else(|| invalid(&format!("undefined ID %{id}",))),
                     };
 
                 if opcode == wk.OpFunctionParameter {
@@ -1336,8 +1328,7 @@ impl Module {
                             .transpose()
                             .map_err(|descr| {
                                 invalid(&format!(
-                                    "unsupported use of {} as the `OpFunctionCall` callee",
-                                    descr
+                                    "unsupported use of {descr} as the `OpFunctionCall` callee"
                                 ))
                             })?;
 
@@ -1366,13 +1357,12 @@ impl Module {
                         let ext_set = match id_defs.get(&ext_set_id) {
                             Some(&IdDef::SpvExtInstImport(name)) => Ok(name),
                             Some(id_def) => Err(id_def.descr(&cx)),
-                            None => Err(format!("unknown ID %{}", ext_set_id)),
+                            None => Err(format!("unknown ID %{ext_set_id}")),
                         }
                         .map_err(|descr| {
                             invalid(&format!(
-                                "unsupported use of {} as the `OpExtInst` \
-                                 extended instruction set ID",
-                                descr
+                                "unsupported use of {descr} as the `OpExtInst` \
+                                 extended instruction set ID"
                             ))
                         })?;
 
@@ -1518,8 +1508,7 @@ impl Module {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
                     return Err(invalid(&format!(
-                        "in %{}, the entry block contains `OpPhi`s",
-                        func_id
+                        "in %{func_id}, the entry block contains `OpPhi`s"
                     )));
                 }
             }
@@ -1537,12 +1526,11 @@ impl Module {
                         },
                         Some(&IdDef::Func(func)) => Ok(Exportee::Func(func)),
                         Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("unknown ID %{}", target_id)),
+                        None => Err(format!("unknown ID %{target_id}")),
                     }
                     .map_err(|descr| {
                         invalid(&format!(
-                            "unsupported use of {} as the `LinkageAttributes` target",
-                            descr
+                            "unsupported use of {descr} as the `LinkageAttributes` target"
                         ))
                     })?;
 
@@ -1557,12 +1545,11 @@ impl Module {
                     let func = match id_defs.get(&func_id) {
                         Some(&IdDef::Func(func)) => Ok(func),
                         Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("unknown ID %{}", func_id)),
+                        None => Err(format!("unknown ID %{func_id}")),
                     }
                     .map_err(|descr| {
                         invalid(&format!(
-                            "unsupported use of {} as the `OpEntryPoint` target",
-                            descr
+                            "unsupported use of {descr} as the `OpEntryPoint` target"
                         ))
                     })?;
                     let interface_global_vars = interface_ids
@@ -1573,13 +1560,12 @@ impl Module {
                                 _ => Err(id_def.descr(&cx)),
                             },
                             Some(id_def) => Err(id_def.descr(&cx)),
-                            None => Err(format!("unknown ID %{}", id)),
+                            None => Err(format!("unknown ID %{id}")),
                         })
                         .map(|result| {
                             result.map_err(|descr| {
                                 invalid(&format!(
-                                    "unsupported use of {} as an `OpEntryPoint` interface variable",
-                                    descr
+                                    "unsupported use of {descr} as an `OpEntryPoint` interface variable"
                                 ))
                             })
                         })

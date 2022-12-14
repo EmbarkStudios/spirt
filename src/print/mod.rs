@@ -1064,7 +1064,7 @@ impl<'a> Printer<'a> {
                                 spv::print::Token::Id(id) => {
                                     let comment = self
                                         .comment_style()
-                                        .apply(format!("/* #{} */", next_extra_idx));
+                                        .apply(format!("/* #{next_extra_idx} */"));
                                     next_extra_idx += 1;
 
                                     let id = print_id(id, self).into().unwrap_or_else(|| {
@@ -1423,12 +1423,12 @@ impl Print for ModuleDialect {
                             "version: ".into(),
                             printer
                                 .numeric_literal_style()
-                                .apply(format!("{}.{}", version_major, version_minor)),
+                                .apply(format!("{version_major}.{version_minor}")),
                         ]),
                         pretty::join_comma_sep(
                             "extensions: {",
                             extensions.iter().map(|ext| {
-                                printer.string_literal_style().apply(format!("{:?}", ext))
+                                printer.string_literal_style().apply(format!("{ext:?}"))
                             }),
                             "}",
                         ),
@@ -1487,13 +1487,11 @@ impl Print for ModuleDebugInfo {
                                         (generator_magic.get() >> 16, generator_magic.get() as u16);
                                     pretty::Fragment::new([
                                         "{ tool_id: ".into(),
-                                        printer
-                                            .numeric_literal_style()
-                                            .apply(format!("{}", tool_id)),
+                                        printer.numeric_literal_style().apply(format!("{tool_id}")),
                                         ", version: ".into(),
                                         printer
                                             .numeric_literal_style()
-                                            .apply(format!("{}", tool_version)),
+                                            .apply(format!("{tool_version}")),
                                         " }".into(),
                                     ])
                                 })
@@ -1763,9 +1761,9 @@ impl Print for Attr {
                 // and escaping for well-behaved file paths.
                 let file_path = &printer.cx[file_path.0];
                 let comment = if file_path.chars().all(|c| c.is_ascii_graphic() && c != ':') {
-                    format!("// at {}:{}:{}", file_path, line, col)
+                    format!("// at {file_path}:{line}:{col}")
                 } else {
-                    format!("// at {:?}:{}:{}", file_path, line, col)
+                    format!("// at {file_path:?}:{line}:{col}")
                 };
                 (
                     AttrStyle::Comment,
@@ -1806,9 +1804,9 @@ impl Print for TypeDef {
                 };
 
                 Some(if signed {
-                    kw(format!("s{}", width))
+                    kw(format!("s{width}"))
                 } else {
-                    kw(format!("u{}", width))
+                    kw(format!("u{width}"))
                 })
             } else if opcode == wk.OpTypeFloat {
                 let width = match imms[..] {
@@ -1816,7 +1814,7 @@ impl Print for TypeDef {
                     _ => unreachable!(),
                 };
 
-                Some(kw(format!("f{}", width)))
+                Some(kw(format!("f{width}")))
             } else if opcode == wk.OpTypeVector {
                 let (elem_ty, elem_count) = match (&imms[..], &ctor_args[..]) {
                     (&[spv::Imm::Short(_, elem_count)], &[TypeCtorArg::Type(elem_ty)]) => {
@@ -1830,7 +1828,7 @@ impl Print for TypeDef {
                     "×".into(),
                     printer
                         .numeric_literal_style()
-                        .apply(format!("{}", elem_count))
+                        .apply(format!("{elem_count}"))
                         .into(),
                 ]))
             } else {
@@ -1956,7 +1954,7 @@ impl Print for ConstDef {
                             float_to_bits: impl FnOnce(FLOAT) -> BITS,
                         ) -> Option<String> {
                             let float = float_from_bits(bits);
-                            Some(format!("{:?}", float)).filter(|s| {
+                            Some(format!("{float:?}")).filter(|s| {
                                 s.parse::<FLOAT>()
                                     .map(float_to_bits)
                                     .map_or(false, |roundtrip_bits| roundtrip_bits == bits)
@@ -2482,7 +2480,7 @@ impl Print for DataInstDef {
                     ">).".into(),
                     printer.declarative_keyword_style().apply("OpExtInst"),
                     "<".into(),
-                    printer.numeric_literal_style().apply(format!("{}", inst)),
+                    printer.numeric_literal_style().apply(format!("{inst}")),
                     ">".into(),
                 ])
             }
