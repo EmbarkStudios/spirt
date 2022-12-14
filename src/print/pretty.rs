@@ -277,7 +277,7 @@ impl FragmentPostLayout {
                     let tag = special_tags.next().unwrap_or("span");
                     if let Some(other_tag) = special_tags.next() {
                         // FIXME(eddyb) support by opening/closing multiple tags.
-                        unimplemented!("`<{tag}>` conflicts with `<{other_tag}>`");
+                        panic!("`<{tag}>` conflicts with `<{other_tag}>`");
                     }
 
                     body += "<";
