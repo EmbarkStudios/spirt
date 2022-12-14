@@ -90,7 +90,7 @@ impl OperandEmitter<'_> {
                 assert!(kind == found_kind);
                 Ok(word)
             }
-            Some(spv::Imm::LongStart(..)) | Some(spv::Imm::LongCont(..)) => unreachable!(),
+            Some(spv::Imm::LongStart(..) | spv::Imm::LongCont(..)) => unreachable!(),
             None => Err(Error::NotEnoughImms),
         };
 

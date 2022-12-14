@@ -180,7 +180,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 assert!(kind == found_kind);
                 Some(word)
             }
-            Some(spv::Imm::LongStart(..)) | Some(spv::Imm::LongCont(..)) => unreachable!(),
+            Some(spv::Imm::LongStart(..) | spv::Imm::LongCont(..)) => unreachable!(),
             None => None,
         };
 
@@ -239,8 +239,9 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 // FIXME(eddyb) there's no reason to take the first word now,
                 // `self.literal(kind)` could do it itself.
                 match self.imms.next() {
-                    Some(spv::Imm::Short(found_kind, word))
-                    | Some(spv::Imm::LongStart(found_kind, word)) => {
+                    Some(
+                        spv::Imm::Short(found_kind, word) | spv::Imm::LongStart(found_kind, word),
+                    ) => {
                         assert!(kind == found_kind);
                         self.literal(kind, word);
                     }
