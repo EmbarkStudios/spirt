@@ -142,14 +142,13 @@ impl Fragment {
 pub struct FragmentPostLayout(Fragment);
 
 impl fmt::Display for FragmentPostLayout {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut result = Ok(());
         self.0.render_to_line_ops(
-            &mut LineOp::interpret_with(|op| match op {
-                TextOp::Text(text) => {
+            &mut LineOp::interpret_with(|op| {
+                if let TextOp::Text(text) = op {
                     result = result.and_then(|_| f.write_str(text));
                 }
-                _ => {}
             }),
             false,
         );
@@ -278,7 +277,7 @@ impl FragmentPostLayout {
                     let tag = special_tags.next().unwrap_or("span");
                     if let Some(other_tag) = special_tags.next() {
                         // FIXME(eddyb) support by opening/closing multiple tags.
-                        unimplemented!("`<{tag}>` conflicts with `<{other_tag}>`");
+                        panic!("`<{tag}>` conflicts with `<{other_tag}>`");
                     }
 
                     body += "<";
@@ -466,6 +465,8 @@ impl Node {
                 ApproxLayout::Inline { worst_width: width }
             }
         };
+
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Text(text) => text_approx_rigid_layout(text),
             Self::StyledText(styles_and_text) => text_approx_rigid_layout(&styles_and_text.1),

@@ -52,7 +52,7 @@ impl TokensForOperand<String> {
     pub fn concat_to_plain_text(self) -> String {
         self.tokens
             .into_iter()
-            .map(|token| -> Cow<str> {
+            .map(|token| -> Cow<'_, str> {
                 match token {
                     Token::Punctuation(s) | Token::OperandKindName(s) | Token::EnumerandName(s) => {
                         s.into()
@@ -89,10 +89,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) {
         let mut first = true;
         for (mode, kind) in enumerant.all_params() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
 
             self.out
@@ -174,7 +172,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         let emit_missing_error = |this: &mut Self| {
             this.out
                 .tokens
-                .push(Token::Error(format!("/* missing {name} */")))
+                .push(Token::Error(format!("/* missing {name} */")));
         };
 
         let mut maybe_get_enum_word = || match self.imms.next() {
@@ -182,7 +180,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 assert!(kind == found_kind);
                 Some(word)
             }
-            Some(spv::Imm::LongStart(..)) | Some(spv::Imm::LongCont(..)) => unreachable!(),
+            Some(spv::Imm::LongStart(..) | spv::Imm::LongCont(..)) => unreachable!(),
             None => None,
         };
 
@@ -241,8 +239,9 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 // FIXME(eddyb) there's no reason to take the first word now,
                 // `self.literal(kind)` could do it itself.
                 match self.imms.next() {
-                    Some(spv::Imm::Short(found_kind, word))
-                    | Some(spv::Imm::LongStart(found_kind, word)) => {
+                    Some(
+                        spv::Imm::Short(found_kind, word) | spv::Imm::LongStart(found_kind, word),
+                    ) => {
                         assert!(kind == found_kind);
                         self.literal(kind, word);
                     }
@@ -255,10 +254,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
     fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = TokensForOperand<ID>> {
         opcode.def().all_operands().map_while(move |(mode, kind)| {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    return None;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                return None;
             }
             self.operand(kind);
             Some(mem::take(&mut self.out))
@@ -277,7 +274,7 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForO
     };
     let &kind = match printer.imms.peek().unwrap() {
         spv::Imm::Short(kind, _) | spv::Imm::LongStart(kind, _) => kind,
-        _ => unreachable!(),
+        spv::Imm::LongCont(..) => unreachable!(),
     };
     printer.operand(kind);
     assert!(printer.imms.next().is_none());

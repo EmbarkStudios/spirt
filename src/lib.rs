@@ -89,31 +89,12 @@
 // END - Embark standard lints v6 for Rust 1.55+
 // crate-specific exceptions:
 #![allow(
-    // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::collapsible_if,
-    clippy::comparison_to_empty,
-    clippy::get_first,
-    clippy::iter_nth_zero,
-    clippy::map_err_ignore,
-    clippy::match_same_arms,
-    clippy::match_wildcard_for_single_variants,
-    clippy::needless_borrow,
-    clippy::needless_lifetimes,
-    clippy::nonminimal_bool,
-    clippy::redundant_closure,
-    clippy::redundant_closure_call,
-    clippy::redundant_field_names,
-    clippy::semicolon_if_nothing_returned,
-    clippy::should_implement_trait,
-    clippy::single_match,
+    // NOTE(eddyb) ignored for readability (`match` used when `if let` is too long).
     clippy::single_match_else,
+
+    // NOTE(eddyb) ignored because it's misguided to suggest `let mut s = ...;`
+    // and `s.push_str(...);` when `+` is equivalent and does not require `let`.
     clippy::string_add,
-    clippy::unimplemented,
-    clippy::unnested_or_patterns,
-    clippy::unused_self,
-    clippy::useless_conversion,
-    clippy::vtable_address_comparisons,
-    elided_lifetimes_in_paths,
 )]
 // NOTE(eddyb) this is stronger than the "Embark standard lints" above, because
 // we almost never need `unsafe` code and this is a further "speed bump" to it.

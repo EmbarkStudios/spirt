@@ -394,8 +394,8 @@ impl Spec {
                     "../../khronos-spec/SPIRV-Headers/include/spirv/unified1/spirv.core.grammar.json"
                 );
 
-                let raw_core_grammar: raw::CoreGrammar = serde_json::from_str(SPIRV_CORE_GRAMMAR_JSON)
-                .unwrap();
+                let raw_core_grammar: raw::CoreGrammar<'static> =
+                    serde_json::from_str(SPIRV_CORE_GRAMMAR_JSON).unwrap();
                 Spec::from_raw(raw_core_grammar)
             };
         }
@@ -435,7 +435,7 @@ impl Spec {
             .operand_kinds
             .iter()
             .filter_map(|o| {
-                let enumerant_from_raw = |e: &raw::OperandKindEnumerant| {
+                let enumerant_from_raw = |e: &raw::OperandKindEnumerant<'_>| {
                     let mut all_params = e
                         .parameters
                         .iter()
@@ -758,7 +758,9 @@ impl Spec {
                 }
 
                 // `IdResultType` without `IdResult` is impossible.
-                assert!(!(def.has_result_type_id && !def.has_result_id));
+                if def.has_result_type_id {
+                    assert!(def.has_result_id);
+                }
 
                 (inst.opcode, (inst.opname, def))
             }),
@@ -938,6 +940,9 @@ pub mod raw {
                 D: serde::Deserializer<'de>,
             {
                 let x = Deserialize::deserialize(deserializer)?;
+
+                // HACK(eddyb) this is a `try {...}`-like use of a closure.
+                #[allow(clippy::redundant_closure_call)]
                 (|$x: $in_ty| -> Result<$out_ty, _> { $body })(x)
                     .map_err(serde::de::Error::custom)
             })*
@@ -945,7 +950,7 @@ pub mod raw {
     }
 
     dew_and_then! {
-        dew_u32_maybe_hex: |x: DecOrHex<u32>| -> u32 { x.try_into() },
+        dew_u32_maybe_hex: |x: DecOrHex<'_, u32>| -> u32 { x.try_into() },
     }
 
     #[derive(Deserialize)]

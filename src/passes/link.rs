@@ -37,10 +37,8 @@ pub fn minimize_exports(module: &mut Module, is_root: impl Fn(&ExportKey) -> boo
         seen_funcs: FxHashSet::default(),
     };
     for (export_key, &exportee) in &module.exports {
-        if is_root(export_key) {
-            if collector.live_exports.insert(export_key.clone()) {
-                exportee.inner_visit_with(&mut collector);
-            }
+        if is_root(export_key) && collector.live_exports.insert(export_key.clone()) {
+            exportee.inner_visit_with(&mut collector);
         }
     }
     module.exports = collector

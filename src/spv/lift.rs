@@ -209,6 +209,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     }
 
     fn visit_data_inst_def(&mut self, data_inst_def: &DataInstDef) {
+        #[allow(clippy::match_same_arms)]
         match data_inst_def.kind {
             DataInstKind::FuncCall(_) => {}
 
@@ -361,7 +362,7 @@ impl<'a> NeedsIdsCollector<'a> {
                 .map(|func| {
                     Ok((
                         func,
-                        FuncLifting::from_func_decl(cx, &module.funcs[func], || alloc_id())?,
+                        FuncLifting::from_func_decl(cx, &module.funcs[func], &mut alloc_id)?,
                     ))
                 })
                 .collect::<Result<_, _>>()?,
@@ -552,7 +553,7 @@ impl<'a> FuncLifting<'a> {
 
         // Create a SPIR-V block for every CFG point needing one.
         let mut blocks = FxIndexMap::default();
-        let mut visit_cfg_point = |point_cursor: CfgCursor| {
+        let mut visit_cfg_point = |point_cursor: CfgCursor<'_>| {
             let point = point_cursor.point;
 
             let phis = match point {
@@ -848,7 +849,7 @@ impl<'a> FuncLifting<'a> {
                 for region in cfg.rev_post_order(func_def_body) {
                     func_def_body
                         .at(region)
-                        .rev_post_order_try_for_each(&mut visit_cfg_point)?
+                        .rev_post_order_try_for_each(&mut visit_cfg_point)?;
                 }
             }
         }
@@ -961,7 +962,7 @@ impl<'a> FuncLifting<'a> {
         }
 
         // Remove now-unused blocks.
-        blocks.retain(|point, _| use_counts[&point] > 0);
+        blocks.retain(|point, _| use_counts[point] > 0);
 
         // Collect `OpPhi`s from other blocks' edges into each block.
         //
@@ -1065,10 +1066,11 @@ impl LazyInst<'_, '_> {
     fn result_id_attrs_and_import(
         self,
         module: &Module,
-        ids: &AllocatedIds,
+        ids: &AllocatedIds<'_>,
     ) -> (Option<spv::Id>, AttrSet, Option<Import>) {
         let cx = module.cx_ref();
 
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Global(global) => {
                 let (attrs, import) = match global {
@@ -1120,11 +1122,15 @@ impl LazyInst<'_, '_> {
         }
     }
 
-    fn to_inst_and_attrs(self, module: &Module, ids: &AllocatedIds) -> (spv::InstWithIds, AttrSet) {
+    fn to_inst_and_attrs(
+        self,
+        module: &Module,
+        ids: &AllocatedIds<'_>,
+    ) -> (spv::InstWithIds, AttrSet) {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
 
-        let value_to_id = |parent_func: &FuncLifting, v| match v {
+        let value_to_id = |parent_func: &FuncLifting<'_>, v| match v {
             Value::Const(ct) => match cx[ct].ctor {
                 ConstCtor::SpvStringLiteralForExtInst(s) => ids.debug_strings[&cx[s]],
 
@@ -1505,7 +1511,7 @@ impl Module {
                         } = block;
 
                         iter::once(LazyInst::OpLabel {
-                            label_id: func_lifting.label_ids[&point],
+                            label_id: func_lifting.label_ids[point],
                         })
                         .chain(phis.iter().map(|phi| LazyInst::OpPhi {
                             parent_func: func_lifting,
@@ -1600,7 +1606,7 @@ impl Module {
         let mut decoration_insts = vec![];
 
         for lazy_inst in global_and_func_insts.clone() {
-            let (result_id, attrs, import) = lazy_inst.result_id_attrs_and_import(self, &ids);
+            let (result_id, attrs, import) = lazy_inst.result_id_attrs_and_import(self, ids);
 
             for attr in cx[attrs].attrs.iter() {
                 match attr {
@@ -1617,9 +1623,9 @@ impl Module {
                             ids: iter::once(target_id).collect(),
                         };
 
-                        if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
+                        if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(opcode) {
                             execution_mode_insts.push(inst);
-                        } else if [wk.OpName, wk.OpMemberName].contains(&opcode) {
+                        } else if [wk.OpName, wk.OpMemberName].contains(opcode) {
                             debug_name_insts.push(inst);
                         } else {
                             decoration_insts.push(inst);
@@ -1795,7 +1801,7 @@ impl Module {
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         for lazy_inst in global_and_func_insts {
-            let (inst, attrs) = lazy_inst.to_inst_and_attrs(self, &ids);
+            let (inst, attrs) = lazy_inst.to_inst_and_attrs(self, ids);
 
             // Reset line debuginfo when crossing/leaving blocks.
             let new_block_id = if inst.opcode == wk.OpLabel {

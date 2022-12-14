@@ -8,6 +8,9 @@
 //!     without going through `P` (as `EntityDefs` requires keys for any access)
 //! * they're dedicated types with inherent methods and trait `impl`s
 
+// NOTE(eddyb) wrong wrt lifetimes (https://github.com/rust-lang/rust-clippy/issues/5004).
+#![allow(clippy::should_implement_trait)]
+
 use crate::{
     Context, ControlNode, ControlNodeDef, ControlRegion, ControlRegionDef, DataInst, DataInstDef,
     EntityDefs, EntityList, EntityListIter, FuncDefBody, Type, Value,
@@ -59,7 +62,7 @@ impl<'a> IntoIterator for FuncAt<'a, EntityList<ControlNode>> {
 impl<'a> Iterator for FuncAt<'a, EntityListIter<ControlNode>> {
     type Item = FuncAt<'a, ControlNode>;
     fn next(&mut self) -> Option<Self::Item> {
-        let (next, rest) = self.position.split_first(&self.control_nodes)?;
+        let (next, rest) = self.position.split_first(self.control_nodes)?;
         self.position = rest;
         Some(self.at(next))
     }
@@ -82,7 +85,7 @@ impl<'a> IntoIterator for FuncAt<'a, EntityList<DataInst>> {
 impl<'a> Iterator for FuncAt<'a, EntityListIter<DataInst>> {
     type Item = FuncAt<'a, DataInst>;
     fn next(&mut self) -> Option<Self::Item> {
-        let (next, rest) = self.position.split_first(&self.data_insts)?;
+        let (next, rest) = self.position.split_first(self.data_insts)?;
         self.position = rest;
         Some(self.at(next))
     }
@@ -167,7 +170,7 @@ impl<'a> FuncAtMut<'a, EntityList<ControlNode>> {
 // HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
 impl FuncAtMut<'_, EntityListIter<ControlNode>> {
     pub fn next(&mut self) -> Option<FuncAtMut<'_, ControlNode>> {
-        let (next, rest) = self.position.split_first(&self.control_nodes)?;
+        let (next, rest) = self.position.split_first(self.control_nodes)?;
         self.position = rest;
         Some(self.reborrow().at(next))
     }
@@ -190,7 +193,7 @@ impl<'a> FuncAtMut<'a, EntityList<DataInst>> {
 // HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
 impl FuncAtMut<'_, EntityListIter<DataInst>> {
     pub fn next(&mut self) -> Option<FuncAtMut<'_, DataInst>> {
-        let (next, rest) = self.position.split_first(&self.data_insts)?;
+        let (next, rest) = self.position.split_first(self.data_insts)?;
         self.position = rest;
         Some(self.reborrow().at(next))
     }
@@ -204,7 +207,7 @@ impl<'a> FuncAtMut<'a, DataInst> {
 
 impl FuncDefBody {
     /// Start immutably traversing the function at `position`.
-    pub fn at<'a, P: Copy>(&'a self, position: P) -> FuncAt<'a, P> {
+    pub fn at<P: Copy>(&self, position: P) -> FuncAt<'_, P> {
         FuncAt {
             control_regions: &self.control_regions,
             control_nodes: &self.control_nodes,
@@ -214,7 +217,7 @@ impl FuncDefBody {
     }
 
     /// Start mutably traversing the function at `position`.
-    pub fn at_mut<'a, P: Copy>(&'a mut self, position: P) -> FuncAtMut<'a, P> {
+    pub fn at_mut<P: Copy>(&mut self, position: P) -> FuncAtMut<'_, P> {
         FuncAtMut {
             control_regions: &mut self.control_regions,
             control_nodes: &mut self.control_nodes,
@@ -224,12 +227,12 @@ impl FuncDefBody {
     }
 
     /// Shorthand for `func_def_body.at(func_def_body.body)`.
-    pub fn at_body<'a>(&'a self) -> FuncAt<'a, ControlRegion> {
+    pub fn at_body(&self) -> FuncAt<'_, ControlRegion> {
         self.at(self.body)
     }
 
     /// Shorthand for `func_def_body.at_mut(func_def_body.body)`.
-    pub fn at_mut_body<'a>(&'a mut self) -> FuncAtMut<'a, ControlRegion> {
+    pub fn at_mut_body(&mut self) -> FuncAtMut<'_, ControlRegion> {
         self.at_mut(self.body)
     }
 }

@@ -319,8 +319,9 @@ impl<'a> Plan<'a> {
         let (_, node_defs) = self.per_version_name_and_node_defs.last_mut().unwrap();
         match node_defs.entry(node) {
             Entry::Occupied(entry) => {
+                let dyn_data_ptr = |r| (r as *const dyn DynNodeDef<'_>).cast::<()>();
                 assert!(
-                    std::ptr::eq(*entry.get(), node_def),
+                    std::ptr::eq(dyn_data_ptr(*entry.get()), dyn_data_ptr(node_def)),
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
                     node.category().unwrap_or_else(|s| s)
                 );
@@ -351,24 +352,18 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
-        match self.current_module {
-            Some(module) => {
-                self.use_node(Node::GlobalVar(gv), &module.global_vars[gv]);
-            }
-
+        if let Some(module) = self.current_module {
+            self.use_node(Node::GlobalVar(gv), &module.global_vars[gv]);
+        } else {
             // FIXME(eddyb) should this be a hard error?
-            None => {}
         }
     }
 
     fn visit_func_use(&mut self, func: Func) {
-        match self.current_module {
-            Some(module) => {
-                self.use_node(Node::Func(func), &module.funcs[func]);
-            }
-
+        if let Some(module) = self.current_module {
+            self.use_node(Node::Func(func), &module.funcs[func]);
+        } else {
             // FIXME(eddyb) should this be a hard error?
-            None => {}
         }
     }
 
@@ -455,7 +450,7 @@ pub enum Versions<PF> {
 }
 
 impl fmt::Display for Versions<pretty::FragmentPostLayout> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Single(fragment) => fragment.fmt(f),
             Self::Multiple {
@@ -851,7 +846,7 @@ impl<'a> Printer<'a> {
                 });
 
             for func_def_body in func_def_bodies_across_versions {
-                let visit_region = |func_at_region: FuncAt<ControlRegion>| {
+                let visit_region = |func_at_region: FuncAt<'_, ControlRegion>| {
                     let region = func_at_region.position;
 
                     define_label_or_value(Use::ControlRegionLabel(region));
@@ -921,10 +916,14 @@ impl<'a> Printer<'a> {
     pub fn cx(&self) -> &'a Context {
         self.cx
     }
+}
 
-    // Styles for a variety of syntactic categories.
-    // FIXME(eddyb) this is a somewhat inefficient way of declaring these.
-
+// Styles for a variety of syntactic categories.
+// FIXME(eddyb) this is a somewhat inefficient way of declaring these.
+//
+// NOTE(eddyb) these methods take `self` so they can become configurable in the future.
+#[allow(clippy::unused_self)]
+impl Printer<'_> {
     fn error_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::MAGENTA)
     }
@@ -969,7 +968,9 @@ impl<'a> Printer<'a> {
             ..Default::default()
         }
     }
+}
 
+impl<'a> Printer<'a> {
     /// Pretty-print a `: T` style "type ascription" suffix.
     ///
     /// This should be used everywhere some type ascription notation is needed,
@@ -1191,7 +1192,7 @@ impl Use {
                     let func_category = func.category();
                     let func_idx = match printer.use_styles[&func] {
                         UseStyle::Anon { idx, .. } => idx,
-                        _ => unreachable!(),
+                        UseStyle::Inline => unreachable!(),
                     };
                     format!("{func_category}{func_idx}.{name}")
                 } else {
@@ -1340,7 +1341,7 @@ impl Print for Plan<'_> {
             });
 
         // Unversioned, flatten the nodes.
-        if num_versions == 1 && self.per_version_name_and_node_defs[0].0 == "" {
+        if num_versions == 1 && self.per_version_name_and_node_defs[0].0.is_empty() {
             Versions::Single(pretty::Fragment::new(
                 per_node_versions_with_repeat_count
                     .map(|mut versions_with_repeat_count| {
@@ -1383,7 +1384,7 @@ impl Print for Module {
                     .iter()
                     .map(|(export_key, exportee)| {
                         pretty::Fragment::new([
-                            export_key.print(printer).into(),
+                            export_key.print(printer),
                             ": ".into(),
                             exportee.print(printer),
                         ])
@@ -1995,31 +1996,27 @@ impl Print for ConstDef {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def_without_name: if let Some(def) = compact_def {
-                def.into()
-            } else {
-                match *ctor {
-                    ConstCtor::PtrToGlobalVar(gv) => {
-                        pretty::Fragment::new(["&".into(), gv.print(printer)])
-                    }
-                    ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                        printer.declarative_keyword_style(),
-                        opcode,
-                        imms,
-                        ctor_args,
-                        Print::print,
-                        Some(*ty),
-                    ),
-                    ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
-                        printer.declarative_keyword_style().apply("OpString"),
-                        "<".into(),
-                        printer
-                            .string_literal_style()
-                            .apply(format!("{:?}", &printer.cx[s])),
-                        ">".into(),
-                    ]),
+            def_without_name: compact_def.unwrap_or_else(|| match *ctor {
+                ConstCtor::PtrToGlobalVar(gv) => {
+                    pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
-            },
+                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
+                    printer.declarative_keyword_style(),
+                    opcode,
+                    imms,
+                    ctor_args,
+                    Print::print,
+                    Some(*ty),
+                ),
+                ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
+                    printer.declarative_keyword_style().apply("OpString"),
+                    "<".into(),
+                    printer
+                        .string_literal_style()
+                        .apply(format!("{:?}", &printer.cx[s])),
+                    ">".into(),
+                ]),
+            }),
         }
     }
 }
@@ -2130,7 +2127,7 @@ impl Print for FuncDecl {
 
         let def_without_name = match def {
             DeclDef::Imported(import) => {
-                pretty::Fragment::new([sig, " = ".into(), import.print(printer).into()])
+                pretty::Fragment::new([sig, " = ".into(), import.print(printer)])
             }
 
             // FIXME(eddyb) this can probably go into `impl Print for FuncDefBody`.
@@ -2560,7 +2557,7 @@ impl Print for cfg::ControlInst {
 
             cfg::ControlInstKind::Branch => {
                 assert_eq!((targets.len(), inputs.len()), (1, 0));
-                targets.nth(0).unwrap()
+                targets.next().unwrap()
             }
 
             cfg::ControlInstKind::SelectBranch(kind) => {

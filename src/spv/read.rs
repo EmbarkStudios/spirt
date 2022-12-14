@@ -109,10 +109,8 @@ impl InstParser<'_> {
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), InstParseError> {
         for (mode, kind) in enumerant.all_params() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
             self.operand(kind)?;
         }
@@ -147,7 +145,7 @@ impl InstParser<'_> {
             }
 
             spec::OperandKindDef::Id => {
-                let id = word.try_into().map_err(|_| Error::IdZero)?;
+                let id = word.try_into().ok().ok_or(Error::IdZero)?;
                 self.inst.ids.push(id);
             }
 
@@ -223,10 +221,11 @@ impl InstParser<'_> {
                     .next()
                     .ok_or(Error::NotEnoughWords)?
                     .try_into()
-                    .map_err(|_| Error::IdZero)
+                    .ok()
+                    .ok_or(Error::IdZero)
             };
-            self.inst.result_type_id = def.has_result_type_id.then(|| id()).transpose()?;
-            self.inst.result_id = def.has_result_id.then(|| id()).transpose()?;
+            self.inst.result_type_id = def.has_result_type_id.then(&mut id).transpose()?;
+            self.inst.result_id = def.has_result_id.then(&mut id).transpose()?;
         }
 
         if let Some(type_id) = self.inst.result_type_id {
@@ -237,10 +236,8 @@ impl InstParser<'_> {
         }
 
         for (mode, kind) in def.all_operands() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
             self.operand(kind)?;
         }
@@ -329,7 +326,7 @@ impl Iterator for ModuleParser {
         let wk = &spv_spec.well_known;
 
         let words = &bytemuck::cast_slice::<u8, u32>(&self.word_bytes)[self.next_word..];
-        let &opcode = words.get(0)?;
+        let &opcode = words.first()?;
 
         let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
@@ -366,7 +363,9 @@ impl Iterator for ModuleParser {
                 KnownIdDef::TypeInt(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
                         assert!(kind == wk.LiteralInteger);
-                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                        n.try_into()
+                            .ok()
+                            .ok_or_else(|| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
@@ -374,7 +373,9 @@ impl Iterator for ModuleParser {
                 KnownIdDef::TypeFloat(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
                         assert!(kind == wk.LiteralInteger);
-                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                        n.try_into()
+                            .ok()
+                            .ok_or_else(|| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })

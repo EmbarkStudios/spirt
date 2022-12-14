@@ -73,10 +73,8 @@ impl OperandEmitter<'_> {
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) -> Result<(), OperandEmitError> {
         for (mode, kind) in enumerant.all_params() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
             self.operand(kind)?;
         }
@@ -92,7 +90,7 @@ impl OperandEmitter<'_> {
                 assert!(kind == found_kind);
                 Ok(word)
             }
-            Some(spv::Imm::LongStart(..)) | Some(spv::Imm::LongCont(..)) => unreachable!(),
+            Some(spv::Imm::LongStart(..) | spv::Imm::LongCont(..)) => unreachable!(),
             None => Err(Error::NotEnoughImms),
         };
 
@@ -151,10 +149,8 @@ impl OperandEmitter<'_> {
         use OperandEmitError as Error;
 
         for (mode, kind) in def.all_operands() {
-            if mode == spec::OperandMode::Optional {
-                if self.is_exhausted() {
-                    break;
-                }
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                break;
             }
             self.operand(kind)?;
         }
@@ -221,11 +217,10 @@ impl ModuleEmitter {
         self.words.reserve(total_word_count);
         let expected_final_pos = self.words.len() + total_word_count;
 
-        let opcode =
-            u32::from(inst.opcode.as_u16())
-                | u32::from(u16::try_from(total_word_count).map_err(|_| {
-                    invalid("word count of SPIR-V instruction doesn't fit in 16 bits")
-                })?) << 16;
+        let opcode = u32::from(inst.opcode.as_u16())
+            | u32::from(u16::try_from(total_word_count).ok().ok_or_else(|| {
+                invalid("word count of SPIR-V instruction doesn't fit in 16 bits")
+            })?) << 16;
         self.words.extend(
             iter::once(opcode)
                 .chain(inst.result_type_id.map(|id| id.get()))

@@ -365,6 +365,7 @@ impl<K: Copy + Eq + Hash, V: Default> SmallFxHashMap<K, V> {
     }
 
     fn get(&self, k: K) -> Option<&V> {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Empty => None,
             Self::One(old_k, old_v) if *old_k == k => Some(old_v),
@@ -374,6 +375,7 @@ impl<K: Copy + Eq + Hash, V: Default> SmallFxHashMap<K, V> {
     }
 
     fn get_mut(&mut self, k: K) -> Option<&mut V> {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Empty => None,
             Self::One(old_k, old_v) if *old_k == k => Some(old_v),

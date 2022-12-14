@@ -149,7 +149,7 @@ impl ControlFlowGraph {
 
     fn traverse(
         &self,
-        func_at_region: FuncAt<ControlRegion>,
+        func_at_region: FuncAt<'_, ControlRegion>,
         incoming_edge_counts: &mut EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
         pre_order_visit: &mut impl FnMut(ControlRegion),
         post_order_visit: &mut impl FnMut(ControlRegion),
@@ -743,7 +743,7 @@ impl<'a> Structurizer<'a> {
                 ControlInstKind::Branch => {
                     assert_eq!((inputs.len(), child_regions.len()), (0, 1));
 
-                    Ok(child_regions.into_iter().nth(0).unwrap())
+                    Ok(child_regions.into_iter().next().unwrap())
                 }
 
                 ControlInstKind::SelectBranch(kind) => {
@@ -770,8 +770,7 @@ impl<'a> Structurizer<'a> {
                         inputs: [].into_iter().collect(),
                         children: EntityList::empty(),
                         outputs: [].into_iter().collect(),
-                    }
-                    .into(),
+                    },
                 );
                 self.func_def_body
                     .unstructured_cfg
@@ -1235,8 +1234,7 @@ impl<'a> Structurizer<'a> {
                             inputs: [].into_iter().collect(),
                             children: EntityList::empty(),
                             outputs: [].into_iter().collect(),
-                        }
-                        .into(),
+                        },
                     );
                     control_source = Some(new_empty_region);
                     Some((new_empty_region, [].into_iter().collect()))

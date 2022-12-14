@@ -729,7 +729,7 @@ impl Module {
                                 TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypeFunction => {
                                     let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
                                         TypeCtorArg::Type(ty) => ty,
-                                        _ => unreachable!(),
+                                        TypeCtorArg::Const(_) => unreachable!(),
                                     });
                                     Some((types.next().unwrap(), types))
                                 }
@@ -838,10 +838,12 @@ impl Module {
 
                 Seq::Function
             };
-            if !(seq <= Some(next_seq)) {
-                return Err(invalid(&format!(
-                    "out of order: {next_seq:?} instructions must precede {seq:?} instructions"
-                )));
+            if let Some(prev_seq) = seq {
+                if prev_seq > next_seq {
+                    return Err(invalid(&format!(
+                        "out of order: {next_seq:?} instructions must precede {prev_seq:?} instructions"
+                    )));
+                }
             }
             seq = Some(next_seq);
 
@@ -943,8 +945,7 @@ impl Module {
                                             inputs: SmallVec::new(),
                                             children: EntityList::empty(),
                                             outputs: SmallVec::new(),
-                                        }
-                                        .into(),
+                                        },
                                     )
                                 };
                                 block_details.insert(
@@ -1139,7 +1140,7 @@ impl Module {
                     // to be able to have an entry in `local_id_defs`.
                     let control_region = match local_id_defs[&result_id.unwrap()] {
                         LocalIdDef::BlockLabel(control_region) => control_region,
-                        _ => unreachable!(),
+                        LocalIdDef::Value(_) => unreachable!(),
                     };
                     let current_block_details = &block_details[&control_region];
                     assert_eq!(current_block_details.label_id, result_id.unwrap());
@@ -1201,7 +1202,7 @@ impl Module {
                             let phi_key = PhiKey {
                                 source_block_id: current_block_details.label_id,
                                 target_block_id: target_block_details.label_id,
-                                target_phi_idx: target_phi_idx,
+                                target_phi_idx,
                             };
                             let phi_value_ids = phi_to_values.remove(&phi_key).unwrap_or_default();
 
