@@ -838,10 +838,12 @@ impl Module {
 
                 Seq::Function
             };
-            if !(seq <= Some(next_seq)) {
-                return Err(invalid(&format!(
-                    "out of order: {next_seq:?} instructions must precede {seq:?} instructions"
-                )));
+            if let Some(prev_seq) = seq {
+                if prev_seq > next_seq {
+                    return Err(invalid(&format!(
+                        "out of order: {next_seq:?} instructions must precede {prev_seq:?} instructions"
+                    )));
+                }
             }
             seq = Some(next_seq);
 

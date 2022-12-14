@@ -758,7 +758,9 @@ impl Spec {
                 }
 
                 // `IdResultType` without `IdResult` is impossible.
-                assert!(!(def.has_result_type_id && !def.has_result_id));
+                if def.has_result_type_id {
+                    assert!(def.has_result_id);
+                }
 
                 (inst.opcode, (inst.opname, def))
             }),
