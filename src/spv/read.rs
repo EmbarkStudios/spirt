@@ -145,7 +145,7 @@ impl InstParser<'_> {
             }
 
             spec::OperandKindDef::Id => {
-                let id = word.try_into().map_err(|_| Error::IdZero)?;
+                let id = word.try_into().ok().ok_or(Error::IdZero)?;
                 self.inst.ids.push(id);
             }
 
@@ -221,7 +221,8 @@ impl InstParser<'_> {
                     .next()
                     .ok_or(Error::NotEnoughWords)?
                     .try_into()
-                    .map_err(|_| Error::IdZero)
+                    .ok()
+                    .ok_or(Error::IdZero)
             };
             self.inst.result_type_id = def.has_result_type_id.then(|| id()).transpose()?;
             self.inst.result_id = def.has_result_id.then(|| id()).transpose()?;
@@ -362,7 +363,9 @@ impl Iterator for ModuleParser {
                 KnownIdDef::TypeInt(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
                         assert!(kind == wk.LiteralInteger);
-                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                        n.try_into()
+                            .ok()
+                            .ok_or_else(|| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
@@ -370,7 +373,9 @@ impl Iterator for ModuleParser {
                 KnownIdDef::TypeFloat(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
                         assert!(kind == wk.LiteralInteger);
-                        n.try_into().map_err(|_| invalid("Width cannot be 0"))?
+                        n.try_into()
+                            .ok()
+                            .ok_or_else(|| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
