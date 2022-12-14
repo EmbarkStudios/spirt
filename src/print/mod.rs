@@ -1383,7 +1383,7 @@ impl Print for Module {
                     .iter()
                     .map(|(export_key, exportee)| {
                         pretty::Fragment::new([
-                            export_key.print(printer).into(),
+                            export_key.print(printer),
                             ": ".into(),
                             exportee.print(printer),
                         ])
@@ -1995,31 +1995,27 @@ impl Print for ConstDef {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def_without_name: if let Some(def) = compact_def {
-                def.into()
-            } else {
-                match *ctor {
-                    ConstCtor::PtrToGlobalVar(gv) => {
-                        pretty::Fragment::new(["&".into(), gv.print(printer)])
-                    }
-                    ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                        printer.declarative_keyword_style(),
-                        opcode,
-                        imms,
-                        ctor_args,
-                        Print::print,
-                        Some(*ty),
-                    ),
-                    ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
-                        printer.declarative_keyword_style().apply("OpString"),
-                        "<".into(),
-                        printer
-                            .string_literal_style()
-                            .apply(format!("{:?}", &printer.cx[s])),
-                        ">".into(),
-                    ]),
+            def_without_name: compact_def.unwrap_or_else(|| match *ctor {
+                ConstCtor::PtrToGlobalVar(gv) => {
+                    pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
-            },
+                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
+                    printer.declarative_keyword_style(),
+                    opcode,
+                    imms,
+                    ctor_args,
+                    Print::print,
+                    Some(*ty),
+                ),
+                ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
+                    printer.declarative_keyword_style().apply("OpString"),
+                    "<".into(),
+                    printer
+                        .string_literal_style()
+                        .apply(format!("{:?}", &printer.cx[s])),
+                    ">".into(),
+                ]),
+            }),
         }
     }
 }
@@ -2130,7 +2126,7 @@ impl Print for FuncDecl {
 
         let def_without_name = match def {
             DeclDef::Imported(import) => {
-                pretty::Fragment::new([sig, " = ".into(), import.print(printer).into()])
+                pretty::Fragment::new([sig, " = ".into(), import.print(printer)])
             }
 
             // FIXME(eddyb) this can probably go into `impl Print for FuncDefBody`.

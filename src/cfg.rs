@@ -770,8 +770,7 @@ impl<'a> Structurizer<'a> {
                         inputs: [].into_iter().collect(),
                         children: EntityList::empty(),
                         outputs: [].into_iter().collect(),
-                    }
-                    .into(),
+                    },
                 );
                 self.func_def_body
                     .unstructured_cfg
@@ -1235,8 +1234,7 @@ impl<'a> Structurizer<'a> {
                             inputs: [].into_iter().collect(),
                             children: EntityList::empty(),
                             outputs: [].into_iter().collect(),
-                        }
-                        .into(),
+                        },
                     );
                     control_source = Some(new_empty_region);
                     Some((new_empty_region, [].into_iter().collect()))

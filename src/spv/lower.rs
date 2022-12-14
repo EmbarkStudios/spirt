@@ -945,8 +945,7 @@ impl Module {
                                             inputs: SmallVec::new(),
                                             children: EntityList::empty(),
                                             outputs: SmallVec::new(),
-                                        }
-                                        .into(),
+                                        },
                                     )
                                 };
                                 block_details.insert(
