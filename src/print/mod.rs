@@ -319,7 +319,7 @@ impl<'a> Plan<'a> {
         let (_, node_defs) = self.per_version_name_and_node_defs.last_mut().unwrap();
         match node_defs.entry(node) {
             Entry::Occupied(entry) => {
-                let dyn_data_ptr = |r| (r as *const dyn DynNodeDef).cast::<()>();
+                let dyn_data_ptr = |r| (r as *const dyn DynNodeDef<'_>).cast::<()>();
                 assert!(
                     std::ptr::eq(dyn_data_ptr(*entry.get()), dyn_data_ptr(node_def)),
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
@@ -450,7 +450,7 @@ pub enum Versions<PF> {
 }
 
 impl fmt::Display for Versions<pretty::FragmentPostLayout> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Single(fragment) => fragment.fmt(f),
             Self::Multiple {
@@ -846,7 +846,7 @@ impl<'a> Printer<'a> {
                 });
 
             for func_def_body in func_def_bodies_across_versions {
-                let visit_region = |func_at_region: FuncAt<ControlRegion>| {
+                let visit_region = |func_at_region: FuncAt<'_, ControlRegion>| {
                     let region = func_at_region.position;
 
                     define_label_or_value(Use::ControlRegionLabel(region));

@@ -52,7 +52,7 @@ impl TokensForOperand<String> {
     pub fn concat_to_plain_text(self) -> String {
         self.tokens
             .into_iter()
-            .map(|token| -> Cow<str> {
+            .map(|token| -> Cow<'_, str> {
                 match token {
                     Token::Punctuation(s) | Token::OperandKindName(s) | Token::EnumerandName(s) => {
                         s.into()

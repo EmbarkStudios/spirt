@@ -142,7 +142,7 @@ impl Fragment {
 pub struct FragmentPostLayout(Fragment);
 
 impl fmt::Display for FragmentPostLayout {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut result = Ok(());
         self.0.render_to_line_ops(
             &mut LineOp::interpret_with(|op| {

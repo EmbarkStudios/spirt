@@ -394,8 +394,8 @@ impl Spec {
                     "../../khronos-spec/SPIRV-Headers/include/spirv/unified1/spirv.core.grammar.json"
                 );
 
-                let raw_core_grammar: raw::CoreGrammar = serde_json::from_str(SPIRV_CORE_GRAMMAR_JSON)
-                .unwrap();
+                let raw_core_grammar: raw::CoreGrammar<'static> =
+                    serde_json::from_str(SPIRV_CORE_GRAMMAR_JSON).unwrap();
                 Spec::from_raw(raw_core_grammar)
             };
         }
@@ -435,7 +435,7 @@ impl Spec {
             .operand_kinds
             .iter()
             .filter_map(|o| {
-                let enumerant_from_raw = |e: &raw::OperandKindEnumerant| {
+                let enumerant_from_raw = |e: &raw::OperandKindEnumerant<'_>| {
                     let mut all_params = e
                         .parameters
                         .iter()
@@ -950,7 +950,7 @@ pub mod raw {
     }
 
     dew_and_then! {
-        dew_u32_maybe_hex: |x: DecOrHex<u32>| -> u32 { x.try_into() },
+        dew_u32_maybe_hex: |x: DecOrHex<'_, u32>| -> u32 { x.try_into() },
     }
 
     #[derive(Deserialize)]

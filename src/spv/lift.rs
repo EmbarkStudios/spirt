@@ -553,7 +553,7 @@ impl<'a> FuncLifting<'a> {
 
         // Create a SPIR-V block for every CFG point needing one.
         let mut blocks = FxIndexMap::default();
-        let mut visit_cfg_point = |point_cursor: CfgCursor| {
+        let mut visit_cfg_point = |point_cursor: CfgCursor<'_>| {
             let point = point_cursor.point;
 
             let phis = match point {
@@ -1066,7 +1066,7 @@ impl LazyInst<'_, '_> {
     fn result_id_attrs_and_import(
         self,
         module: &Module,
-        ids: &AllocatedIds,
+        ids: &AllocatedIds<'_>,
     ) -> (Option<spv::Id>, AttrSet, Option<Import>) {
         let cx = module.cx_ref();
 
@@ -1122,11 +1122,15 @@ impl LazyInst<'_, '_> {
         }
     }
 
-    fn to_inst_and_attrs(self, module: &Module, ids: &AllocatedIds) -> (spv::InstWithIds, AttrSet) {
+    fn to_inst_and_attrs(
+        self,
+        module: &Module,
+        ids: &AllocatedIds<'_>,
+    ) -> (spv::InstWithIds, AttrSet) {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
 
-        let value_to_id = |parent_func: &FuncLifting, v| match v {
+        let value_to_id = |parent_func: &FuncLifting<'_>, v| match v {
             Value::Const(ct) => match cx[ct].ctor {
                 ConstCtor::SpvStringLiteralForExtInst(s) => ids.debug_strings[&cx[s]],
 

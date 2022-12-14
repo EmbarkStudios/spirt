@@ -95,9 +95,6 @@
     // NOTE(eddyb) ignored because it's misguided to suggest `let mut s = ...;`
     // and `s.push_str(...);` when `+` is equivalent and does not require `let`.
     clippy::string_add,
-
-    // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    elided_lifetimes_in_paths,
 )]
 // NOTE(eddyb) this is stronger than the "Embark standard lints" above, because
 // we almost never need `unsafe` code and this is a further "speed bump" to it.

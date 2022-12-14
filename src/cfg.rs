@@ -149,7 +149,7 @@ impl ControlFlowGraph {
 
     fn traverse(
         &self,
-        func_at_region: FuncAt<ControlRegion>,
+        func_at_region: FuncAt<'_, ControlRegion>,
         incoming_edge_counts: &mut EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
         pre_order_visit: &mut impl FnMut(ControlRegion),
         post_order_visit: &mut impl FnMut(ControlRegion),
