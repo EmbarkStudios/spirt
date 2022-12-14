@@ -80,18 +80,18 @@ impl InstParseError {
                         let unsupported = spec::BitIdx::of_all_set_bits(word)
                             .filter(|&bit_idx| bits.get(bit_idx).is_none())
                             .fold(0u32, |x, i| x | (1 << i.0));
-                        format!("unsupported {} bit-pattern 0x{:08x}", name, unsupported).into()
+                        format!("unsupported {name} bit-pattern 0x{unsupported:08x}").into()
                     }
 
                     spec::OperandKindDef::ValueEnum { .. } => {
-                        format!("unsupported {} value {}", name, word).into()
+                        format!("unsupported {name} value {word}").into()
                     }
 
                     _ => unreachable!(),
                 }
             }
             Self::UnknownResultTypeId(id) => {
-                format!("ID %{} used as result type before definition", id).into()
+                format!("ID %{id} used as result type before definition").into()
             }
             Self::MissingContextSensitiveLiteralType => "missing type for literal".into(),
             Self::UnsupportedContextSensitiveLiteralType { type_opcode } => {
@@ -274,7 +274,7 @@ pub struct ModuleParser {
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V ({})", reason),
+        format!("malformed SPIR-V ({reason})"),
     )
 }
 
@@ -335,10 +335,10 @@ impl Iterator for ModuleParser {
 
         let (opcode, inst_name, def) = match spec::Opcode::try_from_u16_with_name_and_def(opcode) {
             Some(opcode_name_and_def) => opcode_name_and_def,
-            None => return Some(Err(invalid(&format!("unsupported opcode {}", opcode)))),
+            None => return Some(Err(invalid(&format!("unsupported opcode {opcode}")))),
         };
 
-        let invalid = |msg: &str| invalid(&format!("in {}: {}", inst_name, msg));
+        let invalid = |msg: &str| invalid(&format!("in {inst_name}: {msg}"));
 
         if words.len() < inst_len {
             return Some(Err(invalid("truncated instruction")));
@@ -388,8 +388,7 @@ impl Iterator for ModuleParser {
             let old = self.known_ids.insert(id, known_id_def);
             if old.is_some() {
                 return Err(invalid(&format!(
-                    "ID %{} is a result of multiple instructions",
-                    id
+                    "ID %{id} is a result of multiple instructions"
                 )));
             }
 

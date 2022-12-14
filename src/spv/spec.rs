@@ -753,7 +753,7 @@ impl Spec {
                             Seq::Rest
                         }
                     };
-                    assert!(seq <= Some(next_seq), "{:?} -> {:?}", next_seq, seq);
+                    assert!(seq <= Some(next_seq), "{next_seq:?} -> {seq:?}");
                     seq = Some(next_seq);
                 }
 
@@ -767,9 +767,7 @@ impl Spec {
                 // Only allow aliases that do not meaningfully differ.
                 assert!(
                     prev_def == new_def,
-                    "instructions {} and {} share an opcode but differ in definition",
-                    prev_name,
-                    new_name,
+                    "instructions {prev_name} and {new_name} share an opcode but differ in definition",
                 );
 
                 (preferred_name_between_dups(prev_name, new_name), new_def)
@@ -1089,8 +1087,7 @@ pub mod indexed {
                 // for special handling of duplicates (via `merge_duplicates`).
                 if usize::from(idx) < last_idx {
                     panic!(
-                        "KhrSegmentedVec::insert_in_order: out of order indices ({} after {})",
-                        idx, last_idx,
+                        "KhrSegmentedVec::insert_in_order: out of order indices ({idx} after {last_idx})",
                     );
                 }
             }
