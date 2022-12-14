@@ -90,7 +90,6 @@
 // crate-specific exceptions:
 #![allow(
     // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::needless_borrow,
     clippy::needless_lifetimes,
     clippy::nonminimal_bool,
     clippy::redundant_closure,

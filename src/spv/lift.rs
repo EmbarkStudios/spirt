@@ -962,7 +962,7 @@ impl<'a> FuncLifting<'a> {
         }
 
         // Remove now-unused blocks.
-        blocks.retain(|point, _| use_counts[&point] > 0);
+        blocks.retain(|point, _| use_counts[point] > 0);
 
         // Collect `OpPhi`s from other blocks' edges into each block.
         //
@@ -1507,7 +1507,7 @@ impl Module {
                         } = block;
 
                         iter::once(LazyInst::OpLabel {
-                            label_id: func_lifting.label_ids[&point],
+                            label_id: func_lifting.label_ids[point],
                         })
                         .chain(phis.iter().map(|phi| LazyInst::OpPhi {
                             parent_func: func_lifting,
@@ -1602,7 +1602,7 @@ impl Module {
         let mut decoration_insts = vec![];
 
         for lazy_inst in global_and_func_insts.clone() {
-            let (result_id, attrs, import) = lazy_inst.result_id_attrs_and_import(self, &ids);
+            let (result_id, attrs, import) = lazy_inst.result_id_attrs_and_import(self, ids);
 
             for attr in cx[attrs].attrs.iter() {
                 match attr {
@@ -1619,9 +1619,9 @@ impl Module {
                             ids: iter::once(target_id).collect(),
                         };
 
-                        if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(&opcode) {
+                        if [wk.OpExecutionMode, wk.OpExecutionModeId].contains(opcode) {
                             execution_mode_insts.push(inst);
-                        } else if [wk.OpName, wk.OpMemberName].contains(&opcode) {
+                        } else if [wk.OpName, wk.OpMemberName].contains(opcode) {
                             debug_name_insts.push(inst);
                         } else {
                             decoration_insts.push(inst);
@@ -1797,7 +1797,7 @@ impl Module {
         let mut current_debug_line = None;
         let mut current_block_id = None; // HACK(eddyb) for `current_debug_line` resets.
         for lazy_inst in global_and_func_insts {
-            let (inst, attrs) = lazy_inst.to_inst_and_attrs(self, &ids);
+            let (inst, attrs) = lazy_inst.to_inst_and_attrs(self, ids);
 
             // Reset line debuginfo when crossing/leaving blocks.
             let new_block_id = if inst.opcode == wk.OpLabel {

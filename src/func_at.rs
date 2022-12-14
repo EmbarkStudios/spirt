@@ -59,7 +59,7 @@ impl<'a> IntoIterator for FuncAt<'a, EntityList<ControlNode>> {
 impl<'a> Iterator for FuncAt<'a, EntityListIter<ControlNode>> {
     type Item = FuncAt<'a, ControlNode>;
     fn next(&mut self) -> Option<Self::Item> {
-        let (next, rest) = self.position.split_first(&self.control_nodes)?;
+        let (next, rest) = self.position.split_first(self.control_nodes)?;
         self.position = rest;
         Some(self.at(next))
     }
@@ -82,7 +82,7 @@ impl<'a> IntoIterator for FuncAt<'a, EntityList<DataInst>> {
 impl<'a> Iterator for FuncAt<'a, EntityListIter<DataInst>> {
     type Item = FuncAt<'a, DataInst>;
     fn next(&mut self) -> Option<Self::Item> {
-        let (next, rest) = self.position.split_first(&self.data_insts)?;
+        let (next, rest) = self.position.split_first(self.data_insts)?;
         self.position = rest;
         Some(self.at(next))
     }
@@ -167,7 +167,7 @@ impl<'a> FuncAtMut<'a, EntityList<ControlNode>> {
 // HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
 impl FuncAtMut<'_, EntityListIter<ControlNode>> {
     pub fn next(&mut self) -> Option<FuncAtMut<'_, ControlNode>> {
-        let (next, rest) = self.position.split_first(&self.control_nodes)?;
+        let (next, rest) = self.position.split_first(self.control_nodes)?;
         self.position = rest;
         Some(self.reborrow().at(next))
     }
@@ -190,7 +190,7 @@ impl<'a> FuncAtMut<'a, EntityList<DataInst>> {
 // HACK(eddyb) can't implement `Iterator` because `next` borrows `self`.
 impl FuncAtMut<'_, EntityListIter<DataInst>> {
     pub fn next(&mut self) -> Option<FuncAtMut<'_, DataInst>> {
-        let (next, rest) = self.position.split_first(&self.data_insts)?;
+        let (next, rest) = self.position.split_first(self.data_insts)?;
         self.position = rest;
         Some(self.reborrow().at(next))
     }
