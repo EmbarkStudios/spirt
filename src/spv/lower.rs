@@ -1203,7 +1203,7 @@ impl Module {
                             let phi_key = PhiKey {
                                 source_block_id: current_block_details.label_id,
                                 target_block_id: target_block_details.label_id,
-                                target_phi_idx: target_phi_idx,
+                                target_phi_idx,
                             };
                             let phi_value_ids = phi_to_values.remove(&phi_key).unwrap_or_default();
 

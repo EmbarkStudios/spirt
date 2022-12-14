@@ -90,7 +90,6 @@
 // crate-specific exceptions:
 #![allow(
     // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::redundant_field_names,
     clippy::semicolon_if_nothing_returned,
     clippy::should_implement_trait,
     clippy::single_match,
