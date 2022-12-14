@@ -940,6 +940,9 @@ pub mod raw {
                 D: serde::Deserializer<'de>,
             {
                 let x = Deserialize::deserialize(deserializer)?;
+
+                // HACK(eddyb) this is a `try {...}`-like use of a closure.
+                #[allow(clippy::redundant_closure_call)]
                 (|$x: $in_ty| -> Result<$out_ty, _> { $body })(x)
                     .map_err(serde::de::Error::custom)
             })*
