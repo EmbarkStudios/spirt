@@ -97,7 +97,6 @@
     clippy::string_add,
 
     // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::vtable_address_comparisons,
     elided_lifetimes_in_paths,
 )]
 // NOTE(eddyb) this is stronger than the "Embark standard lints" above, because

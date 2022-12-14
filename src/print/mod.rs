@@ -319,8 +319,9 @@ impl<'a> Plan<'a> {
         let (_, node_defs) = self.per_version_name_and_node_defs.last_mut().unwrap();
         match node_defs.entry(node) {
             Entry::Occupied(entry) => {
+                let dyn_data_ptr = |r| (r as *const dyn DynNodeDef).cast::<()>();
                 assert!(
-                    std::ptr::eq(*entry.get(), node_def),
+                    std::ptr::eq(dyn_data_ptr(*entry.get()), dyn_data_ptr(node_def)),
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
                     node.category().unwrap_or_else(|s| s)
                 );
