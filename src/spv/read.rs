@@ -224,8 +224,8 @@ impl InstParser<'_> {
                     .ok()
                     .ok_or(Error::IdZero)
             };
-            self.inst.result_type_id = def.has_result_type_id.then(|| id()).transpose()?;
-            self.inst.result_id = def.has_result_id.then(|| id()).transpose()?;
+            self.inst.result_type_id = def.has_result_type_id.then(&mut id).transpose()?;
+            self.inst.result_id = def.has_result_id.then(&mut id).transpose()?;
         }
 
         if let Some(type_id) = self.inst.result_type_id {

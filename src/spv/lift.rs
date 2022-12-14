@@ -362,7 +362,7 @@ impl<'a> NeedsIdsCollector<'a> {
                 .map(|func| {
                     Ok((
                         func,
-                        FuncLifting::from_func_decl(cx, &module.funcs[func], || alloc_id())?,
+                        FuncLifting::from_func_decl(cx, &module.funcs[func], &mut alloc_id)?,
                     ))
                 })
                 .collect::<Result<_, _>>()?,
