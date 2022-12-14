@@ -8,6 +8,9 @@
 //!     without going through `P` (as `EntityDefs` requires keys for any access)
 //! * they're dedicated types with inherent methods and trait `impl`s
 
+// NOTE(eddyb) wrong wrt lifetimes (https://github.com/rust-lang/rust-clippy/issues/5004).
+#![allow(clippy::should_implement_trait)]
+
 use crate::{
     Context, ControlNode, ControlNodeDef, ControlRegion, ControlRegionDef, DataInst, DataInstDef,
     EntityDefs, EntityList, EntityListIter, FuncDefBody, Type, Value,

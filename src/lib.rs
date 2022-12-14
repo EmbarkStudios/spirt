@@ -90,7 +90,6 @@
 // crate-specific exceptions:
 #![allow(
     // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::should_implement_trait,
     clippy::single_match,
     clippy::single_match_else,
     clippy::string_add,
