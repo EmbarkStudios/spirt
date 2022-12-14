@@ -466,6 +466,8 @@ impl Node {
                 ApproxLayout::Inline { worst_width: width }
             }
         };
+
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Text(text) => text_approx_rigid_layout(text),
             Self::StyledText(styles_and_text) => text_approx_rigid_layout(&styles_and_text.1),

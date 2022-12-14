@@ -209,6 +209,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     }
 
     fn visit_data_inst_def(&mut self, data_inst_def: &DataInstDef) {
+        #[allow(clippy::match_same_arms)]
         match data_inst_def.kind {
             DataInstKind::FuncCall(_) => {}
 
@@ -1069,6 +1070,7 @@ impl LazyInst<'_, '_> {
     ) -> (Option<spv::Id>, AttrSet, Option<Import>) {
         let cx = module.cx_ref();
 
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::Global(global) => {
                 let (attrs, import) = match global {

@@ -90,7 +90,6 @@
 // crate-specific exceptions:
 #![allow(
     // FIXME(eddyb) review all of these (some of them are intentional, sadly).
-    clippy::match_same_arms,
     clippy::match_wildcard_for_single_variants,
     clippy::needless_borrow,
     clippy::needless_lifetimes,
