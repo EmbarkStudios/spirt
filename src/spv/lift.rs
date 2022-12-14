@@ -849,7 +849,7 @@ impl<'a> FuncLifting<'a> {
                 for region in cfg.rev_post_order(func_def_body) {
                     func_def_body
                         .at(region)
-                        .rev_post_order_try_for_each(&mut visit_cfg_point)?
+                        .rev_post_order_try_for_each(&mut visit_cfg_point)?;
                 }
             }
         }

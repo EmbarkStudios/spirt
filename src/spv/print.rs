@@ -172,7 +172,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         let emit_missing_error = |this: &mut Self| {
             this.out
                 .tokens
-                .push(Token::Error(format!("/* missing {name} */")))
+                .push(Token::Error(format!("/* missing {name} */")));
         };
 
         let mut maybe_get_enum_word = || match self.imms.next() {
