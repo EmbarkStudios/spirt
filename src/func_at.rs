@@ -204,7 +204,7 @@ impl<'a> FuncAtMut<'a, DataInst> {
 
 impl FuncDefBody {
     /// Start immutably traversing the function at `position`.
-    pub fn at<'a, P: Copy>(&'a self, position: P) -> FuncAt<'a, P> {
+    pub fn at<P: Copy>(&self, position: P) -> FuncAt<'_, P> {
         FuncAt {
             control_regions: &self.control_regions,
             control_nodes: &self.control_nodes,
@@ -214,7 +214,7 @@ impl FuncDefBody {
     }
 
     /// Start mutably traversing the function at `position`.
-    pub fn at_mut<'a, P: Copy>(&'a mut self, position: P) -> FuncAtMut<'a, P> {
+    pub fn at_mut<P: Copy>(&mut self, position: P) -> FuncAtMut<'_, P> {
         FuncAtMut {
             control_regions: &mut self.control_regions,
             control_nodes: &mut self.control_nodes,
@@ -224,12 +224,12 @@ impl FuncDefBody {
     }
 
     /// Shorthand for `func_def_body.at(func_def_body.body)`.
-    pub fn at_body<'a>(&'a self) -> FuncAt<'a, ControlRegion> {
+    pub fn at_body(&self) -> FuncAt<'_, ControlRegion> {
         self.at(self.body)
     }
 
     /// Shorthand for `func_def_body.at_mut(func_def_body.body)`.
-    pub fn at_mut_body<'a>(&'a mut self) -> FuncAtMut<'a, ControlRegion> {
+    pub fn at_mut_body(&mut self) -> FuncAtMut<'_, ControlRegion> {
         self.at_mut(self.body)
     }
 }
