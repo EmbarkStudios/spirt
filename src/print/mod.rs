@@ -1191,7 +1191,7 @@ impl Use {
                     let func_category = func.category();
                     let func_idx = match printer.use_styles[&func] {
                         UseStyle::Anon { idx, .. } => idx,
-                        _ => unreachable!(),
+                        UseStyle::Inline => unreachable!(),
                     };
                     format!("{func_category}{func_idx}.{name}")
                 } else {

@@ -729,7 +729,7 @@ impl Module {
                                 TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypeFunction => {
                                     let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
                                         TypeCtorArg::Type(ty) => ty,
-                                        _ => unreachable!(),
+                                        TypeCtorArg::Const(_) => unreachable!(),
                                     });
                                     Some((types.next().unwrap(), types))
                                 }
@@ -1139,7 +1139,7 @@ impl Module {
                     // to be able to have an entry in `local_id_defs`.
                     let control_region = match local_id_defs[&result_id.unwrap()] {
                         LocalIdDef::BlockLabel(control_region) => control_region,
-                        _ => unreachable!(),
+                        LocalIdDef::Value(_) => unreachable!(),
                     };
                     let current_block_details = &block_details[&control_region];
                     assert_eq!(current_block_details.label_id, result_id.unwrap());

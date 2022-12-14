@@ -273,7 +273,7 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForO
     };
     let &kind = match printer.imms.peek().unwrap() {
         spv::Imm::Short(kind, _) | spv::Imm::LongStart(kind, _) => kind,
-        _ => unreachable!(),
+        spv::Imm::LongCont(..) => unreachable!(),
     };
     printer.operand(kind);
     assert!(printer.imms.next().is_none());
