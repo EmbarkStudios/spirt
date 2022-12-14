@@ -915,10 +915,14 @@ impl<'a> Printer<'a> {
     pub fn cx(&self) -> &'a Context {
         self.cx
     }
+}
 
-    // Styles for a variety of syntactic categories.
-    // FIXME(eddyb) this is a somewhat inefficient way of declaring these.
-
+// Styles for a variety of syntactic categories.
+// FIXME(eddyb) this is a somewhat inefficient way of declaring these.
+//
+// NOTE(eddyb) these methods take `self` so they can become configurable in the future.
+#[allow(clippy::unused_self)]
+impl Printer<'_> {
     fn error_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::MAGENTA)
     }
@@ -963,7 +967,9 @@ impl<'a> Printer<'a> {
             ..Default::default()
         }
     }
+}
 
+impl<'a> Printer<'a> {
     /// Pretty-print a `: T` style "type ascription" suffix.
     ///
     /// This should be used everywhere some type ascription notation is needed,
