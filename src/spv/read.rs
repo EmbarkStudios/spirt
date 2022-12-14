@@ -325,7 +325,7 @@ impl Iterator for ModuleParser {
         let wk = &spv_spec.well_known;
 
         let words = &bytemuck::cast_slice::<u8, u32>(&self.word_bytes)[self.next_word..];
-        let &opcode = words.get(0)?;
+        let &opcode = words.first()?;
 
         let (inst_len, opcode) = ((opcode >> 16) as usize, opcode as u16);
 
