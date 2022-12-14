@@ -145,11 +145,10 @@ impl fmt::Display for FragmentPostLayout {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut result = Ok(());
         self.0.render_to_line_ops(
-            &mut LineOp::interpret_with(|op| match op {
-                TextOp::Text(text) => {
+            &mut LineOp::interpret_with(|op| {
+                if let TextOp::Text(text) = op {
                     result = result.and_then(|_| f.write_str(text));
                 }
-                _ => {}
             }),
             false,
         );

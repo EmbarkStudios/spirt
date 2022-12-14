@@ -351,24 +351,18 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
-        match self.current_module {
-            Some(module) => {
-                self.use_node(Node::GlobalVar(gv), &module.global_vars[gv]);
-            }
-
+        if let Some(module) = self.current_module {
+            self.use_node(Node::GlobalVar(gv), &module.global_vars[gv]);
+        } else {
             // FIXME(eddyb) should this be a hard error?
-            None => {}
         }
     }
 
     fn visit_func_use(&mut self, func: Func) {
-        match self.current_module {
-            Some(module) => {
-                self.use_node(Node::Func(func), &module.funcs[func]);
-            }
-
+        if let Some(module) = self.current_module {
+            self.use_node(Node::Func(func), &module.funcs[func]);
+        } else {
             // FIXME(eddyb) should this be a hard error?
-            None => {}
         }
     }
 
