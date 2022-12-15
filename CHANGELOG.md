@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Conversions from/to SPIR-V (`spv::lower`/`spv::lift`).
 - Control-flow structurizer, from CFGs to SPIR-T's stricter structured control-flow.
-- Pretty-printer with (syntax-highlighted and hyperlinked) HTML output.
+- Pretty-printer with (styled and hyperlinked) HTML output.
 
 <!-- next-url -->
 [Unreleased]: https://github.com/EmbarkStudios/spirt/compare/0.0.0...HEAD

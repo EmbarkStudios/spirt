@@ -1,13 +1,62 @@
-//! # `SPIR-🇹`
+//! > <div style="font-size:small;border:1px solid;padding:1em;padding-top:0">
+//! > <div align="center">
+//! >
+//! > ## `SPIR-🇹`
+//! >
+//! > **⋯🢒 🇹arget 🠆 🇹ransform 🠆 🇹ranslate ⋯🢒**
+//! >
+//! > </div><br>
+//! >
+//! > **SPIR-🇹** is a research project aimed at exploring shader-oriented IR designs
+//! > derived from SPIR-V, and producing a framework around such an IR to facilitate
+//! > advanced compilation pipelines, beyond what existing SPIR-V tooling allows for.
+//! >
+//! > 🚧 *This project is in active design and development, many details can and will change* 🚧
+//! >
+//! > </div>
+//! >
+//! > *&mdash;
+#![cfg_attr(
+    docsrs,
+    // NOTE(eddyb) this requires updating `repository` before every release to
+    // end in `/tree/` followed by the tag name, in order to be useful.
+    doc = concat!(
+        "[`", env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"), "`'s `README`]",
+        "(", env!("CARGO_PKG_REPOSITORY"), "#readme)*  "
+    )
+)]
+#![cfg_attr(
+    git_main_docs,
+    doc = concat!(
+        "[`", env!("CARGO_PKG_NAME"), " @ ", env!("GIT_MAIN_DESCRIBE"), "`'s `README`]",
+        "(https://github.com/EmbarkStudios/spirt/tree/", env!("GIT_MAIN_COMMIT"), "#readme)*  "
+    )
+)]
+#![cfg_attr(
+    any(docsrs, git_main_docs),
+    doc = "<sup>&nbsp;&nbsp;&nbsp;&nbsp;*(click through for the full version)*</sup>"
+)]
+// HACK(eddyb) this is only relevant for local builds (which don't need a link).
+#![cfg_attr(
+    not(any(docsrs, git_main_docs)),
+    doc = concat!("`", env!("CARGO_PKG_NAME"), "`'s `README`*  ")
+)]
 //!
-//! **⋯🢒 🇹arget 🠆 🇹ransform 🠆 🇹ranslate ⋯🢒**
+//! *Check out also [the `EmbarkStudios/spirt` GitHub repository](https://github.com/EmbarkStudios/spirt),
+//! for any additional developments.*
 //!
-//! Shader-focused IR to facilitate working with SPIR-V in a compiler setting.
+//! #### Notable types/modules
 //!
-//! 🚧 *This project is in active design and development, check out
-//! [the GitHub repository](https://github.com/EmbarkStudios/spirt).* 🚧
-
-// FIXME(eddyb) should crate docs use `#[doc = include!("../README.md")]`?
+//! ##### IR data types
+//! * [`Context`]: handles interning ([`Type`]s, [`Const`]s, etc.) and allocating entity IDs
+//! * [`Module`]: owns [`Func`]s and [`GlobalVar`]s (rooted by [`exports`](Module::exports))
+//! * [`FuncDefBody`]: owns [`ControlRegion`]s and [DataInst]s (rooted by [`body`](FuncDefBody::body))
+//!
+//! ##### Utilities and passes
+//! * [`print`](mod@print): pretty-printer with (styled and hyperlinked) HTML output
+//! * [`spv::lower`]/[`spv::lift`]: conversion from/to SPIR-V
+//! * [`cfg::Structurizer`]: (re)structurization from arbitrary control-flow
+//!
 
 // BEGIN - Embark standard lints v6 for Rust 1.55+
 // do not change or add/remove here, but one can add exceptions after this section
@@ -104,8 +153,10 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 
 // HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
+#[doc(hidden)]
 type FxIndexMap<K, V> =
     indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+#[doc(hidden)]
 type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 mod context;
@@ -130,6 +181,7 @@ pub mod passes {
 pub mod spv;
 
 // HACK(eddyb) this only serves to disallow modifying the `cx` field of `Module`.
+#[doc(hidden)]
 mod sealed {
     use super::*;
     use std::rc::Rc;

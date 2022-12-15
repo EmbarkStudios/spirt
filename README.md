@@ -56,7 +56,7 @@ With the initial focus being on [Rust-GPU]'s usecase, various (otherwise desirab
 <table>
 <tr><td width="50%">
 
-**IR datatypes**:
+**IR data types**:
 * allowing near-arbitrary SPIR-V instructions for any unrecognized opcodes
   * IDs are replaced with interned/"entity" handles (see below)
 * interning for attributes (decorations & similar), types and constants
@@ -71,7 +71,7 @@ With the initial focus being on [Rust-GPU]'s usecase, various (otherwise desirab
 
 **Framework utilities**:
 * `visit`/`transform`: immutable/mutable IR traversal
-* `print`: pretty-printer with (syntax-highlighted and hyperlinked) HTML output
+* `print`: pretty-printer with (styled and hyperlinked) HTML output
 
 **Passes (to/from/on SPIR-🇹)**:
 * `spv::lower`: "lowering" from SPIR-V, normalizing away many irrelevant details
