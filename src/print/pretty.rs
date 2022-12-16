@@ -6,7 +6,9 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::{fmt, iter, mem};
 
-/// Part of a pretty document, made up of `Node`s.
+/// Part of a pretty document, made up of [`Node`]s.
+//
+// FIXME(eddyb) `Document` might be too long, what about renaming this to `Doc`?
 #[derive(Clone, Default, PartialEq)]
 pub struct Fragment {
     pub nodes: SmallVec<[Node; 8]>,
@@ -19,10 +21,10 @@ pub enum Node {
     // FIXME(eddyb) should this contain a `Node` instead of being text-only?
     StyledText(Box<(Styles, Cow<'static, str>)>),
 
-    /// Container for `Fragment`s, using block layout (indented on separate lines).
+    /// Container for [`Fragment`]s, using block layout (indented on separate lines).
     IndentedBlock(Vec<Fragment>),
 
-    /// Container for `Fragment`s, either using inline layout (all on one line)
+    /// Container for [`Fragment`]s, either using inline layout (all on one line)
     /// or block layout (indented on separate lines).
     InlineOrIndentedBlock(Vec<Fragment>),
 
@@ -127,7 +129,7 @@ impl Fragment {
         }
     }
 
-    /// Perform layout on the `Fragment`, limiting lines to `max_line_width`
+    /// Perform layout on the [`Fragment`], limiting lines to `max_line_width`
     /// columns where possible.
     pub fn layout_with_max_line_width(mut self, max_line_width: usize) -> FragmentPostLayout {
         self.approx_layout(MaxWidths {
@@ -232,7 +234,7 @@ impl HtmlSnippet {
 }
 
 impl FragmentPostLayout {
-    /// Flatten the `Fragment` to HTML, producing a `HtmlSnippet`.
+    /// Flatten the [`Fragment`] to HTML, producing a [`HtmlSnippet`].
     //
     // FIXME(eddyb) provide a non-allocating version.
     pub fn render_to_html(&self) -> HtmlSnippet {
@@ -361,12 +363,12 @@ impl FragmentPostLayout {
 
 // Rendering implementation details (including approximate layout).
 
-/// The approximate shape of a `Node`, regarding its 2D placement.
+/// The approximate shape of a [`Node`], regarding its 2D placement.
 #[derive(Copy, Clone)]
 enum ApproxLayout {
     /// Only occupies part of a line, (at most) `worst_width` columns wide.
     ///
-    /// `worst_width` can exceed the `inline` field of `MaxWidths`, in which
+    /// `worst_width` can exceed the `inline` field of [`MaxWidths`], in which
     /// case the choice of inline vs block is instead made by a surrounding node.
     Inline { worst_width: usize },
 
@@ -423,7 +425,7 @@ impl ApproxLayout {
     }
 }
 
-/// Maximum numbers of columns, available to a `Node`, for both inline layout
+/// Maximum numbers of columns, available to a [`Node`], for both inline layout
 /// and block layout (i.e. multi-line with indentation).
 ///
 /// That is, these are the best-case scenarios across all possible choices of
@@ -439,10 +441,10 @@ struct MaxWidths {
 const INDENT: &str = "  ";
 
 impl Node {
-    /// Determine the "rigid" component of the `ApproxLayout` of this `Node`.
+    /// Determine the "rigid" component of the [`ApproxLayout`] of this [`Node`].
     ///
-    /// That is, this accounts for the parts of the `Node` that don't depend on
-    /// contextual sizing, i.e. `MaxWidths` (see also `approx_flex_layout`).
+    /// That is, this accounts for the parts of the [`Node`] that don't depend on
+    /// contextual sizing, i.e. [`MaxWidths`] (see also `approx_flex_layout`).
     fn approx_rigid_layout(&self) -> ApproxLayout {
         // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
         // to destructure through the `Box<(_, Cow<str>)>`.
@@ -499,11 +501,11 @@ impl Node {
         }
     }
 
-    /// Determine the "flexible" component of the `ApproxLayout` of this `Node`,
+    /// Determine the "flexible" component of the [`ApproxLayout`] of this [`Node`],
     /// potentially making adjustments in order to fit within `max_widths`.
     ///
-    /// That is, this accounts for the parts of the `Node` that do depend on
-    /// contextual sizing, i.e. `MaxWidths` (see also `approx_rigid_layout`).
+    /// That is, this accounts for the parts of the [`Node`] that do depend on
+    /// contextual sizing, i.e. [`MaxWidths`] (see also `approx_rigid_layout`).
     fn approx_flex_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
         match self {
             Self::IndentedBlock(fragments) => {
@@ -584,7 +586,7 @@ impl Node {
 }
 
 impl Fragment {
-    /// Determine the `ApproxLayout` of this `Fragment`, potentially making
+    /// Determine the [`ApproxLayout`] of this [`Fragment`], potentially making
     /// adjustments in order to fit within `max_widths`.
     fn approx_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
         let mut layout = ApproxLayout::Inline { worst_width: 0 };
@@ -648,8 +650,8 @@ impl Fragment {
 /// Line-oriented operation (i.e. as if lines are stored separately).
 ///
 /// However, a representation that stores lines separately doesn't really exist,
-/// and instead `LineOp`s are (statefully) transformed into `TextOp`s on the fly
-/// (see `LineOp::interpret_with`).
+/// and instead [`LineOp`]s are (statefully) transformed into [`TextOp`]s on the fly
+/// (see [`LineOp::interpret_with`]).
 #[derive(Copy, Clone)]
 enum LineOp<'a> {
     PushIndent,
@@ -669,7 +671,7 @@ enum Break {
 }
 
 impl Node {
-    /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
+    /// Flatten the [`Node`] to [`LineOp`]s, passed to `each_line_op`.
     fn render_to_line_ops<'a>(
         &'a self,
         each_line_op: &mut impl FnMut(LineOp<'a>),
@@ -727,7 +729,7 @@ impl Node {
 }
 
 impl Fragment {
-    /// Flatten the `Fragment` to `LineOp`s, passed to `each_line_op`.
+    /// Flatten the [`Fragment`] to [`LineOp`]s, passed to `each_line_op`.
     fn render_to_line_ops<'a>(
         &'a self,
         each_line_op: &mut impl FnMut(LineOp<'a>),
@@ -748,8 +750,8 @@ enum TextOp<'a> {
 }
 
 impl<'a> LineOp<'a> {
-    /// Expand `LineOp`s passed to the returned `impl FnMut(LineOp<'a>)` closure,
-    /// forwarding the expanded `TextOp`s to `each_text_op`.
+    /// Expand [`LineOp`]s passed to the returned `impl FnMut(LineOp<'a>)` closure,
+    /// forwarding the expanded [`TextOp`]s to `each_text_op`.
     //
     // FIXME(eddyb) this'd be nicer if instead of returning a closure, it could
     // be passed to an `impl for<F: FnMut(LineOp<'a>)> FnOnce(F)` callback.
@@ -838,7 +840,7 @@ impl<'a> LineOp<'a> {
 //
 // FIXME(eddyb) should these be methods on `Node`/`Fragment`?
 
-/// Constructs the `Fragment` corresponding to one of:
+/// Constructs the [`Fragment`] corresponding to one of:
 /// * inline layout: `header + " " + contents.join(" ")`
 /// * block layout: `header + "\n" + indent(contents).join("\n")`
 pub fn join_space(
@@ -858,7 +860,7 @@ pub fn join_space(
     ])
 }
 
-/// Constructs the `Fragment` corresponding to one of:
+/// Constructs the [`Fragment`] corresponding to one of:
 /// * inline layout: `prefix + contents.join(", ") + suffix`
 /// * block layout: `prefix + "\n" + indent(contents).join(",\n") + ",\n" + suffix`
 pub fn join_comma_sep(

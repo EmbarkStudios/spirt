@@ -1,11 +1,11 @@
 //! Traversal helpers for intra-function entities.
 //!
-//! `FuncAt<P>`/`FuncAtMut<P>` are like `(&FuncDefBody, P)`/`(&mut FuncDefBody, P`)
+//! [`FuncAt<P>`]/[`FuncAtMut<P>`] are like `(&FuncDefBody, P)`/`(&mut FuncDefBody, P`)
 //! (where `P` is some type describing a "position" in the function), except:
-//! * they only borrow the `EntityDefs` fields of `FuncDefBody`
+//! * they only borrow the [`EntityDefs`] fields of [`FuncDefBody`]
 //!   * this can prevent borrow conflicts, especially when mutating other fields
 //!   * it also avoids accidentally accessing parts of the function definition
-//!     without going through `P` (as `EntityDefs` requires keys for any access)
+//!     without going through `P` (as [`EntityDefs`] requires keys for any access)
 //! * they're dedicated types with inherent methods and trait `impl`s
 
 // NOTE(eddyb) wrong wrt lifetimes (https://github.com/rust-lang/rust-clippy/issues/5004).
@@ -19,7 +19,7 @@ use crate::{
 /// Immutable traversal (i.e. visiting) helper for intra-function entities.
 ///
 /// The point/position type `P` should be an entity or a shallow entity wrapper
-/// (e.g. `EntityList<ControlNode>`).
+/// (e.g. [`EntityList<ControlNode>`]).
 #[derive(Copy, Clone)]
 pub struct FuncAt<'a, P: Copy> {
     pub control_regions: &'a EntityDefs<ControlRegion>,
@@ -98,7 +98,7 @@ impl<'a> FuncAt<'a, DataInst> {
 }
 
 impl FuncAt<'_, Value> {
-    /// Return the `Type` of this `Value` (`Context` used for `Value::Const`).
+    /// Return the [`Type`] of this [`Value`] ([`Context`] used for [`Value::Const`]).
     pub fn type_of(self, cx: &Context) -> Type {
         match self.position {
             Value::Const(ct) => cx[ct].ty,
@@ -117,7 +117,7 @@ impl FuncAt<'_, Value> {
 /// Mutable traversal (i.e. transforming) helper for intra-function entities.
 ///
 /// The point/position type `P` should be an entity or a shallow entity wrapper
-/// (e.g. `EntityList<ControlNode>`).
+/// (e.g. [`EntityList<ControlNode>`]).
 pub struct FuncAtMut<'a, P: Copy> {
     pub control_regions: &'a mut EntityDefs<ControlRegion>,
     pub control_nodes: &'a mut EntityDefs<ControlNode>,

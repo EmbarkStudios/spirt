@@ -64,7 +64,7 @@ impl From<spec::Opcode> for Inst {
     }
 }
 
-/// A full SPIR-V instruction (like `Inst` but including input/output ID operands).
+/// A full SPIR-V instruction (like [`Inst`], but including input/output ID operands).
 pub struct InstWithIds {
     pub without_ids: Inst,
 
@@ -102,9 +102,10 @@ pub type Id = NonZeroU32;
 
 // FIXME(eddyb) pick a "small string" crate, and fine-tune its inline size,
 // instead of allocating a whole `String`.
-/// Given a single `LiteralString` (as one `Imm::Short` or a `Imm::LongStart`
-/// followed by some number of `Imm::LongCont` - will panic otherwise), returns a
-/// Rust `String` if the literal is valid UTF-8, or the validation error otherwise.
+//
+/// Given a single `LiteralString` (as one [`Imm::Short`] or a [`Imm::LongStart`]
+/// followed by some number of [`Imm::LongCont`] - will panic otherwise), returns a
+/// Rust [`String`] if the literal is valid UTF-8, or the validation error otherwise.
 fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
     let wk = &spec::Spec::get().well_known;
 

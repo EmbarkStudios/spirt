@@ -11,13 +11,13 @@ use std::collections::VecDeque;
 // roots and then only other exports if they're used by imports.
 
 /// Remove exports which aren't "roots" (`is_root(export_key)` returns `false`),
-/// and which aren't otherwise kept alive by a "root" (through `Import::LinkName`
-/// declarations, with `name` matching `ExportKey::LinkName`), either directly
+/// and which aren't otherwise kept alive by a "root" (through [`Import::LinkName`]
+/// declarations, with `name` matching [`ExportKey::LinkName`]), either directly
 /// or transitively (including through any number of imports).
 ///
 /// In essence, other than the "root" exports, `minimize_exports` only keeps the
 /// exports that `resolve_imports` would use, and is recommended to first call
-/// `minimize_exports` before using `resolve_imports`, to reduce work.
+/// `minimize_exports` before using [`resolve_imports`], to reduce work.
 ///
 /// Note that the "dead" definitions are not removed from the module, and any
 /// external references to them could still be used (e.g. from a clone of the
@@ -103,9 +103,9 @@ impl Visitor<'_> for LiveExportCollector<'_> {
     }
 }
 
-/// Remap `Import::LinkName` to definitions exported as `ExportKey::LinkName`.
+/// Remap [`Import::LinkName`] to definitions exported as [`ExportKey::LinkName`].
 ///
-/// To reduce the work performed, calling `minimize_exports` first is recommended.
+/// To reduce the work performed, calling [`minimize_exports`] first is recommended.
 //
 // FIXME(eddyb) make this operate on multiple modules.
 pub fn resolve_imports(module: &mut Module) {

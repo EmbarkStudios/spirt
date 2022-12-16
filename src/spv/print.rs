@@ -16,7 +16,7 @@ use std::{iter, mem, str};
 pub enum Token<ID> {
     /// An inconsistency was detected in the operands to be printed.
     /// For stylistic consistency, the error message is always found wrapped in
-    /// a block comment (i.e. the `String` is always of the form `"/* ... */"`).
+    /// a block comment (i.e. the [`String`] is always of the form `"/* ... */"`).
     Error(String),
 
     // FIXME(eddyb) perhaps encode the hierarchical structure of e.g. enumerand
@@ -33,7 +33,7 @@ pub enum Token<ID> {
     Id(ID),
 }
 
-/// All the `Token`s outputted by printing one single ("logical") SPIR-V operand,
+/// All the [`Token`]s outputted by printing one single ("logical") SPIR-V operand,
 /// which may be concatenated (after separately processing `ID`s) to obtain a
 /// complete plain-text version of the printed operand.
 pub struct TokensForOperand<ID> {
@@ -282,7 +282,7 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForO
 }
 
 /// Group (ordered according to `opcode`) `imms` and `ids` into logical operands
-/// (i.e. long immediates are unflattened) and produce one `TokensForOperand` by
+/// (i.e. long immediates are unflattened) and produce one [`TokensForOperand`] by
 /// printing each of them.
 pub fn inst_operands<ID>(
     opcode: spec::Opcode,

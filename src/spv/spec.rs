@@ -151,7 +151,7 @@ impl indexed::FlatIdx for Opcode {
 }
 
 impl Opcode {
-    /// Lookup the name & definition for `opcode` in the lazily-loaded `Spec`,
+    /// Lookup the name & definition for `opcode` in the lazily-loaded [`Spec`],
     /// returning `None` if it's not a known opcode.
     pub fn try_from_u16_with_name_and_def(
         opcode: u16,
@@ -165,19 +165,19 @@ impl Opcode {
         self.0
     }
 
-    /// Lookup the name & definition for this opcode in the lazily-loaded `Spec`.
+    /// Lookup the name & definition for this opcode in the lazily-loaded [`Spec`].
     #[inline]
     pub fn name_and_def(self) -> (&'static str, &'static InstructionDef) {
         Spec::get().instructions.get_named(self).unwrap()
     }
 
-    /// Lookup the name for this opcode in the lazily-loaded `Spec`.
+    /// Lookup the name for this opcode in the lazily-loaded [`Spec`].
     #[inline]
     pub fn name(self) -> &'static str {
         self.name_and_def().0
     }
 
-    /// Lookup the definition for this opcode in the lazily-loaded `Spec`.
+    /// Lookup the definition for this opcode in the lazily-loaded [`Spec`].
     #[inline]
     pub fn def(self) -> &'static InstructionDef {
         self.name_and_def().1
@@ -220,8 +220,8 @@ pub enum OperandMode {
 }
 
 impl InstructionDef {
-    /// Return a (potentially infinite) iterator of `OperandKind`s, along with
-    /// the `OperandMode` indicating whether an operand is expected (`Required`),
+    /// Return a (potentially infinite) iterator of [`OperandKind`]s, along with
+    /// the [`OperandMode`] indicating whether an operand is expected (`Required`),
     /// or that an operand's absence signals the end of operands (`Optional`),
     /// which is also the exit signal for the "rest operands" infinite iterators.
     pub fn all_operands(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
@@ -262,19 +262,19 @@ impl indexed::FlatIdx for OperandKind {
 }
 
 impl OperandKind {
-    /// Lookup the name & definition for this operand kind in the lazily-loaded `Spec`.
+    /// Lookup the name & definition for this operand kind in the lazily-loaded [`Spec`].
     #[inline]
     pub fn name_and_def(self) -> (&'static str, &'static OperandKindDef) {
         Spec::get().operand_kinds.get_named(self).unwrap()
     }
 
-    /// Lookup the name for this operand kind in the lazily-loaded `Spec`.
+    /// Lookup the name for this operand kind in the lazily-loaded [`Spec`].
     #[inline]
     pub fn name(self) -> &'static str {
         self.name_and_def().0
     }
 
-    /// Lookup the definition for this operand kind in the lazily-loaded `Spec`.
+    /// Lookup the definition for this operand kind in the lazily-loaded [`Spec`].
     #[inline]
     pub fn def(self) -> &'static OperandKindDef {
         self.name_and_def().1
@@ -310,7 +310,7 @@ impl BitIdx {
         }
     }
 
-    /// Returns an iterator of `BitIdx`s, from which `x` can be reconstructed
+    /// Returns an iterator of [`BitIdx`]s, from which `x` can be reconstructed
     /// by OR-ing together `1 << i` for every `BitIdx(i)`.
     ///
     /// The iterator is ordered: lower bit indices appear before higher ones.
@@ -347,8 +347,8 @@ pub struct Enumerant {
 }
 
 impl Enumerant {
-    /// Return a (potentially infinite) iterator of `OperandKind`s, along with
-    /// the `OperandMode` indicating whether an operand is expected (`Required`),
+    /// Return a (potentially infinite) iterator of [`OperandKind`]s, along with
+    /// the [`OperandMode`] indicating whether an operand is expected (`Required`),
     /// or that an operand's absence signals the end of operands (`Optional`),
     /// which is also the exit signal for the "rest operands" infinite iterators.
     pub fn all_params(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
@@ -377,7 +377,7 @@ pub enum LiteralSize {
 }
 
 impl Spec {
-    /// Return a lazily-loaded `Spec` (only does significant work for the first call).
+    /// Return a lazily-loaded [`Spec`] (only does significant work for the first call).
     #[inline(always)]
     #[must_use]
     pub fn get() -> &'static Spec {
@@ -402,7 +402,7 @@ impl Spec {
         &SPEC
     }
 
-    /// Implementation detail of `Spec::get`, indexes the raw data to produce a `Spec`.
+    /// Implementation detail of [`Spec::get`], indexes the raw data to produce a [`Spec`].
     fn from_raw(raw_core_grammar: raw::CoreGrammar<'static>) -> Self {
         /// Helper for picking a name when the same index has multiple names.
         fn preferred_name_between_dups<'a>(a: &'a str, b: &'a str) -> &'a str {
@@ -1003,7 +1003,7 @@ pub mod indexed {
         }
     }
 
-    /// Flat array (`Vec`) storage, likely used with compact indices.
+    /// Flat array ([`Vec`]) storage, likely used with compact indices.
     pub enum Flat {}
 
     impl<I: FlatIdx, T> StorageShape<I, T> for Flat {
@@ -1013,7 +1013,7 @@ pub mod indexed {
         }
     }
 
-    /// Like `Flat`, but the `Vec` elements are wrapped in `Option`.
+    /// Like [`Flat`], but the [`Vec`] elements are wrapped in [`Option`].
     pub enum FlatWithHoles {}
 
     impl<I: FlatIdx, T> StorageShape<I, T> for FlatWithHoles {
@@ -1031,7 +1031,7 @@ pub mod indexed {
     ///   than the standard range, the blockiness allows some optimizations
     pub enum KhrSegmented {}
 
-    /// Khronos-oriented segmented sparse array (see `KhrSegmented`).
+    /// Khronos-oriented segmented sparse array (see [`KhrSegmented`]).
     pub struct KhrSegmentedVec<T> {
         /// Concatenation of values for indices lower than `4096`, with values
         /// for indices in a `64`-sized/aligned block starting at/above `4096`.
@@ -1124,7 +1124,7 @@ pub mod indexed {
             }
         }
 
-        /// Construct a `KhrSegmentedVec` out of an iterator with ordered indices.
+        /// Construct a [`KhrSegmentedVec`] out of an iterator with ordered indices.
         ///
         /// An exception is made for duplicates, which have to be handled by the
         /// `merge_duplicates` closure, instead of being outright disallowed.

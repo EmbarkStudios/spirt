@@ -192,7 +192,7 @@ mod sealed {
         ///
         /// Notable choices made for this field:
         /// * private to disallow switching the context of a module
-        /// * `Rc` sharing to allow multiple modules to use the same context
+        /// * [`Rc`] sharing to allow multiple modules to use the same context
         ///   (`Context: !Sync` because of the interners so it can't be `Arc`)
         cx: Rc<Context>,
 
@@ -255,7 +255,7 @@ pub enum ExportKey {
     },
 }
 
-/// A definition exported out of a module (see also `ExportKey`).
+/// A definition exported out of a module (see also [`ExportKey`]).
 #[derive(Copy, Clone)]
 pub enum Exportee {
     GlobalVar(GlobalVar),
@@ -326,7 +326,7 @@ pub struct TypeDef {
 pub enum TypeCtor {
     SpvInst(spv::Inst),
 
-    /// The type of a `ConstCtor::SpvStringLiteralForExtInst` constant, i.e.
+    /// The type of a [`ConstCtor::SpvStringLiteralForExtInst`] constant, i.e.
     /// a SPIR-V `OpString` with no actual type in SPIR-V.
     SpvStringLiteralForExtInst,
 }
@@ -358,7 +358,7 @@ pub enum ConstCtor {
     SpvStringLiteralForExtInst(InternedStr),
 }
 
-/// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,
+/// Declarations ([`GlobalVarDecl`], [`FuncDecl`]) can contain a full definition,
 /// or only be an import of a definition (e.g. from another module).
 #[derive(Clone)]
 pub enum DeclDef<D> {
@@ -427,7 +427,7 @@ pub struct FuncDefBody {
     pub control_nodes: EntityDefs<ControlNode>,
     pub data_insts: EntityDefs<DataInst>,
 
-    /// The `ControlRegion` representing the whole body of the function.
+    /// The [`ControlRegion`] representing the whole body of the function.
     ///
     /// Function parameters are provided via `body.inputs`, i.e. they can be
     /// only accessed with `Value::ControlRegionInputs { region: body, idx }`.
@@ -447,33 +447,33 @@ pub struct FuncDefBody {
     pub unstructured_cfg: Option<cfg::ControlFlowGraph>,
 }
 
-/// Linear chain of `ControlNode`s, describing a single-entry single-exit (SESE)
+/// Linear chain of [`ControlNode`]s, describing a single-entry single-exit (SESE)
 /// control-flow "region" (subgraph) in a function's control-flow graph (CFG).
 ///
 /// # Control-flow
 ///
 /// In SPIR-T, two forms of control-flow are used:
-/// * "structured": `ControlRegion`s and `ControlNode`s in a "mutual tree"
-///   * i.e. each such `ControlRegion` can only appear in exactly one `ControlNode`,
-///     and each `ControlNode` can only appear in exactly one `ControlRegion`
-///   * a region is either the function's body, or used as part of `ControlNode`
+/// * "structured": [`ControlRegion`]s and [`ControlNode`]s in a "mutual tree"
+///   * i.e. each such [`ControlRegion`] can only appear in exactly one [`ControlNode`],
+///     and each [`ControlNode`] can only appear in exactly one [`ControlRegion`]
+///   * a region is either the function's body, or used as part of [`ControlNode`]
 ///     (e.g. the "then" case of an `if`-`else`), itself part of a larger region
 ///   * when inside a region, reaching any other part of the function (or any
 ///     other function on call stack) requires leaving through the region's
 ///     single exit (also called "merge") point, i.e. its execution is either:
 ///     * "convergent": the region completes and continues into its parent
-///       `ControlNode`, or function (the latter being a "structured return")
+///       [`ControlNode`], or function (the latter being a "structured return")
 ///     * "divergent": execution gets stuck in the region (an infinite loop),
 ///       or is aborted (e.g. `OpTerminateInvocation` from SPIR-V)
-/// * "unstructured": `ControlRegion`s which connect to other `ControlRegion`s
-///   using `cfg::ControlInst`s (as described by a `cfg::ControlFlowGraph`)
+/// * "unstructured": [`ControlRegion`]s which connect to other [`ControlRegion`]s
+///   using [`cfg::ControlInst`]s (as described by a [`cfg::ControlFlowGraph`])
 ///
-/// When a function's entire body can be described by a single `ControlRegion`,
+/// When a function's entire body can be described by a single [`ControlRegion`],
 /// that function is said to have (entirely) "structured control-flow".
 ///
 /// Mixing "structured" and "unstructured" control-flow is supported because:
 /// * during structurization, it allows structured subgraphs to remain connected
-///   by the same CFG edges that were connecting smaller `ControlRegion`s before
+///   by the same CFG edges that were connecting smaller [`ControlRegion`]s before
 /// * structurization doesn't have to fail in the cases it doesn't fully support
 ///   yet, but can instead result in a "maximally structured" function
 ///
@@ -490,22 +490,22 @@ pub struct FuncDefBody {
 ///
 /// # Data-flow interactions
 ///
-/// SPIR-T `Value`s follow "single static assignment" (SSA), just like SPIR-V:
+/// SPIR-T [`Value`]s follow "single static assignment" (SSA), just like SPIR-V:
 /// * inside a function, any new value is produced (or "defined") as an output
-///   of `DataInst`/`ControlNode`, and "uses" of that value are `Value`s
-///   variants which refer to the defining `DataInst`/`ControlNode` directly
+///   of [`DataInst`]/[`ControlNode`], and "uses" of that value are [`Value`]s
+///   variants which refer to the defining [`DataInst`]/[`ControlNode`] directly
 ///   (guaranteeing the "single" and "static" of "SSA", by construction)
 /// * the definition of a value must "dominate" all of its uses
 ///   (i.e. in all possible execution paths, the definition precedes all uses)
 ///
 /// But unlike SPIR-V, SPIR-T's structured control-flow has implications for SSA:
-/// * dominance is simpler, so values defined in a `ControlRegion` can be used:
+/// * dominance is simpler, so values defined in a [`ControlRegion`] can be used:
 ///   * later in that region, including in the region's `outputs`
 ///     (which allows "exporting" values out to the rest of the function)
-///   * outside that region, but *only* if the parent `ControlNode` only has
+///   * outside that region, but *only* if the parent [`ControlNode`] only has
 ///     exactly one child region (i.e. a single-case `Select`, or a `Loop`)
 ///     * this is an "emergent" property, stemming from the region having to
-///       execute (at least once) before the parent `ControlNode` can complete,
+///       execute (at least once) before the parent [`ControlNode`] can complete,
 ///       but is not is not ideal (especially for reasoning about loops) and
 ///       should eventually be replaced with passing all such values through
 ///       the region `outputs` (or by inlining the region, in the `Select` case)
@@ -522,22 +522,22 @@ pub struct FuncDefBody {
 ///     phi nodes, as `cfg:ControlInst`s passing values to their target regions
 #[derive(Clone)]
 pub struct ControlRegionDef {
-    /// Inputs to this `ControlRegion`:
-    /// * accessed using `Value::ControlRegionInput`
+    /// Inputs to this [`ControlRegion`]:
+    /// * accessed using [`Value::ControlRegionInput`]
     /// * values provided by the parent:
     ///   * when this is the function body: the function's parameters
     pub inputs: SmallVec<[ControlRegionInputDecl; 2]>,
 
     pub children: EntityList<ControlNode>,
 
-    /// Output values from this `ControlRegion`, provided to the parent:
+    /// Output values from this [`ControlRegion`], provided to the parent:
     /// * when this is the function body: these are the structured return values
     /// * when this is a `Select` case: these are the values for the parent
-    ///   `ControlNode`'s outputs (accessed using `Value::ControlNodeOutput`)
+    ///   [`ControlNode`]'s outputs (accessed using [`Value::ControlNodeOutput`])
     /// * when this is a `Loop` body: these are the values to be used for the
     ///   next loop iteration's body `inputs`
-    ///   * **not** accessible through `Value::ControlNodeOutput` on the `Loop`,
-    ///     as it's both confusing regarding `Value::ControlRegionInput`, and
+    ///   * **not** accessible through [`Value::ControlNodeOutput`] on the `Loop`,
+    ///     as it's both confusing regarding [`Value::ControlRegionInput`], and
     ///     also there's nothing stopping body-defined values from directly being
     ///     used outside the loop (once that changes, this aspect can be flipped)
     pub outputs: SmallVec<[Value; 2]>,
@@ -554,10 +554,10 @@ pub struct ControlRegionInputDecl {
 pub struct ControlNodeDef {
     pub kind: ControlNodeKind,
 
-    /// Outputs from this `ControlNode`:
-    /// * accessed using `Value::ControlNodeOutput`
+    /// Outputs from this [`ControlNode`]:
+    /// * accessed using [`Value::ControlNodeOutput`]
     /// * values provided by `region.outputs`, where `region` is the executed
-    ///   child `ControlRegion`:
+    ///   child [`ControlRegion`]:
     ///   * when this is a `Select`: the case that was chosen
     pub outputs: SmallVec<[ControlNodeOutputDecl; 2]>,
 }
@@ -571,18 +571,18 @@ pub struct ControlNodeOutputDecl {
 
 #[derive(Clone)]
 pub enum ControlNodeKind {
-    /// Linear chain of `DataInst`s, executing in sequence.
+    /// Linear chain of [`DataInst`]s, executing in sequence.
     ///
-    /// This is only an optimization over keeping `DataInst`s in `ControlRegion`
-    /// linear chains directly, or even merging `DataInst` with `ControlNode`.
+    /// This is only an optimization over keeping [`DataInst`]s in [`ControlRegion`]
+    /// linear chains directly, or even merging [`DataInst`] with [`ControlNode`].
     Block {
         // FIXME(eddyb) should empty blocks be allowed? should `DataInst`s be
         // linked directly into the `ControlRegion` `children` list?
         insts: EntityList<DataInst>,
     },
 
-    /// Choose one `ControlRegion` out of `cases` to execute, based on a single
-    /// value input (`scrutinee`) interpreted according to `SelectionKind`.
+    /// Choose one [`ControlRegion`] out of `cases` to execute, based on a single
+    /// value input (`scrutinee`) interpreted according to [`SelectionKind`].
     ///
     /// This corresponds to "gamma" (`γ`) nodes in (R)VSDG, though those are
     /// sometimes limited only to a two-way selection on a boolean condition.
@@ -650,7 +650,7 @@ pub enum DataInstKind {
 pub enum Value {
     Const(Const),
 
-    /// One of the inputs to a `ControlRegion`:
+    /// One of the inputs to a [`ControlRegion`]:
     /// * declared by `region.inputs[input_idx]`
     /// * value provided by the parent of the `region`:
     ///   * when `region` is the function body: `input_idx`th function parameter
@@ -659,16 +659,16 @@ pub enum Value {
         input_idx: u32,
     },
 
-    /// One of the outputs produced by a `ControlNode`:
+    /// One of the outputs produced by a [`ControlNode`]:
     /// * declared by `control_node.outputs[output_idx]`
     /// * value provided by `region.outputs[output_idx]`, where `region` is the
-    ///   executed child `ControlRegion` (of `control_node`):
+    ///   executed child [`ControlRegion`] (of `control_node`):
     ///   * when `control_node` is a `Select`: the case that was chosen
     ControlNodeOutput {
         control_node: ControlNode,
         output_idx: u32,
     },
 
-    /// The output value of a `DataInst`.
+    /// The output value of a [`DataInst`].
     DataInstOutput(DataInst),
 }

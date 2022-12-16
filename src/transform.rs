@@ -42,8 +42,8 @@ impl<T> Transformed<T> {
 // can call e.g. `Transformed::foo(...)` methods.
 impl Transformed<()> {
     /// Map every element of an iterator through `transform_elem` and return
-    /// `Transformed::Changed(new_iter)` if any `transform_elem` call returned
-    /// `Transformed::Changed`, with `new_iter` containing a combination of the
+    /// [`Transformed::Changed(new_iter)`] if any `transform_elem` call returned
+    /// [`Transformed::Changed`], with `new_iter` containing a combination of the
     /// changed elements, and clones of the unchanged elements.
     pub fn map_iter<'a, T: 'a + Clone>(
         iter: impl Iterator<Item = &'a T> + Clone + 'a,
@@ -76,9 +76,9 @@ impl Transformed<()> {
     }
 }
 
-/// Helper macro to create a combined `Transformed` out of several variables,
-/// each with their own transformation, where any `Transformed::Changed` input
-/// will result in a `Transformed::Changed` output, using a combination of the
+/// Helper macro to create a combined [`Transformed`] out of several variables,
+/// each with their own transformation, where any [`Transformed::Changed`] input
+/// will result in a [`Transformed::Changed`] output, using a combination of the
 /// changed inputs, and clones of the unchanged inputs.
 macro_rules! transform {
     // User-facing entry-point, dispatches to the internal more-explicit form.
@@ -201,7 +201,7 @@ pub trait Transformer: Sized {
 /// Trait implemented on "transformable" types, to further "elaborate" a type by
 /// transforming its "interior" (i.e. variants and/or fields).
 ///
-/// That is, an `impl InnerTransform for X` will call the relevant `Transformer`
+/// That is, an `impl InnerTransform for X` will call the relevant [`Transformer`]
 /// method for each `X` field, effectively performing a single level of a deep
 /// transform.
 /// Also, if `Transformer::transform_X` exists for a given `X`, its default should
@@ -213,7 +213,7 @@ pub trait InnerTransform: Sized {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self>;
 }
 
-/// Like `InnerTransform`, but only for the `in_place_transform_X` cases.
+/// Like [`InnerTransform`], but only for the `in_place_transform_X` cases.
 pub trait InnerInPlaceTransform {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer);
 }

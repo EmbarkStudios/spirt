@@ -9,10 +9,10 @@ use std::ops::{Deref, DerefMut};
 /// Those resources currently are:
 /// * interners, for anything without an identity, and which can be deduplicated
 /// * "entity" allocators, for everything else - i.e. anything with an identity
-///   that needs to remain unique across an entire `Context`
-///   * the *definition* of an entity isn't kept in the `Context`, but rather in
-///     some `EntityDefs` collection somewhere in a `Module` (or further nested),
-///     with only the entity *indices* being allocated by the `Context`
+///   that needs to remain unique across an entire [`Context`]
+///   * the *definition* of an entity isn't kept in the [`Context`], but rather in
+///     some [`EntityDefs`] collection somewhere in a [`Module`](crate::Module) (or further nested),
+///     with only the entity *indices* being allocated by the [`Context`]
 #[derive(Default)]
 pub struct Context {
     interners: Interners,
@@ -160,15 +160,15 @@ impl<I: sealed::Interned> std::ops::Index<I> for Context {
     }
 }
 
-/// Collection holding the actual definitions for `Context`-allocated entities.
+/// Collection holding the actual definitions for [`Context`]-allocated entities.
 ///
-/// By design there is no way to iterate the contents of an `EntityDefs`, or
-/// generate entity indices without defining the entity in an `EntityDefs`.
+/// By design there is no way to iterate the contents of an [`EntityDefs`], or
+/// generate entity indices without defining the entity in an [`EntityDefs`].
 #[derive(Clone)]
 pub struct EntityDefs<E: sealed::Entity> {
     /// Entities are grouped into chunks, with per-entity-type chunk sizes
     /// (powers of 2) specified via `entities!` below.
-    /// This allows different `EntityDefs`s to independently define more
+    /// This allows different [`EntityDefs`]s to independently define more
     /// entities, without losing compactness (until a whole chunk is filled).
     //
     // FIXME(eddyb) consider using `u32` instead of `usize` for the "flattened base".
@@ -180,7 +180,7 @@ pub struct EntityDefs<E: sealed::Entity> {
     /// defining more entities into it, without allocating new chunks).
     incomplete_chunk_start_and_flattened_base: Option<(E, usize)>,
 
-    /// All chunks' definitions are flattened into one contiguous `Vec`, where
+    /// All chunks' definitions are flattened into one contiguous [`Vec`], where
     /// the start of each chunk's definitions in `flattened` is indicated by
     /// either `complete_chunk_start_to_flattened_base` (for completed chunks)
     /// or `incomplete_chunk_start_and_flattened_base`.
@@ -303,16 +303,16 @@ impl<E: sealed::Entity, V> EntityOrientedMapKey<V> for E {
 
 /// Map with `K` keys and `V` values, that is:
 /// * "entity-oriented" `K` keys, i.e. that are or contain exactly one entity
-///   (supported via `K: EntityOrientedMapKey<V>` for extensibility)
+///   (supported via [`K: EntityOrientedMapKey<V>`](EntityOrientedMapKey) for extensibility)
 /// * "dense" in the sense of few (or no) gaps in (the entities in) its keys
-///   (relative to the entities defined in the corresponding `EntityDefs`)
+///   (relative to the entities defined in the corresponding [`EntityDefs`])
 ///
-/// By design there is no way to iterate the entries in an `EntityOrientedDenseMap`.
+/// By design there is no way to iterate the entries in an [`EntityOrientedDenseMap`].
 //
 // FIXME(eddyb) implement a "sparse" version as well, and maybe some bitsets?
 #[derive(Clone)]
 pub struct EntityOrientedDenseMap<K: EntityOrientedMapKey<V>, V> {
-    /// Like in `EntityDefs`, entities are grouped into chunks, but there is no
+    /// Like in [`EntityDefs`], entities are grouped into chunks, but there is no
     /// flattening, since arbitrary insertion orders have to be supported.
     chunk_start_to_value_slots: SmallFxHashMap<K::Entity, Vec<K::DenseValueSlots>>,
 }
@@ -458,8 +458,9 @@ impl<K: EntityOrientedMapKey<V>, V> std::ops::IndexMut<K> for EntityOrientedDens
     }
 }
 
+#[allow(rustdoc::private_intra_doc_links)]
 /// Doubly-linked list, "intrusively" going through `E::Def`, which must be an
-/// `EntityListNode<E, _>` (to hold the "previous/next node" links).
+/// [`EntityListNode<E, _>`] (to hold the "previous/next node" links).
 ///
 /// Fields are private to avoid arbitrary user interactions.
 #[derive(Copy, Clone)]
@@ -604,7 +605,7 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
     }
 }
 
-/// `EntityList<E>` iterator, but with a different API than `Iterator`.
+/// [`EntityList<E>`] iterator, but with a different API than [`Iterator`].
 ///
 /// This can also be considered a (non-random-access) "subslice" of the list.
 #[derive(Copy, Clone)]
@@ -657,11 +658,11 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityListIter<E> {
     }
 }
 
-/// `EntityList<E>` node, containing the "intrusive" list links, and the rest of
+/// [`EntityList<E>`] node, containing the "intrusive" list links, and the rest of
 /// the entity definition (the `inner_def` field of type `D`).
 ///
 /// Fields are private to avoid arbitrary user interactions outside of special
-/// methods and `Deref`/`DerefMut`.
+/// methods and [`Deref`]/[`DerefMut`].
 //
 // FIXME(eddyb) `Deref`/`DerefMut` aren't the best API, could this be hidden
 // further by making `EntityDefs` hide the list links in the `Index` impl?

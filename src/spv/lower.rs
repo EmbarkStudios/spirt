@@ -59,7 +59,7 @@ enum Export {
     },
 }
 
-/// Deferred `FuncDefBody`, needed because some IDs are initially forward refs.
+/// Deferred [`FuncDefBody`], needed because some IDs are initially forward refs.
 struct FuncBody {
     func_id: spv::Id,
     func: Func,
