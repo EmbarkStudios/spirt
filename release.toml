@@ -1,8 +1,8 @@
 pre-release-commit-message = "Release {{version}}"
-dev-version = false
 tag-message = "Release {{version}}"
 tag-name = "{{version}}"
 pre-release-replacements = [
+  { file = "Cargo.toml", prerelease = true, search = "repository = \"https://github.com/EmbarkStudios/spirt\"", replace = "repository = \"https://github.com/EmbarkStudios/spirt/tree/{{tag_name}}\"" },
   { file = "CHANGELOG.md", search = "Unreleased", replace = "{{version}}" },
   { file = "CHANGELOG.md", search = "\\.\\.\\.HEAD", replace = "...{{tag_name}}" },
   { file = "CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}" },

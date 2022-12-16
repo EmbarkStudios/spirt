@@ -7,3 +7,6 @@ Cargo.lock
 # Profiling output files.
 callgrind.out.*
 perf.data*
+
+# HACK(eddyb) this is only for easily marking local-only files.
+\#*
