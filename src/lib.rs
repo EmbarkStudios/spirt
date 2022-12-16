@@ -1,13 +1,63 @@
-//! # `SPIR-🇹`
+//! > <div style="font-size:small;border:1px solid;padding:1em;padding-top:0">
+//! > <div align="center">
+//! >
+//! > ## `SPIR-🇹`
+//! >
+//! > **⋯🢒 🇹arget 🠆 🇹ransform 🠆 🇹ranslate ⋯🢒**
+//! >
+//! > </div><br>
+//! >
+//! > **SPIR-🇹** is a research project aimed at exploring shader-oriented IR designs
+//! > derived from SPIR-V, and producing a framework around such an IR to facilitate
+//! > advanced compilation pipelines, beyond what existing SPIR-V tooling allows for.
+//! >
+//! > 🚧 *This project is in active design and development, many details can and will change* 🚧
+//! >
+//! > </div>
+//! >
+//! > *&mdash;
+#![cfg_attr(
+    docsrs,
+    // NOTE(eddyb) this requires updating `repository` before every release to
+    // end in `/tree/` followed by the tag name, in order to be useful.
+    doc = concat!(
+        "[`", env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"), "`'s `README`]",
+        "(", env!("CARGO_PKG_REPOSITORY"), "#readme)*  "
+    )
+)]
+#![cfg_attr(
+    git_main_docs,
+    doc = concat!(
+        "[`", env!("CARGO_PKG_NAME"), " @ ", env!("GIT_MAIN_DESCRIBE"), "`'s `README`]",
+        "(https://github.com/EmbarkStudios/spirt/tree/", env!("GIT_MAIN_COMMIT"), "#readme)*  "
+    )
+)]
+#![cfg_attr(
+    any(docsrs, git_main_docs),
+    doc = "<sup>&nbsp;&nbsp;&nbsp;&nbsp;*(click through for the full version)*</sup>"
+)]
+// HACK(eddyb) this is only relevant for local builds (which don't need a link).
+#![cfg_attr(
+    not(any(docsrs, git_main_docs)),
+    doc = concat!("`", env!("CARGO_PKG_NAME"), "`'s `README`*  ")
+)]
 //!
-//! **⋯🢒 🇹arget 🠆 🇹ransform 🠆 🇹ranslate ⋯🢒**
+//! *Check out also [the `EmbarkStudios/spirt` GitHub repository](https://github.com/EmbarkStudios/spirt),
+//! for any additional developments.*
 //!
-//! Shader-focused IR to facilitate working with SPIR-V in a compiler setting.
+//! #### Notable types/modules
 //!
-//! 🚧 *This project is in active design and development, check out
-//! [the GitHub repository](https://github.com/EmbarkStudios/spirt).* 🚧
-
-// FIXME(eddyb) should crate docs use `#[doc = include!("../README.md")]`?
+//! ##### IR data types
+// HACK(eddyb) using `(struct.Context.html)` to link `Context`, not `context::Context`.
+//! * [`Context`](struct.Context.html): handles interning ([`Type`]s, [`Const`]s, etc.) and allocating entity handles
+//! * [`Module`]: owns [`Func`]s and [`GlobalVar`]s (rooted by [`exports`](Module::exports))
+//! * [`FuncDefBody`]: owns [`ControlRegion`]s and [DataInst]s (rooted by [`body`](FuncDefBody::body))
+//!
+//! ##### Utilities and passes
+//! * [`print`](mod@print): pretty-printer with (styled and hyperlinked) HTML output
+//! * [`spv::lower`]/[`spv::lift`]: conversion from/to SPIR-V
+//! * [`cfg::Structurizer`]: (re)structurization from arbitrary control-flow
+//!
 
 // BEGIN - Embark standard lints v6 for Rust 1.55+
 // do not change or add/remove here, but one can add exceptions after this section
@@ -100,36 +150,46 @@
 // we almost never need `unsafe` code and this is a further "speed bump" to it.
 #![forbid(unsafe_code)]
 
-use smallvec::SmallVec;
-use std::collections::BTreeSet;
-
-// HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
-type FxIndexMap<K, V> =
-    indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
-type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
-
-mod context;
-pub use context::{
-    AttrSet, Const, Context, ControlNode, ControlRegion, DataInst, EntityDefs, EntityList,
-    EntityListIter, EntityOrientedDenseMap, EntityOrientedMapKey, Func, GlobalVar, InternedStr,
-    Type,
-};
-
+// NOTE(eddyb) all the modules are declared here, but they're documented "inside"
+// (i.e. using inner doc comments).
 pub mod cfg;
+mod context;
 pub mod func_at;
 pub mod print;
 pub mod transform;
 pub mod visit;
 pub mod passes {
+    //! IR transformations (typically whole-[`Module`](crate::Module)).
+    //
     // NOTE(eddyb) inline `mod` to avoid adding APIs here, it's just namespacing.
 
     pub mod legalize;
     pub mod link;
 }
-
 pub mod spv;
 
+use smallvec::SmallVec;
+use std::collections::BTreeSet;
+
+// HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
+#[doc(hidden)]
+type FxIndexMap<K, V> =
+    indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+#[doc(hidden)]
+type FxIndexSet<V> = indexmap::IndexSet<V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
+// NOTE(eddyb) these reexports are all documented inside `context`.
+// FIXME(eddyb) maybe make an `entity` module to move either the definitions,
+// or at least the re-exports - an `ir` module might help too, organizationally?
+pub use context::{
+    Context, EntityDefs, EntityList, EntityListIter, EntityOrientedDenseMap, EntityOrientedMapKey,
+};
+
+/// Interned handle for a [`str`].
+pub use context::InternedStr;
+
 // HACK(eddyb) this only serves to disallow modifying the `cx` field of `Module`.
+#[doc(hidden)]
 mod sealed {
     use super::*;
     use std::rc::Rc;
@@ -140,7 +200,7 @@ mod sealed {
         ///
         /// Notable choices made for this field:
         /// * private to disallow switching the context of a module
-        /// * `Rc` sharing to allow multiple modules to use the same context
+        /// * [`Rc`] sharing to allow multiple modules to use the same context
         ///   (`Context: !Sync` because of the interners so it can't be `Arc`)
         cx: Rc<Context>,
 
@@ -181,11 +241,14 @@ mod sealed {
 }
 pub use sealed::Module;
 
+/// Semantic properties of a SPIR-T module (not tied to any declarations/definitions).
 #[derive(Clone)]
 pub enum ModuleDialect {
     Spv(spv::Dialect),
 }
 
+/// Non-semantic details (i.e. debuginfo) of a SPIR-Y module (not tied to any
+/// declarations/definitions).
 #[derive(Clone)]
 pub enum ModuleDebugInfo {
     Spv(spv::ModuleDebugInfo),
@@ -203,13 +266,18 @@ pub enum ExportKey {
     },
 }
 
-/// A definition exported out of a module (see also `ExportKey`).
+/// A definition exported out of a module (see also [`ExportKey`]).
 #[derive(Copy, Clone)]
 pub enum Exportee {
     GlobalVar(GlobalVar),
     Func(Func),
 }
 
+/// Interned handle for an [`AttrSetDef`](crate::AttrSetDef)
+/// (a set of [`Attr`](crate::Attr)s).
+pub use context::AttrSet;
+
+/// Definition for an [`AttrSet`]: a set of [`Attr`]s.
 #[derive(Default, PartialEq, Eq, Hash)]
 pub struct AttrSetDef {
     // FIXME(eddyb) use `BTreeMap<Attr, AttrValue>` and split some of the params
@@ -222,6 +290,11 @@ pub struct AttrSetDef {
     pub attrs: BTreeSet<Attr>,
 }
 
+/// Any semantic or non-semantic (debuginfo) decoration/modifier, that can be
+/// *optionally* applied to some declaration/definition.
+///
+/// Always used via [`AttrSetDef`] (interned as [`AttrSet`]).
+//
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
@@ -239,8 +312,12 @@ pub enum Attr {
     SpvBitflagsOperand(spv::Imm),
 }
 
-// HACK(eddyb) wrapper to limit `Ord` for interned index types (e.g. `InternedStr`)
-// to only situations where the interned index reflects contents (i.e. equality).
+/// Wrapper to limit `Ord` for interned index types (e.g. [`InternedStr`])
+/// to only situations where the interned index reflects contents (i.e. equality).
+//
+// FIXME(eddyb) this is not ideal, and it might be more useful to replace the
+// `BTreeSet<Attr>` with an `BTreeMap<Attr, AttrValue>`, where only `Attr` needs
+// to be `Ord`, and the details that cannot be `Ord`, can be moved to `AttrValue`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct OrdAssertEq<T>(pub T);
 
@@ -262,6 +339,11 @@ impl<T: Eq> Ord for OrdAssertEq<T> {
     }
 }
 
+/// Interned handle for a [`TypeDef`](crate::TypeDef).
+pub use context::Type;
+
+/// Definition for a [`Type`].
+//
 // FIXME(eddyb) maybe special-case some basic types like integers.
 #[derive(PartialEq, Eq, Hash)]
 pub struct TypeDef {
@@ -270,11 +352,12 @@ pub struct TypeDef {
     pub ctor_args: SmallVec<[TypeCtorArg; 2]>,
 }
 
+/// [`Type`] "constructor": a [`TypeDef`] wiithout any [`TypeCtorArg`]s ([`Type`]s/[`Const`]s).
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TypeCtor {
     SpvInst(spv::Inst),
 
-    /// The type of a `ConstCtor::SpvStringLiteralForExtInst` constant, i.e.
+    /// The type of a [`ConstCtor::SpvStringLiteralForExtInst`] constant, i.e.
     /// a SPIR-V `OpString` with no actual type in SPIR-V.
     SpvStringLiteralForExtInst,
 }
@@ -285,6 +368,11 @@ pub enum TypeCtorArg {
     Const(Const),
 }
 
+/// Interned handle for a [`ConstDef`](crate::ConstDef) (a constant value).
+pub use context::Const;
+
+/// Definition for a [`Const`]: a constant value.
+//
 // FIXME(eddyb) maybe special-case some basic consts like integer literals.
 #[derive(PartialEq, Eq, Hash)]
 pub struct ConstDef {
@@ -294,6 +382,7 @@ pub struct ConstDef {
     pub ctor_args: SmallVec<[Const; 2]>,
 }
 
+/// [`Const`] "constructor": a [`ConstDef`] wiithout any nested [`Const`]s.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum ConstCtor {
     PtrToGlobalVar(GlobalVar),
@@ -306,7 +395,7 @@ pub enum ConstCtor {
     SpvStringLiteralForExtInst(InternedStr),
 }
 
-/// Declarations (`GlobalVarDecl`, `FuncDecl`) can contain a full definition,
+/// Declarations ([`GlobalVarDecl`], [`FuncDecl`]) can contain a full definition,
 /// or only be an import of a definition (e.g. from another module).
 #[derive(Clone)]
 pub enum DeclDef<D> {
@@ -320,6 +409,11 @@ pub enum Import {
     LinkName(InternedStr),
 }
 
+/// Entity handle for a [`GlobalVarDecl`](crate::GlobalVarDecl) (a global variable).
+pub use context::GlobalVar;
+
+/// Declaration/definition for a [`GlobalVar`]: a global variable.
+//
 // FIXME(eddyb) mark any `GlobalVar` not *controlled* by the SPIR-V module
 // (roughly: storage classes that don't allow initializers, i.e. most of them),
 // as an "import" from "the shader interface", and therefore "externally visible",
@@ -344,12 +438,17 @@ pub enum AddrSpace {
     SpvStorageClass(u32),
 }
 
+/// The body of a [`GlobalVar`] definition.
 #[derive(Clone)]
 pub struct GlobalVarDefBody {
     /// If `Some`, the global variable will start out with the specified value.
     pub initializer: Option<Const>,
 }
 
+/// Entity handle for a [`FuncDecl`](crate::FuncDecl) (a function).
+pub use context::Func;
+
+/// Declaration/definition for a [`Func`]: a function.
 #[derive(Clone)]
 pub struct FuncDecl {
     pub attrs: AttrSet,
@@ -368,6 +467,8 @@ pub struct FuncParam {
     pub ty: Type,
 }
 
+/// The body of a [`Func`] definition.
+//
 // FIXME(eddyb) `FuncDefBody`/`func_def_body` are too long, find shorter names.
 #[derive(Clone)]
 pub struct FuncDefBody {
@@ -375,7 +476,7 @@ pub struct FuncDefBody {
     pub control_nodes: EntityDefs<ControlNode>,
     pub data_insts: EntityDefs<DataInst>,
 
-    /// The `ControlRegion` representing the whole body of the function.
+    /// The [`ControlRegion`] representing the whole body of the function.
     ///
     /// Function parameters are provided via `body.inputs`, i.e. they can be
     /// only accessed with `Value::ControlRegionInputs { region: body, idx }`.
@@ -395,33 +496,38 @@ pub struct FuncDefBody {
     pub unstructured_cfg: Option<cfg::ControlFlowGraph>,
 }
 
-/// Linear chain of `ControlNode`s, describing a single-entry single-exit (SESE)
-/// control-flow "region" (subgraph) in a function's control-flow graph (CFG).
+/// Entity handle for a [`ControlRegionDef`](crate::ControlRegionDef)
+/// (a control-flow region).
+///
+/// A [`ControlRegion`] ("control-flow region") is a linear chain of [`ControlNode`]s,
+/// describing a single-entry single-exit (SESE) control-flow "region" (subgraph)
+/// in a function's control-flow graph (CFG).
 ///
 /// # Control-flow
 ///
 /// In SPIR-T, two forms of control-flow are used:
-/// * "structured": `ControlRegion`s and `ControlNode`s in a "mutual tree"
-///   * i.e. each such `ControlRegion` can only appear in exactly one `ControlNode`,
-///     and each `ControlNode` can only appear in exactly one `ControlRegion`
-///   * a region is either the function's body, or used as part of `ControlNode`
+/// * "structured": [`ControlRegion`]s and [`ControlNode`]s in a "mutual tree"
+///   * i.e. each such [`ControlRegion`] can only appear in exactly one [`ControlNode`],
+///     and each [`ControlNode`] can only appear in exactly one [`ControlRegion`]
+///   * a region is either the function's body, or used as part of [`ControlNode`]
 ///     (e.g. the "then" case of an `if`-`else`), itself part of a larger region
 ///   * when inside a region, reaching any other part of the function (or any
 ///     other function on call stack) requires leaving through the region's
 ///     single exit (also called "merge") point, i.e. its execution is either:
 ///     * "convergent": the region completes and continues into its parent
-///       `ControlNode`, or function (the latter being a "structured return")
+///       [`ControlNode`], or function (the latter being a "structured return")
 ///     * "divergent": execution gets stuck in the region (an infinite loop),
 ///       or is aborted (e.g. `OpTerminateInvocation` from SPIR-V)
-/// * "unstructured": `ControlRegion`s which connect to other `ControlRegion`s
-///   using `cfg::ControlInst`s (as described by a `cfg::ControlFlowGraph`)
+/// * "unstructured": [`ControlRegion`]s which connect to other [`ControlRegion`]s
+///   using [`cfg::ControlInst`](crate::cfg::ControlInst)s (as described by a
+///   [`cfg::ControlFlowGraph`](crate::cfg::ControlFlowGraph))
 ///
-/// When a function's entire body can be described by a single `ControlRegion`,
+/// When a function's entire body can be described by a single [`ControlRegion`],
 /// that function is said to have (entirely) "structured control-flow".
 ///
 /// Mixing "structured" and "unstructured" control-flow is supported because:
 /// * during structurization, it allows structured subgraphs to remain connected
-///   by the same CFG edges that were connecting smaller `ControlRegion`s before
+///   by the same CFG edges that were connecting smaller [`ControlRegion`]s before
 /// * structurization doesn't have to fail in the cases it doesn't fully support
 ///   yet, but can instead result in a "maximally structured" function
 ///
@@ -438,22 +544,22 @@ pub struct FuncDefBody {
 ///
 /// # Data-flow interactions
 ///
-/// SPIR-T `Value`s follow "single static assignment" (SSA), just like SPIR-V:
+/// SPIR-T [`Value`](crate::Value)s follow "single static assignment" (SSA), just like SPIR-V:
 /// * inside a function, any new value is produced (or "defined") as an output
-///   of `DataInst`/`ControlNode`, and "uses" of that value are `Value`s
-///   variants which refer to the defining `DataInst`/`ControlNode` directly
+///   of [`DataInst`]/[`ControlNode`], and "uses" of that value are [`Value`](crate::Value)s
+///   variants which refer to the defining [`DataInst`]/[`ControlNode`] directly
 ///   (guaranteeing the "single" and "static" of "SSA", by construction)
 /// * the definition of a value must "dominate" all of its uses
 ///   (i.e. in all possible execution paths, the definition precedes all uses)
 ///
 /// But unlike SPIR-V, SPIR-T's structured control-flow has implications for SSA:
-/// * dominance is simpler, so values defined in a `ControlRegion` can be used:
+/// * dominance is simpler, so values defined in a [`ControlRegion`](crate::ControlRegion) can be used:
 ///   * later in that region, including in the region's `outputs`
 ///     (which allows "exporting" values out to the rest of the function)
-///   * outside that region, but *only* if the parent `ControlNode` only has
+///   * outside that region, but *only* if the parent [`ControlNode`](crate::ControlNode) only has
 ///     exactly one child region (i.e. a single-case `Select`, or a `Loop`)
 ///     * this is an "emergent" property, stemming from the region having to
-///       execute (at least once) before the parent `ControlNode` can complete,
+///       execute (at least once) before the parent [`ControlNode`](crate::ControlNode) can complete,
 ///       but is not is not ideal (especially for reasoning about loops) and
 ///       should eventually be replaced with passing all such values through
 ///       the region `outputs` (or by inlining the region, in the `Select` case)
@@ -467,25 +573,28 @@ pub struct FuncDefBody {
 ///     instead of in the merge (where phi nodes require special-casing, as
 ///     their "uses" of all the "source" values would normally be illegal)
 ///   * in unstructured control-flow, region `inputs` are additionally used for
-///     phi nodes, as `cfg:ControlInst`s passing values to their target regions
+///     phi nodes, as [`cfg::ControlInst`](crate::cfg::ControlInst)s passing values to their target regions
+pub use context::ControlRegion;
+
+/// Definition for a [`ControlRegion`]: a control-flow region.
 #[derive(Clone)]
 pub struct ControlRegionDef {
-    /// Inputs to this `ControlRegion`:
-    /// * accessed using `Value::ControlRegionInput`
+    /// Inputs to this [`ControlRegion`]:
+    /// * accessed using [`Value::ControlRegionInput`]
     /// * values provided by the parent:
     ///   * when this is the function body: the function's parameters
     pub inputs: SmallVec<[ControlRegionInputDecl; 2]>,
 
     pub children: EntityList<ControlNode>,
 
-    /// Output values from this `ControlRegion`, provided to the parent:
+    /// Output values from this [`ControlRegion`], provided to the parent:
     /// * when this is the function body: these are the structured return values
     /// * when this is a `Select` case: these are the values for the parent
-    ///   `ControlNode`'s outputs (accessed using `Value::ControlNodeOutput`)
+    ///   [`ControlNode`]'s outputs (accessed using [`Value::ControlNodeOutput`])
     /// * when this is a `Loop` body: these are the values to be used for the
     ///   next loop iteration's body `inputs`
-    ///   * **not** accessible through `Value::ControlNodeOutput` on the `Loop`,
-    ///     as it's both confusing regarding `Value::ControlRegionInput`, and
+    ///   * **not** accessible through [`Value::ControlNodeOutput`] on the `Loop`,
+    ///     as it's both confusing regarding [`Value::ControlRegionInput`], and
     ///     also there's nothing stopping body-defined values from directly being
     ///     used outside the loop (once that changes, this aspect can be flipped)
     pub outputs: SmallVec<[Value; 2]>,
@@ -498,14 +607,23 @@ pub struct ControlRegionInputDecl {
     pub ty: Type,
 }
 
+/// Entity handle for a [`ControlNodeDef`](crate::ControlNodeDef)
+/// (a control-flow operator or leaf).
+///
+/// See [`ControlRegion`] docs for more on control-flow in SPIR-T.
+pub use context::ControlNode;
+
+/// Definition for a [`ControlNode`]: a control-flow operator or leaf.
+///
+/// See [`ControlRegion`] docs for more on control-flow in SPIR-T.
 #[derive(Clone)]
 pub struct ControlNodeDef {
     pub kind: ControlNodeKind,
 
-    /// Outputs from this `ControlNode`:
-    /// * accessed using `Value::ControlNodeOutput`
+    /// Outputs from this [`ControlNode`]:
+    /// * accessed using [`Value::ControlNodeOutput`]
     /// * values provided by `region.outputs`, where `region` is the executed
-    ///   child `ControlRegion`:
+    ///   child [`ControlRegion`]:
     ///   * when this is a `Select`: the case that was chosen
     pub outputs: SmallVec<[ControlNodeOutputDecl; 2]>,
 }
@@ -519,18 +637,18 @@ pub struct ControlNodeOutputDecl {
 
 #[derive(Clone)]
 pub enum ControlNodeKind {
-    /// Linear chain of `DataInst`s, executing in sequence.
+    /// Linear chain of [`DataInst`]s, executing in sequence.
     ///
-    /// This is only an optimization over keeping `DataInst`s in `ControlRegion`
-    /// linear chains directly, or even merging `DataInst` with `ControlNode`.
+    /// This is only an optimization over keeping [`DataInst`]s in [`ControlRegion`]
+    /// linear chains directly, or even merging [`DataInst`] with [`ControlNode`].
     Block {
         // FIXME(eddyb) should empty blocks be allowed? should `DataInst`s be
         // linked directly into the `ControlRegion` `children` list?
         insts: EntityList<DataInst>,
     },
 
-    /// Choose one `ControlRegion` out of `cases` to execute, based on a single
-    /// value input (`scrutinee`) interpreted according to `SelectionKind`.
+    /// Choose one [`ControlRegion`] out of `cases` to execute, based on a single
+    /// value input (`scrutinee`) interpreted according to [`SelectionKind`].
     ///
     /// This corresponds to "gamma" (`γ`) nodes in (R)VSDG, though those are
     /// sometimes limited only to a two-way selection on a boolean condition.
@@ -572,6 +690,10 @@ pub enum SelectionKind {
     SpvInst(spv::Inst),
 }
 
+/// Entity handle for a [`DataInstDef`](crate::DataInstDef) (an SSA instruction).
+pub use context::DataInst;
+
+/// Definition for a [`DataInst`]: an SSA instruction.
 #[derive(Clone)]
 pub struct DataInstDef {
     pub attrs: AttrSet,
@@ -598,7 +720,7 @@ pub enum DataInstKind {
 pub enum Value {
     Const(Const),
 
-    /// One of the inputs to a `ControlRegion`:
+    /// One of the inputs to a [`ControlRegion`]:
     /// * declared by `region.inputs[input_idx]`
     /// * value provided by the parent of the `region`:
     ///   * when `region` is the function body: `input_idx`th function parameter
@@ -607,16 +729,16 @@ pub enum Value {
         input_idx: u32,
     },
 
-    /// One of the outputs produced by a `ControlNode`:
+    /// One of the outputs produced by a [`ControlNode`]:
     /// * declared by `control_node.outputs[output_idx]`
     /// * value provided by `region.outputs[output_idx]`, where `region` is the
-    ///   executed child `ControlRegion` (of `control_node`):
+    ///   executed child [`ControlRegion`] (of `control_node`):
     ///   * when `control_node` is a `Select`: the case that was chosen
     ControlNodeOutput {
         control_node: ControlNode,
         output_idx: u32,
     },
 
-    /// The output value of a `DataInst`.
+    /// The output value of a [`DataInst`].
     DataInstOutput(DataInst),
 }

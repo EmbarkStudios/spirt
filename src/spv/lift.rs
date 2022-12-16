@@ -246,11 +246,11 @@ struct FuncLifting<'a> {
     blocks: FxIndexMap<CfgPoint, BlockLifting<'a>>,
 }
 
-/// What determines the values for `Value::ControlRegionInput`s, for a specific
+/// What determines the values for [`Value::ControlRegionInput`]s, for a specific
 /// region (effectively the subset of "region parents" that support inputs).
 ///
-/// Note that this is not used when a `cfg::ControlInst` has `target_inputs`,
-/// and the target `ControlRegion` itself has phis for its `inputs`.
+/// Note that this is not used when a [`cfg::ControlInst`] has `target_inputs`,
+/// and the target [`ControlRegion`] itself has phis for its `inputs`.
 enum RegionInputsSource {
     FuncParams,
     LoopHeaderPhis(ControlNode),
@@ -286,13 +286,14 @@ struct Phi {
     default_value: Option<Value>,
 }
 
-/// Similar to `cfg::ControlInst`, except:
-/// * `targets` use `CfgPoint`s instead of `ControlRegion`s, to be able to
+/// Similar to [`cfg::ControlInst`], except:
+/// * `targets` use [`CfgPoint`]s instead of [`ControlRegion`]s, to be able to
 ///   reach any of the SPIR-V blocks being created during lifting
 /// * φ ("phi") values can be provided for targets regardless of "which side" of
 ///   the structured control-flow they are for ("region input" vs "node output")
 /// * optional `merge` (for `OpSelectionMerge`/`OpLoopMerge`)
-/// * existing data is borrowed (from the `FuncDefBody`) wherever possible
+/// * existing data is borrowed (from the [`FuncDefBody`](crate::FuncDefBody)),
+///   wherever possible
 struct Terminator<'a> {
     attrs: AttrSet,
 
@@ -370,8 +371,8 @@ impl<'a> NeedsIdsCollector<'a> {
     }
 }
 
-/// Helper type for deep traversal of the CFG (as a graph of `CfgPoint`s), which
-/// tracks the necessary context for navigating a `ControlRegion`/`ControlNode`.
+/// Helper type for deep traversal of the CFG (as a graph of [`CfgPoint`]s), which
+/// tracks the necessary context for navigating a [`ControlRegion`]/[`ControlNode`].
 #[derive(Copy, Clone)]
 struct CfgCursor<'p, P = CfgPoint> {
     point: P,
@@ -384,7 +385,7 @@ enum ControlParent {
 }
 
 impl<'a, 'p> FuncAt<'a, CfgCursor<'p>> {
-    /// Return the next `CfgPoint` (wrapped in `CfgCursor`) in a linear
+    /// Return the next [`CfgPoint`] (wrapped in [`CfgCursor`]) in a linear
     /// chain within structured control-flow (i.e. no branching to child regions).
     fn unique_successor(self) -> Option<CfgCursor<'p>> {
         let cursor = self.position;
@@ -445,9 +446,9 @@ impl<'a, 'p> FuncAt<'a, CfgCursor<'p>> {
 }
 
 impl<'a> FuncAt<'a, ControlRegion> {
-    /// Traverse every `CfgPoint` (deeply) contained in this `ControlRegion`,
-    /// in reverse post-order (RPO), with `f` receiving each `CfgPoint`
-    /// in turn (wrapped in `CfgCursor`, for further traversal flexibility),
+    /// Traverse every [`CfgPoint`] (deeply) contained in this [`ControlRegion`],
+    /// in reverse post-order (RPO), with `f` receiving each [`CfgPoint`]
+    /// in turn (wrapped in [`CfgCursor`], for further traversal flexibility),
     /// and being able to stop iteration by returning `Err`.
     ///
     /// RPO iteration over a CFG provides certain guarantees, most importantly

@@ -1,3 +1,19 @@
+//! Pretty-printing anything in the IR, from whole [`Module`]s to their leaves.
+//!
+//! # Usage
+//!
+//! To start, create a [`Plan`] (through e.g. [`Plan::for_root`] or [`Plan::for_module`]),
+//! which will track the entire (transitive) set of (interned/entity) dependencies
+//! required to produce complete pretty-printing outputs.
+//!
+//! On a [`Plan`], use [`.pretty_print()`](Plan::pretty_print) to print everything,
+//! and get a "pretty document", with layout (inline-vs-multi-line decisions,
+//! auto-indentation, etc.) already performed, and which supports outputting:
+//! * plain text: `fmt::Display` (`{}` formatting) or `.to_string()`
+//! * HTML (styled and hyperlinked): [`.render_to_html()`](Versions::render_to_html)
+#![allow(rustdoc::private_intra_doc_links)]
+//!   (returning a [`pretty::HtmlSnippet`])
+
 // FIXME(eddyb) stop using `itertools` for methods like `intersperse` when they
 // get stabilized on `Iterator` instead.
 #![allow(unstable_name_collisions)]
@@ -25,39 +41,40 @@ mod pretty;
 ///
 /// In order to represent parts of a DAG textually, it first needs to have its
 /// nodes "flattened" into an order (also known as "topo(logical) sorting"),
-/// which `Plan` wholly records, before any printing can commence.
+/// which [`Plan`] wholly records, before any printing can commence.
 ///
 /// Additionally, nodes without a significant identity (i.e. interned ones) may
 /// have their separate definition omitted in some cases where printing them
 /// inline at their use site(s) is preferred (e.g. when they have a single use).
 ///
-/// Once a `Plan` contains everything that needs to be printed, formatting the
-/// `Plan` value with `fmt::Display` will print all of the nodes in the `Plan`.
+/// Once a [`Plan`] contains everything that needs to be printed, calling the
+/// [`.pretty_print()`](Plan::pretty_print) method will print all of the nodes
+/// in the [`Plan`], and its return value can be e.g. formatted with [`fmt::Display`].
 pub struct Plan<'a> {
     cx: &'a Context,
 
-    /// When visiting module-stored nodes, the `Module` is needed to map the
-    /// `Node` to the (per-version) definition, which is then stored in the
-    /// (per-version) `FxHashMap` within `per_version_name_and_node_defs`.
+    /// When visiting module-stored nodes, the [`Module`] is needed to map the
+    /// [`Node`] to the (per-version) definition, which is then stored in the
+    /// (per-version) [`FxHashMap`] within `per_version_name_and_node_defs`.
     current_module: Option<&'a Module>,
 
-    /// Versions allow comparing multiple copies of the same e.g. `Module`,
-    /// with definitions sharing a `Node` key being shown together.
+    /// Versions allow comparing multiple copies of the same e.g. [`Module`],
+    /// with definitions sharing a [`Node`] key being shown together.
     ///
     /// Each `per_version_name_and_node_defs` entry contains a "version" with:
     /// * a descriptive name (e.g. the name of a pass that produced that version)
     ///   * the name is left empty in the default single-version mode
-    /// * its `Node` definitions (dynamic via the `DynNodeDef` helper trait)
+    /// * its [`Node`] definitions (dynamic via the [`DynNodeDef`] helper trait)
     ///
-    /// Specific `Node`s may be present in only a subset of versions, and such
+    /// Specific [`Node`]s may be present in only a subset of versions, and such
     /// a distinction will be reflected in the output.
     ///
-    /// For `Node` collection, the last entry consistutes the "active" version.
+    /// For [`Node`] collection, the last entry consistutes the "active" version.
     per_version_name_and_node_defs: Vec<(String, FxHashMap<Node, &'a dyn DynNodeDef<'a>>)>,
 
-    /// Merged per-`Use` counts across all versions.
+    /// Merged per-[`Use`] counts across all versions.
     ///
-    /// That is, each `Use` maps to the largest count of that `Use` in any version,
+    /// That is, each [`Use`] maps to the largest count of that [`Use`] in any version,
     /// as opposed to their sum. This approach avoids pessimizing e.g. inline
     /// printing of interned definitions, which may need the use count to be `1`.
     use_counts: FxIndexMap<Use, usize>,
@@ -70,14 +87,14 @@ pub struct ExpectedVsFound<E, F> {
     pub found: F,
 }
 
-/// Print `Plan` top-level entry, an effective reification of SPIR-T's implicit DAG.
+/// Print [`Plan`] top-level entry, an effective reification of SPIR-T's implicit DAG.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Node {
-    /// Either a whole `Module`, or some other printable type passed to
-    /// `Plan::for_root` (e.g. `ExpectedVsFound`).
+    /// Either a whole [`Module`], or some other printable type passed to
+    /// [`Plan::for_root`] (e.g. [`ExpectedVsFound`]).
     Root,
 
-    /// Definitions for all `CxInterned` that need them, grouped together.
+    /// Definitions for all [`CxInterned`] that need them, grouped together.
     AllCxInterned,
 
     // FIXME(eddyb) these do not support multiple `Module`s as they don't have
@@ -107,11 +124,11 @@ impl Node {
     }
 }
 
-/// Helper for `Node::AllCxInterned`'s definition, to  be used in `node_defs`.
+/// Helper for [`Node::AllCxInterned`]'s definition, to  be used in `node_defs`.
 struct AllCxInterned;
 
-/// Everything interned in `Context`, that might need to be printed once
-/// (as part of `Node::AllCxInterned`) and referenced multiple times.
+/// Anything interned in [`Context`], that might need to be printed once
+/// (as part of [`Node::AllCxInterned`]) and referenced multiple times.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum CxInterned {
     AttrSet(AttrSet),
@@ -129,7 +146,7 @@ impl CxInterned {
     }
 }
 
-/// A `Print` `Output` type that splits the attributes from the main body of the
+/// A [`Print`] `Output` type that splits the attributes from the main body of the
 /// definition, allowing additional processing before they get concatenated.
 #[derive(Default)]
 pub struct AttrsAndDef {
@@ -139,7 +156,7 @@ pub struct AttrsAndDef {
     /// * ` = ...` for `name = ...`
     /// * `(...) {...}` for `name(...) {...}` (i.e. functions)
     ///
-    /// Where `name` is added later
+    /// Where `name` is added later (i.e. between `attrs` and `def_without_name`).
     pub def_without_name: pretty::Fragment,
 }
 
@@ -200,7 +217,7 @@ impl Use {
 }
 
 impl<'a> Plan<'a> {
-    /// Create a `Plan` with all of `root`'s dependencies, followed by `root` itself.
+    /// Create a [`Plan`] with all of `root`'s dependencies, followed by `root` itself.
     //
     // FIXME(eddyb) consider renaming this and removing the `for_module` shorthand.
     pub fn for_root(
@@ -217,21 +234,21 @@ impl<'a> Plan<'a> {
         plan
     }
 
-    /// Create a `Plan` with all of `module`'s contents.
+    /// Create a [`Plan`] with all of `module`'s contents.
     ///
     /// Shorthand for `Plan::for_root(module.cx_ref(), module)`.
     pub fn for_module(module: &'a Module) -> Self {
         Self::for_root(module.cx_ref(), module)
     }
 
-    /// Create a `Plan` that combines `Plan::for_root` from each version.
+    /// Create a [`Plan`] that combines [`Plan::for_root`] from each version.
     ///
     /// Each version has a string, which should contain a descriptive name
     /// (e.g. the name of a pass that produced that version).
     ///
     /// While the roots (and their dependencies) can be entirely unrelated, the
     /// output won't be very useful in that case. For ideal results, most of the
-    /// same entities (e.g. `GlobalVar` or `Func`) should be in most versions,
+    /// same entities (e.g. [`GlobalVar`] or [`Func`]) should be in most versions,
     /// with most of the changes being limited to within their definitions.
     pub fn for_versions(
         cx: &'a Context,
@@ -431,8 +448,9 @@ impl Visit for AllCxInterned {
     fn visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {}
 }
 
+#[allow(rustdoc::private_intra_doc_links)]
 /// Wrapper for handling the difference between single-version and multi-version
-/// output, which aren't expressible in `pretty::Fragment`.
+/// output, which aren't expressible in [`pretty::Fragment`].
 //
 // FIXME(eddyb) introduce a `pretty::Node` variant capable of handling this,
 // but that's complicated wrt non-HTML output, if they're to also be 2D tables.
@@ -623,11 +641,12 @@ impl<PF> Versions<PF> {
 }
 
 impl Plan<'_> {
-    /// Print the whole `Plan` to a `Versions<pretty::Fragment>` and perform
-    /// layout on its `pretty::Fragment`s.
+    #[allow(rustdoc::private_intra_doc_links)]
+    /// Print the whole [`Plan`] to a [`Versions<pretty::Fragment>`] and perform
+    /// layout on its [`pretty::Fragment`]s.
     ///
-    /// The resulting `Versions<pretty::FragmentPostLayout>` value supports
-    /// `fmt::Display` for convenience, but also more specific methods
+    /// The resulting [`Versions<pretty::FragmentPostLayout>`] value supports
+    /// [`fmt::Display`] for convenience, but also more specific methods
     /// (e.g. HTML output).
     pub fn pretty_print(&self) -> Versions<pretty::FragmentPostLayout> {
         // FIXME(eddyb) make max line width configurable.
@@ -643,12 +662,12 @@ pub struct Printer<'a> {
     use_styles: FxIndexMap<Use, UseStyle>,
 }
 
-/// How an `Use` of a definition should be printed.
+/// How an [`Use`] of a definition should be printed.
 #[derive(Copy, Clone)]
 enum UseStyle {
     /// Refer to the definition by its category and an `idx` (e.g. `"type123"`).
     Anon {
-        /// For intra-function `Use`s (i.e. `Use::ControlRegionLabel` and values),
+        /// For intra-function [`Use`]s (i.e. [`Use::ControlRegionLabel`] and values),
         /// this disambiguates the parent function (for e.g. anchors).
         parent_func: Option<Func>,
 
@@ -1017,7 +1036,7 @@ impl<'a> Printer<'a> {
     /// SPIR-T, and should not be printed (e.g. decorations' target IDs).
     /// But if `print_id` doesn't need to return `Option<_>` (for `None`), its
     /// return type can skip the `Option` entirely (which allows passing in the
-    /// `Print::print` method, instead of a closure, as `print_id`).
+    /// [`Print::print`] method, instead of a closure, as `print_id`).
     ///
     /// Immediate operands are wrapped in angle brackets, while `ID` operands are
     /// wrapped in parentheses, e.g.: `OpFoo<Bar, 123, "baz">(v1, v2)`.
@@ -1105,7 +1124,7 @@ impl<'a> Printer<'a> {
 }
 
 impl AttrsAndDef {
-    /// Concat `attrs`, `name` and `def_without_name` into a `pretty::Fragment`,
+    /// Concat `attrs`, `name` and `def_without_name` into a [`pretty::Fragment`],
     /// effectively "filling in" the `name` missing from `def_without_name`.
     ///
     /// If `name` starts with an anchor definition, the definition of that anchor
@@ -1168,7 +1187,7 @@ impl<E: Print<Output = pretty::Fragment>, F: Print<Output = pretty::Fragment>> P
 }
 
 impl Use {
-    /// Common implementation for `Use::print` and `Use::print_as_def`.
+    /// Common implementation for [`Use::print`] and [`Use::print_as_def`].
     fn print_as_ref_or_def(&self, printer: &Printer<'_>, is_def: bool) -> pretty::Fragment {
         let style = printer
             .use_styles

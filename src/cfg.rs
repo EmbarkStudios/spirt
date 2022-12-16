@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::mem;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
-/// (`ControlInst`s) attached to `ControlRegion`s, as an "action on exit", i.e.
+/// ([`ControlInst`]s) attached to [`ControlRegion`]s, as an "action on exit", i.e.
 /// "terminator" (while intra-region control-flow is strictly structured).
 #[derive(Clone, Default)]
 pub struct ControlFlowGraph {
@@ -28,7 +28,7 @@ pub struct ControlInst {
     // FIXME(eddyb) change the inline size of this to fit most instructions.
     pub targets: SmallVec<[ControlRegion; 4]>,
 
-    /// `target_inputs[region][input_idx]` is the `Value` that
+    /// `target_inputs[region][input_idx]` is the [`Value`] that
     /// `Value::ControlRegionInput { region, input_idx }` will get on entry,
     /// where `region` must be appear at least once in `targets` - this is a
     /// separate map instead of being part of `targets` because it reflects the
@@ -68,7 +68,7 @@ pub enum ExitInvocationKind {
 }
 
 impl ControlFlowGraph {
-    /// Iterate over all `ControlRegion`s making up `func_def_body`'s CFG, in
+    /// Iterate over all [`ControlRegion`]s making up `func_def_body`'s CFG, in
     /// reverse post-order (RPO).
     ///
     /// RPO iteration over a CFG provides certain guarantees, most importantly
@@ -95,10 +95,10 @@ impl ControlFlowGraph {
 // HACK(eddyb) this only serves to disallow accessing `private_count` field of
 // `IncomingEdgeCount`.
 mod sealed {
-    /// Opaque newtype for the count of incoming edges (into a `ControlRegion`).
+    /// Opaque newtype for the count of incoming edges (into a [`ControlRegion`](crate::ControlRegion)).
     ///
     /// The private field prevents direct mutation or construction, forcing the
-    /// use of `IncomingEdgeCount::ONE` and addition operations to produce some
+    /// use of [`IncomingEdgeCount::ONE`] and addition operations to produce some
     /// specific count (which would require explicit workarounds for misuse).
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
     pub(super) struct IncomingEdgeCount(usize);
@@ -183,10 +183,11 @@ impl ControlFlowGraph {
     }
 }
 
+#[allow(rustdoc::private_intra_doc_links)]
 /// Control-flow "structurizer", which attempts to convert as much of the CFG
 /// as possible into structural control-flow (regions).
 ///
-/// See `StructurizeRegionState`'s docs for more details on the algorithm.
+/// See [`StructurizeRegionState`]'s docs for more details on the algorithm.
 //
 // FIXME(eddyb) document this (instead of having it on `StructurizeRegionState`).
 //
@@ -211,22 +212,22 @@ impl ControlFlowGraph {
 pub struct Structurizer<'a> {
     cx: &'a Context,
 
-    /// Scrutinee type for `SelectionKind::BoolCond`.
+    /// Scrutinee type for [`SelectionKind::BoolCond`].
     type_bool: Type,
 
-    /// Scrutinee value for `SelectionKind::BoolCond`, for the "then" case.
+    /// Scrutinee value for [`SelectionKind::BoolCond`], for the "then" case.
     const_true: Const,
 
-    /// Scrutinee value for `SelectionKind::BoolCond`, for the "else" case.
+    /// Scrutinee value for [`SelectionKind::BoolCond`], for the "else" case.
     const_false: Const,
 
     func_def_body: &'a mut FuncDefBody,
     incoming_edge_counts: EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
 
-    /// Keyed by the input to `structurize_region_from` (the start `ControlRegion`),
+    /// Keyed by the input to `structurize_region_from` (the start [`ControlRegion`]),
     /// and describing the state of that partial structurization step.
     ///
-    /// See also `StructurizeRegionState`'s docs.
+    /// See also [`StructurizeRegionState`]'s docs.
     //
     // FIXME(eddyb) use `EntityOrientedDenseMap` (which lacks iteration by design).
     structurize_region_state: FxIndexMap<ControlRegion, StructurizeRegionState>,
@@ -239,10 +240,10 @@ pub struct Structurizer<'a> {
 }
 
 /// The state of one `structurize_region_from` invocation (keyed on its start
-/// `ControlRegion` in `Structurizer`) and its `PartialControlRegion` output.
+/// [`ControlRegion`] in [`Structurizer`]) and its [`PartialControlRegion`] output.
 ///
 /// There is a fourth (or 0th) implicit state, which is where nothing has yet
-/// observed some region, and `Structurizer` isn't tracking it at all.
+/// observed some region, and [`Structurizer`] isn't tracking it at all.
 //
 // FIXME(eddyb) make the 0th state explicit and move `incoming_edge_counts` to it.
 enum StructurizeRegionState {
@@ -251,8 +252,8 @@ enum StructurizeRegionState {
 
     /// Structurization completed, and this region can now be claimed.
     Ready {
-        /// If this region had backedges (targeting its start `ControlRegion`),
-        /// their bundle is taken from the region's `DeferredEdgeBundleSet`,
+        /// If this region had backedges (targeting its start [`ControlRegion`]),
+        /// their bundle is taken from the region's [`DeferredEdgeBundleSet`],
         /// and kept in this field instead (for simpler/faster access).
         ///
         /// Claiming a region with backedges can combine them with the bundled
@@ -264,27 +265,27 @@ enum StructurizeRegionState {
         region: PartialControlRegion,
     },
 
-    /// Region was claimed (by an `IncomingEdgeBundle`, with the appropriate
-    /// total `IncomingEdgeCount`, minus any `consumed_backedges`), and has
+    /// Region was claimed (by an [`IncomingEdgeBundle`], with the appropriate
+    /// total [`IncomingEdgeCount`], minus any `consumed_backedges`), and has
     /// since likely been incorporated as part of some larger region.
     Claimed,
 }
 
 /// An "(incoming) edge bundle" is a subset of the edges into a single `target`.
 ///
-/// When `accumulated_count` reaches the total `IncomingEdgeCount` for `target`,
-/// that `IncomingEdgeBundle` is said to "effectively own" its `target` (akin to
+/// When `accumulated_count` reaches the total [`IncomingEdgeCount`] for `target`,
+/// that [`IncomingEdgeBundle`] is said to "effectively own" its `target` (akin to
 /// the more commonly used CFG domination relation, but more "incremental").
 struct IncomingEdgeBundle {
     target: ControlRegion,
     accumulated_count: IncomingEdgeCount,
 
-    /// The `Value`s that `Value::ControlRegionInput { region, .. }` will get
+    /// The [`Value`]s that `Value::ControlRegionInput { region, .. }` will get
     /// on entry into `region`, through this "edge bundle".
     target_inputs: SmallVec<[Value; 2]>,
 }
 
-/// A "deferred (incoming) edge bundle" is an `IncomingEdgeBundle` that cannot
+/// A "deferred (incoming) edge bundle" is an [`IncomingEdgeBundle`] that cannot
 /// be structurized immediately, but instead waits for its `accumulated_count`
 /// to reach the full count of its `target`, before it can grafted into some
 /// structured control-flow region.
@@ -315,7 +316,7 @@ struct IncomingEdgeBundle {
 ///     branch => label1
 /// }
 /// ```
-/// which could theoretically be simplified (after the `Structurizer`) to:
+/// which could theoretically be simplified (after the [`Structurizer`]) to:
 /// ```text
 /// label1_condition = a | b
 /// if label1_condition {
@@ -327,7 +328,7 @@ struct DeferredEdgeBundle {
     edge_bundle: IncomingEdgeBundle,
 }
 
-/// Set of `DeferredEdgeBundle`s, uniquely keyed by their `target`s.
+/// Set of [`DeferredEdgeBundle`]s, uniquely keyed by their `target`s.
 struct DeferredEdgeBundleSet {
     // FIXME(eddyb) this field requires this invariant to be maintained:
     // `target_to_deferred[target].edge_bundle.target == target` - but that's
@@ -335,25 +336,25 @@ struct DeferredEdgeBundleSet {
     target_to_deferred: FxIndexMap<ControlRegion, DeferredEdgeBundle>,
 }
 
-/// Partially structurized `ControlRegion`, the result of combining together
-/// several smaller `ControlRegion`s, based on CFG edges between them.
+/// Partially structurized [`ControlRegion`], the result of combining together
+/// several smaller [`ControlRegion`]s, based on CFG edges between them.
 struct PartialControlRegion {
     // FIXME(eddyb) keep this in the original `ControlRegion` instead.
     children: EntityList<ControlNode>,
 
-    /// When not all transitive targets could be claimed into the `ControlRegion`,
+    /// When not all transitive targets could be claimed into the [`ControlRegion`],
     /// some remain as deferred exits, blocking further structurization until
     /// all other edges to those targets are gathered together.
     ///
     /// If both `deferred_edges` is empty and `deferred_return` is `None`, then
-    /// the `ControlRegion` never exits, i.e. it has divergent control-flow
+    /// the [`ControlRegion`] never exits, i.e. it has divergent control-flow
     /// (such as an infinite loop).
     deferred_edges: DeferredEdgeBundleSet,
 
     /// Structured "return" out of the function (holding `output`s for the
-    /// function body, i.e. the inputs to the `ControlInstKind::Return`).
+    /// function body, i.e. the inputs to the [`ControlInstKind::Return`]).
     ///
-    /// Unlike `DeferredEdgeBundle`, this doesn't need a condition, as it's
+    /// Unlike [`DeferredEdgeBundle`], this doesn't need a condition, as it's
     /// effectively a "fallback", only used when `deferred_edges` is empty.
     deferred_return: Option<SmallVec<[Value; 2]>>,
 }
@@ -636,13 +637,13 @@ impl<'a> Structurizer<'a> {
     }
 
     /// Structurize a region starting from `unstructured_region`, and extending
-    /// it (by combining the smaller `ControlRegion`s) as much as possible into
+    /// it (by combining the smaller [`ControlRegion`]s) as much as possible into
     /// the CFG (likely everything dominated by `unstructured_region`).
     ///
     /// The output of this process is stored in, and any other bookkeeping is
     /// done through, `self.structurize_region_state[unstructured_region]`.
     ///
-    /// See also `StructurizeRegionState`'s docs.
+    /// See also [`StructurizeRegionState`]'s docs.
     fn structurize_region_from(&mut self, unstructured_region: ControlRegion) {
         {
             let old_state = self
@@ -673,7 +674,7 @@ impl<'a> Structurizer<'a> {
                    `ControlInst` (CFG wasn't unstructured in the first place?)",
             );
 
-        /// Marker error type for unhandled `ControlInst`s below.
+        /// Marker error type for unhandled [`ControlInst`]s below.
         struct UnsupportedControlInst(ControlInst);
 
         let region_from_control_inst = {
@@ -910,7 +911,7 @@ impl<'a> Structurizer<'a> {
         }
     }
 
-    /// Build a `Select` `ControlNode`, from partially structured `cases`,
+    /// Build a `Select` [`ControlNode`], from partially structured `cases`,
     /// merging all of their `deferred_{edges,returns}` together.
     fn structurize_select(
         &mut self,
@@ -1170,7 +1171,7 @@ impl<'a> Structurizer<'a> {
     }
 
     /// When structurization is only partial, and there remain unclaimed regions,
-    /// they have to be reintegrated into the CFG, putting back `ControlInst`s
+    /// they have to be reintegrated into the CFG, putting back [`ControlInst`]s
     /// where `structurize_region_from` has taken them from.
     ///
     /// This function handles one region at a time to make it more manageable,

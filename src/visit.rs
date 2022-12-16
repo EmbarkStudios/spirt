@@ -1,3 +1,5 @@
+//! Immutable IR traversal.
+
 use crate::func_at::FuncAt;
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
@@ -69,7 +71,7 @@ pub trait Visitor<'a>: Sized {
 
 /// Trait implemented on "visitable" types (shallowly visitable, at least).
 ///
-/// That is, an `impl Visit for X` will call the relevant `Visitor` method for
+/// That is, an `impl Visit for X` will call the relevant [`Visitor`] method for
 /// `X`, typically named `Visitor::visit_X` or `Visitor::visit_X_use`.
 //
 // FIXME(eddyb) use this more (e.g. in implementing `InnerVisit`).
@@ -121,7 +123,7 @@ impl_visit! {
     }
 }
 
-/// Dynamic dispatch version of `Visit`.
+/// Dynamic dispatch version of [`Visit`].
 ///
 /// `dyn DynVisit<'a, V>` is possible, unlike `dyn Visit`, because of the
 /// `trait`-level type parameter `V`, which replaces the method parameter.
@@ -138,7 +140,7 @@ impl<'a, T: Visit, V: Visitor<'a>> DynVisit<'a, V> for T {
 /// Trait implemented on "deeply visitable" types, to further "explore" a type
 /// by visiting its "interior" (i.e. variants and/or fields).
 ///
-/// That is, an `impl InnerVisit for X` will call the relevant `Visitor` method
+/// That is, an `impl InnerVisit for X` will call the relevant [`Visitor`] method
 /// for each `X` field, effectively performing a single level of a deep visit.
 /// Also, if `Visitor::visit_X` exists for a given `X`, its default should be to
 /// call `X::inner_visit_with` (i.e. so that visiting is mostly-deep by default).
@@ -147,7 +149,7 @@ pub trait InnerVisit {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>);
 }
 
-/// Dynamic dispatch version of `InnerVisit`.
+/// Dynamic dispatch version of [`InnerVisit`].
 ///
 /// `dyn DynInnerVisit<'a, V>` is possible, unlike `dyn InnerVisit`, because of
 /// the `trait`-level type parameter `V`, which replaces the method parameter.

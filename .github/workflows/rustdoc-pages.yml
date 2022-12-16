@@ -29,7 +29,11 @@ jobs:
         toolchain: nightly
         override: true
     - name: Build Docs
-      run: RUSTDOCFLAGS="--cfg docs_build" cargo doc --document-private-items
+      run: |
+        RUSTDOCFLAGS="--cfg docs_build --cfg git_main_docs" \
+        GIT_MAIN_COMMIT="$(git rev-parse HEAD)" \
+        GIT_MAIN_DESCRIBE="$(git describe --tags --always)" \
+        cargo doc --document-private-items
     - name: Setup Pages
       id: pages
       uses: actions/configure-pages@v2

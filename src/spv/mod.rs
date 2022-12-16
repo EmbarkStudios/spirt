@@ -1,10 +1,7 @@
-use crate::{FxIndexMap, InternedStr};
-use smallvec::SmallVec;
-use std::collections::{BTreeMap, BTreeSet};
-use std::iter;
-use std::num::NonZeroU32;
-use std::string::FromUtf8Error;
+//! SPIR-V support, mainly conversions to/from SPIR-T ([`lower`]/[`lift`]).
 
+// NOTE(eddyb) all the modules are declared here, but they're documented "inside"
+// (i.e. using inner doc comments).
 pub mod lift;
 pub mod lower;
 pub mod print;
@@ -12,6 +9,14 @@ pub mod read;
 pub mod spec;
 pub mod write;
 
+use crate::{FxIndexMap, InternedStr};
+use smallvec::SmallVec;
+use std::collections::{BTreeMap, BTreeSet};
+use std::iter;
+use std::num::NonZeroU32;
+use std::string::FromUtf8Error;
+
+/// Semantic properties of a SPIR-V module (not tied to any IDs).
 #[derive(Clone)]
 pub struct Dialect {
     pub version_major: u8,
@@ -24,6 +29,7 @@ pub struct Dialect {
     pub memory_model: u32,
 }
 
+/// Non-semantic details (i.e. debuginfo) of a SPIR-V module (not tied to any IDs).
 #[derive(Clone)]
 pub struct ModuleDebugInfo {
     pub original_generator_magic: Option<NonZeroU32>,
@@ -64,7 +70,7 @@ impl From<spec::Opcode> for Inst {
     }
 }
 
-/// A full SPIR-V instruction (like `Inst` but including input/output ID operands).
+/// A full SPIR-V instruction (like [`Inst`], but including input/output ID operands).
 pub struct InstWithIds {
     pub without_ids: Inst,
 
@@ -89,6 +95,8 @@ impl std::ops::DerefMut for InstWithIds {
     }
 }
 
+/// SPIR-V immediate (one word, longer immediates are a sequence of multiple [`Imm`]s).
+//
 // FIXME(eddyb) consider replacing with a `struct` e.g.:
 // `{ first: bool, last: bool, kind: OperandKind, word: u32 }`
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -98,13 +106,15 @@ pub enum Imm {
     LongCont(spec::OperandKind, u32),
 }
 
+/// SPIR-V ID.
 pub type Id = NonZeroU32;
 
 // FIXME(eddyb) pick a "small string" crate, and fine-tune its inline size,
 // instead of allocating a whole `String`.
-/// Given a single `LiteralString` (as one `Imm::Short` or a `Imm::LongStart`
-/// followed by some number of `Imm::LongCont` - will panic otherwise), returns a
-/// Rust `String` if the literal is valid UTF-8, or the validation error otherwise.
+//
+/// Given a single `LiteralString` (as one [`Imm::Short`] or a [`Imm::LongStart`]
+/// followed by some number of [`Imm::LongCont`] - will panic otherwise), returns a
+/// Rust [`String`] if the literal is valid UTF-8, or the validation error otherwise.
 fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
     let wk = &spec::Spec::get().well_known;
 

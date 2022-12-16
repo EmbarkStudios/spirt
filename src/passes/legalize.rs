@@ -1,7 +1,7 @@
 use crate::visit::{InnerVisit, Visitor};
 use crate::{cfg, AttrSet, Const, Context, DeclDef, Func, FxIndexSet, GlobalVar, Module, Type};
 
-/// Apply the `cfg::Structurize` algorithm to all function definitions in `module`.
+/// Apply the [`cfg::Structurizer`] algorithm to all function definitions in `module`.
 pub fn structurize_func_cfgs(module: &mut Module) {
     let cx = &module.cx();
 
