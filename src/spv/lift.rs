@@ -326,6 +326,12 @@ enum Merge<L> {
         /// SPIR-V calls this "the `continue` target", but unlike other aspects
         /// of SPIR-V "structured control-flow", there can be multiple valid
         /// choices (any that fit the post-dominator/"inevitability" definition).
+        //
+        // FIXME(eddyb) https://github.com/EmbarkStudios/spirt/pull/10 tried to
+        // set this to the loop body entry, but that may not be valid if the loop
+        // body actually diverges, because then the loop body exit will still be
+        // post-dominating the back-edge *but* the loop body itself wouldn't have
+        // any relationship between its entry and its *unreachable* exit.
         loop_continue: L,
     },
 }
@@ -732,12 +738,14 @@ impl<'a> FuncLifting<'a> {
                             target_phi_values: FxIndexMap::default(),
                             merge: Some(Merge::Loop {
                                 loop_merge: CfgPoint::ControlNodeExit(control_node),
-                                // NOTE(eddyb) this may seem weird, but see the
-                                // note on `Merge::Loop`'s `loop_continue`
-                                // field - in particular, for SPIR-T loops, we
-                                // can pick any point before/after/between
-                                // `body`'s `children` and it should be valid.
-                                loop_continue: CfgPoint::RegionEntry(*body),
+                                // NOTE(eddyb) see the note on `Merge::Loop`'s
+                                // `loop_continue` field - in particular, for
+                                // SPIR-T loops, we *could* pick any point
+                                // before/after/between `body`'s `children`
+                                // and it should be valid *but* that had to be
+                                // reverted because it's only true in the absence
+                                // of divergence within the loop body itself!
+                                loop_continue: CfgPoint::RegionExit(*body),
                             }),
                         },
                     }
