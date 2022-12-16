@@ -1,3 +1,19 @@
+//! Pretty-printing anything in the IR, from whole [`Module`]s to their leaves.
+//!
+//! # Usage
+//!
+//! To start, create a [`Plan`] (through e.g. [`Plan::for_root`] or [`Plan::for_module`]),
+//! which will track the entire (transitive) set of (interned/entity) dependencies
+//! required to produce complete pretty-printing outputs.
+//!
+//! On a [`Plan`], use [`.pretty_print()`](Plan::pretty_print) to print everything,
+//! and get a "pretty document", with layout (inline-vs-multi-line decisions,
+//! auto-indentation, etc.) already performed, and which supports outputting:
+//! * plain text: `fmt::Display` (`{}` formatting) or `.to_string()`
+//! * HTML (styled and hyperlinked): [`.render_to_html()`](Versions::render_to_html)
+#![allow(rustdoc::private_intra_doc_links)]
+//!   (returning a [`pretty::HtmlSnippet`])
+
 // FIXME(eddyb) stop using `itertools` for methods like `intersperse` when they
 // get stabilized on `Iterator` instead.
 #![allow(unstable_name_collisions)]
@@ -140,7 +156,7 @@ pub struct AttrsAndDef {
     /// * ` = ...` for `name = ...`
     /// * `(...) {...}` for `name(...) {...}` (i.e. functions)
     ///
-    /// Where `name` is added later
+    /// Where `name` is added later (i.e. between `attrs` and `def_without_name`).
     pub def_without_name: pretty::Fragment,
 }
 

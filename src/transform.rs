@@ -1,3 +1,5 @@
+//! Mutable IR traversal.
+
 use crate::func_at::FuncAtMut;
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,

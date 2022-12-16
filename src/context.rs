@@ -1,3 +1,5 @@
+//! [`Context`](struct.Context.html) and related types/traits.
+
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::mem;
@@ -160,6 +162,9 @@ impl<I: sealed::Interned> std::ops::Index<I> for Context {
     }
 }
 
+// FIXME(eddyb) consider including `Rc<Context>` in `EntityDefs` to avoid having
+// to pass it manually to the `EntityDefs::define` methods (which feels dangerous!).
+//
 /// Collection holding the actual definitions for [`Context`]-allocated entities.
 ///
 /// By design there is no way to iterate the contents of an [`EntityDefs`], or
@@ -730,7 +735,7 @@ macro_rules! interners {
             pub struct $name(
                 // FIXME(eddyb) figure out how to sneak niches into these types, to
                 // allow e.g. `Option` around them to not increase the size.
-                u32,
+                #[doc(hidden)] u32,
             );
 
             $(impl Default for $name {
@@ -816,7 +821,7 @@ macro_rules! entities {
             // NOTE(eddyb) never derive `PartialOrd, Ord` for these types, as
             // observing the entity index allocation order shouldn't be allowed.
             #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-            pub struct $name(NonZeroU32);
+            pub struct $name(#[doc(hidden)] NonZeroU32);
 
             impl sealed::Entity for $name {
                 type Def = $def;

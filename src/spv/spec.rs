@@ -1,3 +1,5 @@
+//! SPIR-V specification parsing/indexing.
+
 use arrayvec::ArrayVec;
 use lazy_static::lazy_static;
 use rustc_hash::FxHashMap;
