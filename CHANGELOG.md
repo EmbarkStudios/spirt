@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- next-header -->
 
 ## [Unreleased] - ReleaseDate
+
+## [0.1.0] - 2022-12-16
 *Initial public release of SPIR-T for minimal Rust-GPU integration.*
 ### Added ⭐
 - Conversions from/to SPIR-V (`spv::lower`/`spv::lift`).
@@ -39,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pretty-printer with (styled and hyperlinked) HTML output.
 
 <!-- next-url -->
+[Unreleased]: https://github.com/EmbarkStudios/spirt/compare/0.1.0...HEAD
 <!-- HACK(eddyb) `0.0.0` doesn't exist as a "tag before the initial commit", but
      the commit hash referenced here is the newest from `opensource-template`,
      that predates `0.1.0`, i.e. the `opensource-template` parent of the merge
@@ -46,4 +49,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      suitable for a comparison point, as GitHub will dutifully list all commits
      that don't come from `opensource-template`, even the initial commit itself!
 -->
-[Unreleased]: https://github.com/EmbarkStudios/spirt/compare/c5d63c6974d03e1495eba2c72ff403a246586a40...HEAD
+[0.1.0]: https://github.com/EmbarkStudios/spirt/compare/c5d63c6974d03e1495eba2c72ff403a246586a40...0.1.0
