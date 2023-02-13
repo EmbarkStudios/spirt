@@ -1,9 +1,13 @@
 //! Pretty-printing functionality (such as automatic indentation).
 
 use indexmap::IndexSet;
+use internal_iterator::{
+    FromInternalIterator, InternalIterator, IntoInternalIterator, IteratorExt,
+};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 use std::{fmt, iter, mem};
 
 /// Part of a pretty document, made up of [`Node`]s.
@@ -155,16 +159,30 @@ pub struct FragmentPostLayout(Fragment);
 
 impl fmt::Display for FragmentPostLayout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut result = Ok(());
-        self.0.render_to_line_ops(
-            &mut LineOp::interpret_with(|op| {
-                if let TextOp::Text(text) = op {
-                    result = result.and_then(|_| f.write_str(text));
-                }
-            }),
-            false,
-        );
-        result
+        let result = self
+            .0
+            .render_to_text_ops()
+            .filter_map(|op| match op {
+                TextOp::Text(text) => Some(text),
+                _ => None,
+            })
+            .try_for_each(|text| {
+                f.write_str(text)
+                    .map_or_else(ControlFlow::Break, ControlFlow::Continue)
+            });
+        match result {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(e) => Err(e),
+        }
+    }
+}
+
+impl FragmentPostLayout {
+    /// Flatten the [`Fragment`] to HTML, producing a [`HtmlSnippet`].
+    //
+    // FIXME(eddyb) provide a non-allocating version.
+    pub fn render_to_html(&self) -> HtmlSnippet {
+        self.0.render_to_text_ops().collect()
     }
 }
 
@@ -252,11 +270,11 @@ impl HtmlSnippet {
     }
 }
 
-impl FragmentPostLayout {
-    /// Flatten the [`Fragment`] to HTML, producing a [`HtmlSnippet`].
-    //
-    // FIXME(eddyb) provide a non-allocating version.
-    pub fn render_to_html(&self) -> HtmlSnippet {
+impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
+    fn from_iter<T>(text_ops: T) -> Self
+    where
+        T: IntoInternalIterator<Item = TextOp<'a>>,
+    {
         // HACK(eddyb) using an UUID as a class name in lieu of "scoped <style>".
         const ROOT_CLASS_NAME: &str = "spirt-90c2056d-5b38-4644-824a-b4be1c82f14d";
 
@@ -284,98 +302,94 @@ impl FragmentPostLayout {
         .replace("SCOPE", &format!("pre.{ROOT_CLASS_NAME}"));
 
         let mut body = format!("<pre class=\"{ROOT_CLASS_NAME}\">");
-        self.0.render_to_line_ops(
-            &mut LineOp::interpret_with(|op| match op {
-                TextOp::PushStyles(styles) | TextOp::PopStyles(styles) => {
-                    let mut special_tags = [
-                        ("a", styles.anchor.is_some()),
-                        ("sub", styles.subscript),
-                        ("super", styles.superscript),
-                    ]
-                    .into_iter()
-                    .filter(|&(_, cond)| cond)
-                    .map(|(tag, _)| tag);
-                    let tag = special_tags.next().unwrap_or("span");
-                    if let Some(other_tag) = special_tags.next() {
-                        // FIXME(eddyb) support by opening/closing multiple tags.
-                        panic!("`<{tag}>` conflicts with `<{other_tag}>`");
-                    }
-
-                    body += "<";
-                    if let TextOp::PopStyles(_) = op {
-                        body += "/";
-                    }
-                    body += tag;
-
-                    if let TextOp::PushStyles(_) = op {
-                        let mut push_attr = |attr, value: &str| {
-                            // Quick sanity check.
-                            assert!(value.chars().all(|c| !(c == '"' || c == '&')));
-
-                            body.extend([" ", attr, "=\"", value, "\""]);
-                        };
-
-                        let Styles {
-                            ref anchor,
-                            anchor_is_def,
-                            color,
-                            color_opacity,
-                            thickness,
-                            size,
-                            subscript: _,
-                            superscript: _,
-                        } = *styles;
-
-                        if let Some(id) = anchor {
-                            if anchor_is_def {
-                                push_attr("id", id);
-                            }
-                            push_attr("href", &format!("#{id}"));
-                        }
-
-                        let mut css_style = String::new();
-
-                        if let Some(a) = color_opacity {
-                            let [r, g, b] = color.expect("color_opacity without color");
-                            write!(css_style, "color:rgba({r},{g},{b},{a});").unwrap();
-                        } else if let Some([r, g, b]) = color {
-                            write!(css_style, "color:#{r:02x}{g:02x}{b:02x};").unwrap();
-                        }
-                        if let Some(thickness) = thickness {
-                            write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
-                                .unwrap();
-                        }
-                        if let Some(size) = size {
-                            write!(css_style, "font-size:{}em;", 1.0 + (size as f64) * 0.1)
-                                .unwrap();
-                        }
-                        if !css_style.is_empty() {
-                            push_attr("style", &css_style);
-                        }
-                    }
-
-                    body += ">";
+        text_ops.into_internal_iter().for_each(|op| match op {
+            TextOp::PushStyles(styles) | TextOp::PopStyles(styles) => {
+                let mut special_tags = [
+                    ("a", styles.anchor.is_some()),
+                    ("sub", styles.subscript),
+                    ("super", styles.superscript),
+                ]
+                .into_iter()
+                .filter(|&(_, cond)| cond)
+                .map(|(tag, _)| tag);
+                let tag = special_tags.next().unwrap_or("span");
+                if let Some(other_tag) = special_tags.next() {
+                    // FIXME(eddyb) support by opening/closing multiple tags.
+                    panic!("`<{tag}>` conflicts with `<{other_tag}>`");
                 }
-                TextOp::Text(text) => {
-                    // Minimal escaping, just enough to produce valid HTML.
-                    let escape_from = ['&', '<'];
-                    let escape_to = ["&amp;", "&lt;"];
-                    for piece in text.split_inclusive(escape_from) {
-                        let mut chars = piece.chars();
-                        let maybe_needs_escape = chars.next_back();
-                        body += chars.as_str();
 
-                        if let Some(maybe_needs_escape) = maybe_needs_escape {
-                            match escape_from.iter().position(|&c| maybe_needs_escape == c) {
-                                Some(escape_idx) => body += escape_to[escape_idx],
-                                None => body.push(maybe_needs_escape),
-                            }
+                body += "<";
+                if let TextOp::PopStyles(_) = op {
+                    body += "/";
+                }
+                body += tag;
+
+                if let TextOp::PushStyles(_) = op {
+                    let mut push_attr = |attr, value: &str| {
+                        // Quick sanity check.
+                        assert!(value.chars().all(|c| !(c == '"' || c == '&')));
+
+                        body.extend([" ", attr, "=\"", value, "\""]);
+                    };
+
+                    let Styles {
+                        ref anchor,
+                        anchor_is_def,
+                        color,
+                        color_opacity,
+                        thickness,
+                        size,
+                        subscript: _,
+                        superscript: _,
+                    } = *styles;
+
+                    if let Some(id) = anchor {
+                        if anchor_is_def {
+                            push_attr("id", id);
+                        }
+                        push_attr("href", &format!("#{id}"));
+                    }
+
+                    let mut css_style = String::new();
+
+                    if let Some(a) = color_opacity {
+                        let [r, g, b] = color.expect("color_opacity without color");
+                        write!(css_style, "color:rgba({r},{g},{b},{a});").unwrap();
+                    } else if let Some([r, g, b]) = color {
+                        write!(css_style, "color:#{r:02x}{g:02x}{b:02x};").unwrap();
+                    }
+                    if let Some(thickness) = thickness {
+                        write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
+                            .unwrap();
+                    }
+                    if let Some(size) = size {
+                        write!(css_style, "font-size:{}em;", 1.0 + (size as f64) * 0.1).unwrap();
+                    }
+                    if !css_style.is_empty() {
+                        push_attr("style", &css_style);
+                    }
+                }
+
+                body += ">";
+            }
+            TextOp::Text(text) => {
+                // Minimal escaping, just enough to produce valid HTML.
+                let escape_from = ['&', '<'];
+                let escape_to = ["&amp;", "&lt;"];
+                for piece in text.split_inclusive(escape_from) {
+                    let mut chars = piece.chars();
+                    let maybe_needs_escape = chars.next_back();
+                    body += chars.as_str();
+
+                    if let Some(maybe_needs_escape) = maybe_needs_escape {
+                        match escape_from.iter().position(|&c| maybe_needs_escape == c) {
+                            Some(escape_idx) => body += escape_to[escape_idx],
+                            None => body.push(maybe_needs_escape),
                         }
                     }
                 }
-            }),
-            false,
-        );
+            }
+        });
         body += "</pre>";
 
         HtmlSnippet {
@@ -695,73 +709,111 @@ enum Break {
 }
 
 impl Node {
-    /// Flatten the [`Node`] to [`LineOp`]s, passed to `each_line_op`.
-    fn render_to_line_ops<'a>(
-        &'a self,
-        each_line_op: &mut impl FnMut(LineOp<'a>),
+    /// Flatten the [`Node`] to [`LineOp`]s.
+    fn render_to_line_ops(
+        &self,
         directly_in_block: bool,
-    ) {
+    ) -> impl InternalIterator<Item = LineOp<'_>> {
+        // FIXME(eddyb) a better helper for this may require type-generic closures.
+        struct RenderToLineOps<'a>(&'a Node, bool);
+        impl<'a> InternalIterator for RenderToLineOps<'a> {
+            type Item = LineOp<'a>;
+
+            fn try_for_each<T, F>(self, mut f: F) -> ControlFlow<T>
+            where
+                F: FnMut(LineOp<'a>) -> ControlFlow<T>,
+            {
+                // HACK(eddyb) this is terrible but the `internal_iterator`
+                // library uses `F` instead of `&mut F` which means it has to
+                // add an extra `&mut` for every `flat_map` level, causing
+                // polymorphic recursion...
+                let f = &mut f as &mut dyn FnMut(_) -> _;
+
+                self.0.render_to_line_ops_try_for_each_helper(self.1, f)
+            }
+        }
+        RenderToLineOps(self, directly_in_block)
+    }
+
+    // HACK(eddyb) helper for `render_to_line_ops` returning a `InternalIterator`.
+    fn render_to_line_ops_try_for_each_helper<'a, T>(
+        &'a self,
+        directly_in_block: bool,
+        mut each_line_op: impl FnMut(LineOp<'a>) -> ControlFlow<T>,
+    ) -> ControlFlow<T> {
         // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
         // to destructure through the `Box<(_, Cow<str>)>`.
-        let mut text_render_to_line_ops = |styles: Option<&'a Styles>, text: &'a str| {
-            if let Some(styles) = styles {
-                each_line_op(LineOp::PushStyles(styles));
-            }
+        let text_render_to_line_ops = |styles: Option<&'a Styles>, text: &'a str| {
             let mut lines = text.split('\n');
-            each_line_op(LineOp::AppendToLine(lines.next().unwrap()));
-            for line in lines {
-                each_line_op(LineOp::StartNewLine);
-                each_line_op(LineOp::AppendToLine(line));
-            }
-            if let Some(styles) = styles {
-                each_line_op(LineOp::PopStyles(styles));
-            }
+            styles
+                .map(LineOp::PushStyles)
+                .into_internal_iter()
+                .chain([LineOp::AppendToLine(lines.next().unwrap())])
+                .chain(
+                    lines
+                        .into_internal()
+                        .flat_map(|line| [LineOp::StartNewLine, LineOp::AppendToLine(line)]),
+                )
+                .chain(styles.map(LineOp::PopStyles))
         };
         match self {
             Self::Text(text) => {
-                text_render_to_line_ops(None, text);
+                text_render_to_line_ops(None, text).try_for_each(each_line_op)?;
             }
             Self::StyledText(styles_and_text) => {
-                text_render_to_line_ops(Some(&styles_and_text.0), &styles_and_text.1);
+                text_render_to_line_ops(Some(&styles_and_text.0), &styles_and_text.1)
+                    .try_for_each(each_line_op)?;
             }
 
             Self::IndentedBlock(fragments) => {
-                each_line_op(LineOp::PushIndent);
-                each_line_op(LineOp::BreakIfWithinLine(Break::NewLine));
-                for fragment in fragments {
-                    fragment.render_to_line_ops(each_line_op, true);
-                    each_line_op(LineOp::BreakIfWithinLine(Break::NewLine));
-                }
-                each_line_op(LineOp::PopIndent);
+                [
+                    LineOp::PushIndent,
+                    LineOp::BreakIfWithinLine(Break::NewLine),
+                ]
+                .into_internal_iter()
+                .chain(fragments.into_internal_iter().flat_map(|fragment| {
+                    fragment
+                        .render_to_line_ops(true)
+                        .chain([LineOp::BreakIfWithinLine(Break::NewLine)])
+                }))
+                .chain([LineOp::PopIndent])
+                .try_for_each(each_line_op)?;
             }
             // Post-layout, this is only used for the inline layout.
             Self::InlineOrIndentedBlock(fragments) => {
-                for fragment in fragments {
-                    fragment.render_to_line_ops(each_line_op, false);
-                }
+                fragments
+                    .into_internal_iter()
+                    .flat_map(|fragment| fragment.render_to_line_ops(false))
+                    .try_for_each(each_line_op)?;
             }
 
-            Self::BreakingOnlySpace => each_line_op(LineOp::BreakIfWithinLine(Break::Space)),
-            Self::ForceLineSeparation => each_line_op(LineOp::BreakIfWithinLine(Break::NewLine)),
+            Self::BreakingOnlySpace => each_line_op(LineOp::BreakIfWithinLine(Break::Space))?,
+            Self::ForceLineSeparation => each_line_op(LineOp::BreakIfWithinLine(Break::NewLine))?,
             &Self::IfBlockLayout(text) => {
                 if directly_in_block {
-                    text_render_to_line_ops(None, text);
+                    text_render_to_line_ops(None, text).try_for_each(each_line_op)?;
                 }
             }
         }
+        ControlFlow::Continue(())
     }
 }
 
 impl Fragment {
-    /// Flatten the [`Fragment`] to [`LineOp`]s, passed to `each_line_op`.
-    fn render_to_line_ops<'a>(
-        &'a self,
-        each_line_op: &mut impl FnMut(LineOp<'a>),
+    /// Flatten the [`Fragment`] to [`LineOp`]s.
+    fn render_to_line_ops(
+        &self,
         directly_in_block: bool,
-    ) {
-        for node in &self.nodes {
-            node.render_to_line_ops(each_line_op, directly_in_block);
-        }
+    ) -> impl InternalIterator<Item = LineOp<'_>> {
+        self.nodes
+            .iter()
+            .into_internal()
+            .flat_map(move |node| node.render_to_line_ops(directly_in_block))
+    }
+
+    /// Flatten the [`Fragment`] to [`TextOp`]s.
+    fn render_to_text_ops(&self) -> impl InternalIterator<Item = TextOp<'_>> {
+        LineOp::interpret(self.render_to_line_ops(false))
     }
 }
 
@@ -774,12 +826,30 @@ enum TextOp<'a> {
 }
 
 impl<'a> LineOp<'a> {
-    /// Expand [`LineOp`]s passed to the returned `impl FnMut(LineOp<'a>)` closure,
-    /// forwarding the expanded [`TextOp`]s to `each_text_op`.
-    //
-    // FIXME(eddyb) this'd be nicer if instead of returning a closure, it could
-    // be passed to an `impl for<F: FnMut(LineOp<'a>)> FnOnce(F)` callback.
-    fn interpret_with(mut each_text_op: impl FnMut(TextOp<'a>)) -> impl FnMut(LineOp<'a>) {
+    /// Expand [`LineOp`]s to [`TextOp`]s.
+    fn interpret(
+        line_ops: impl InternalIterator<Item = LineOp<'a>>,
+    ) -> impl InternalIterator<Item = TextOp<'a>> {
+        // FIXME(eddyb) a better helper for this may require type-generic closures.
+        struct Interpret<I>(I);
+        impl<'a, I: InternalIterator<Item = LineOp<'a>>> InternalIterator for Interpret<I> {
+            type Item = TextOp<'a>;
+
+            fn try_for_each<T, F>(self, f: F) -> ControlFlow<T>
+            where
+                F: FnMut(TextOp<'a>) -> ControlFlow<T>,
+            {
+                LineOp::interpret_try_for_each_helper(self.0, f)
+            }
+        }
+        Interpret(line_ops)
+    }
+
+    // HACK(eddyb) helper for `interpret` returning a `InternalIterator`.
+    fn interpret_try_for_each_helper<T>(
+        line_ops: impl InternalIterator<Item = LineOp<'a>>,
+        mut each_text_op: impl FnMut(TextOp<'a>) -> ControlFlow<T>,
+    ) -> ControlFlow<T> {
         let mut indent = 0;
 
         // When `on_empty_new_line` is `true`, a new line was started, but
@@ -796,10 +866,10 @@ impl<'a> LineOp<'a> {
         // (with non-empty `text`), that (would) share the same line.
         let mut pending_break_if_within_line = None;
 
-        move |op| {
+        line_ops.try_for_each(move |op| {
             // Do not allow (accidental) side-effects from no-op `op`s.
             if let LineOp::AppendToLine("") = op {
-                return;
+                return ControlFlow::Continue(());
             }
 
             if let LineOp::AppendToLine(_) | LineOp::PushStyles(_) = op {
@@ -808,14 +878,14 @@ impl<'a> LineOp<'a> {
                         each_text_op(TextOp::Text(match br {
                             Break::Space => " ",
                             Break::NewLine => "\n",
-                        }));
+                        }))?;
                         matches!(br, Break::NewLine)
                     }
                     None => on_empty_new_line,
                 };
                 if need_indent {
                     for _ in 0..indent {
-                        each_text_op(TextOp::Text(INDENT));
+                        each_text_op(TextOp::Text(INDENT))?;
                     }
                     on_empty_new_line = false;
                 }
@@ -831,13 +901,13 @@ impl<'a> LineOp<'a> {
                     indent -= 1;
                 }
 
-                LineOp::PushStyles(styles) => each_text_op(TextOp::PushStyles(styles)),
-                LineOp::PopStyles(styles) => each_text_op(TextOp::PopStyles(styles)),
+                LineOp::PushStyles(styles) => each_text_op(TextOp::PushStyles(styles))?,
+                LineOp::PopStyles(styles) => each_text_op(TextOp::PopStyles(styles))?,
 
-                LineOp::AppendToLine(text) => each_text_op(TextOp::Text(text)),
+                LineOp::AppendToLine(text) => each_text_op(TextOp::Text(text))?,
 
                 LineOp::StartNewLine => {
-                    each_text_op(TextOp::Text("\n"));
+                    each_text_op(TextOp::Text("\n"))?;
 
                     on_empty_new_line = true;
                     pending_break_if_within_line = None;
@@ -856,7 +926,8 @@ impl<'a> LineOp<'a> {
                     }
                 }
             }
-        }
+            ControlFlow::Continue(())
+        })
     }
 }
 
