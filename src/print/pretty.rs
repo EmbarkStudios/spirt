@@ -297,6 +297,9 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
     SCOPE a:not(:hover) {
         text-decoration: unset;
     }
+    SCOPE sub, SCOPE sup {
+        line-height: 0;
+    }
 </style>
 "
         .replace("SCOPE", &format!("pre.{ROOT_CLASS_NAME}"));
