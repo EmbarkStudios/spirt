@@ -160,7 +160,6 @@ pub struct FragmentPostLayout(Fragment);
 impl fmt::Display for FragmentPostLayout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let result = self
-            .0
             .render_to_text_ops()
             .filter_map(|op| match op {
                 TextOp::Text(text) => Some(text),
@@ -178,11 +177,16 @@ impl fmt::Display for FragmentPostLayout {
 }
 
 impl FragmentPostLayout {
+    /// Flatten the [`Fragment`] to [`TextOp`]s.
+    pub(super) fn render_to_text_ops(&self) -> impl InternalIterator<Item = TextOp<'_>> {
+        self.0.render_to_text_ops()
+    }
+
     /// Flatten the [`Fragment`] to HTML, producing a [`HtmlSnippet`].
     //
     // FIXME(eddyb) provide a non-allocating version.
     pub fn render_to_html(&self) -> HtmlSnippet {
-        self.0.render_to_text_ops().collect()
+        self.render_to_text_ops().collect()
     }
 }
 
@@ -270,6 +274,7 @@ impl HtmlSnippet {
     }
 }
 
+// FIXME(eddyb) is this impl the best way? (maybe it should be a inherent method)
 impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
     fn from_iter<T>(text_ops: T) -> Self
     where
@@ -821,7 +826,8 @@ impl Fragment {
 }
 
 /// Text-oriented operation (plain text snippets interleaved with style push/pop).
-enum TextOp<'a> {
+#[derive(Copy, Clone)]
+pub(super) enum TextOp<'a> {
     PushStyles(&'a Styles),
     PopStyles(&'a Styles),
 
