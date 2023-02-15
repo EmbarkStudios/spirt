@@ -642,7 +642,7 @@ impl Spec {
                 let has_categorical_prefix = |prefix| {
                     inst.opname
                         .strip_prefix(prefix)
-                        .filter(|next| next.starts_with(|c| ('A'..='Z').contains(&c)))
+                        .filter(|next| next.starts_with(|c: char| c.is_ascii_uppercase()))
                         .is_some()
                 };
 
