@@ -114,7 +114,7 @@ impl From<String> for Node {
 impl<T: Into<Node>> From<T> for Fragment {
     fn from(x: T) -> Self {
         Self {
-            nodes: iter::once(x.into()).into_iter().collect(),
+            nodes: [x.into()].into_iter().collect(),
         }
     }
 }
