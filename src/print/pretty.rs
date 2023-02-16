@@ -96,12 +96,16 @@ pub mod palettes {
     /// Minimalist palette, chosen to work with both light and dark backgrounds.
     pub mod simple {
         pub const DARK_GRAY: [u8; 3] = [0x44, 0x44, 0x44];
+
         pub const RED: [u8; 3] = [0xcc, 0x55, 0x55];
         pub const GREEN: [u8; 3] = [0x44, 0x99, 0x44];
         pub const BLUE: [u8; 3] = [0x44, 0x66, 0xcc];
+
         pub const YELLOW: [u8; 3] = [0xcc, 0x99, 0x44];
         pub const MAGENTA: [u8; 3] = [0xcc, 0x44, 0xcc];
         pub const CYAN: [u8; 3] = [0x44, 0x99, 0xcc];
+
+        pub const ORANGE: [u8; 3] = [0xcc, 0x77, 0x55];
     }
 }
 

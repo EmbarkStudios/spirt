@@ -968,12 +968,13 @@ impl Printer<'_> {
             ..pretty::Styles::color(pretty::palettes::simple::MAGENTA)
         }
     }
-    fn spv_operand_kind_name_style(&self) -> pretty::Styles {
-        // HACK(eddyb) effectively this is almost always redundant.
+    fn spv_base_style(&self) -> pretty::Styles {
+        pretty::Styles::color(pretty::palettes::simple::ORANGE)
+    }
+    fn spv_op_style(&self) -> pretty::Styles {
         pretty::Styles {
-            color_opacity: Some(0.4),
-            thickness: Some(-3),
-            ..self.declarative_keyword_style()
+            thickness: Some(3),
+            ..self.spv_base_style()
         }
     }
     fn spv_enumerand_name_style(&self) -> pretty::Styles {
@@ -987,6 +988,18 @@ impl Printer<'_> {
             ..Default::default()
         }
     }
+
+    /// Compute a suitable style for an unintrusive `foo.` "namespace prefix",
+    /// from a more typical style (by shrinking and/or reducing visibility).
+    fn demote_style_for_namespace_prefix(&self, mut style: pretty::Styles) -> pretty::Styles {
+        // NOTE(eddyb) this was `opacity: Some(0.4)` + `thickness: Some(-3)`,
+        // but thinner text ended up being more annoying to read while still
+        // using up too much real-estate (compared to decreasing the size).
+        style.color_opacity = Some(style.color_opacity.unwrap_or(1.0) * 0.6);
+        // FIXME(eddyb) maybe this could be more uniform with a different unit.
+        style.size = Some(style.size.map_or(-4, |size| size - 1));
+        style
+    }
 }
 
 impl<'a> Printer<'a> {
@@ -996,6 +1009,19 @@ impl<'a> Printer<'a> {
     /// to ensure consistency across all such situations.
     fn pretty_type_ascription_suffix(&self, ty: Type) -> pretty::Fragment {
         pretty::join_space(":", [ty.print(self)])
+    }
+
+    /// Pretty-print a SPIR-V `opcode`'s name, prefixed by `"spv."`.
+    fn pretty_spv_opcode(
+        &self,
+        opcode_name_style: pretty::Styles,
+        opcode: spv::spec::Opcode,
+    ) -> pretty::Fragment {
+        pretty::Fragment::new([
+            self.demote_style_for_namespace_prefix(self.spv_base_style())
+                .apply("spv."),
+            opcode_name_style.apply(opcode.name()),
+        ])
     }
 
     /// Pretty-print a single SPIR-V operand from only immediates, potentially
@@ -1010,14 +1036,32 @@ impl<'a> Printer<'a> {
                 .tokens
                 .into_iter()
                 .map(|token| match token {
-                    spv::print::Token::Error(s) => self.error_style().apply(s),
+                    spv::print::Token::Error(s) => self.error_style().apply(s).into(),
                     spv::print::Token::Punctuation(s) => s.into(),
-                    spv::print::Token::OperandKindName(s) => {
-                        self.spv_operand_kind_name_style().apply(s)
+                    spv::print::Token::OperandKindNamespacePrefix(s) => {
+                        pretty::Fragment::new([
+                            // HACK(eddyb) double-demote to end up with `spv.A.B`,
+                            // with increasing size from `spv.` to `A.` to `B`.
+                            self.demote_style_for_namespace_prefix(
+                                self.demote_style_for_namespace_prefix(self.spv_base_style()),
+                            )
+                            .apply("spv."),
+                            // FIXME(eddyb) avoid the cost of allocating here.
+                            self.demote_style_for_namespace_prefix(
+                                self.declarative_keyword_style(),
+                            )
+                            .apply(format!("{s}.")),
+                        ])
                     }
-                    spv::print::Token::EnumerandName(s) => self.spv_enumerand_name_style().apply(s),
-                    spv::print::Token::NumericLiteral(s) => self.numeric_literal_style().apply(s),
-                    spv::print::Token::StringLiteral(s) => self.string_literal_style().apply(s),
+                    spv::print::Token::EnumerandName(s) => {
+                        self.spv_enumerand_name_style().apply(s).into()
+                    }
+                    spv::print::Token::NumericLiteral(s) => {
+                        self.numeric_literal_style().apply(s).into()
+                    }
+                    spv::print::Token::StringLiteral(s) => {
+                        self.string_literal_style().apply(s).into()
+                    }
                     spv::print::Token::Id(_) => unreachable!(),
                 }),
         )
@@ -1039,7 +1083,7 @@ impl<'a> Printer<'a> {
     /// [`Print::print`] method, instead of a closure, as `print_id`).
     ///
     /// Immediate operands are wrapped in angle brackets, while `ID` operands are
-    /// wrapped in parentheses, e.g.: `OpFoo<Bar, 123, "baz">(v1, v2)`.
+    /// wrapped in parentheses, e.g.: `spv.OpFoo<Bar, 123, "baz">(v1, v2)`.
     ///
     /// This should be used everywhere a SPIR-V instruction needs to be printed,
     /// to ensure consistency across all such situations.
@@ -1054,7 +1098,7 @@ impl<'a> Printer<'a> {
     ) -> pretty::Fragment {
         // Split operands into "angle brackets" (immediates) and "parens" (IDs),
         // with compound operands (i.e. enumerand with ID parameter) using both,
-        // e.g: `OpFoo<Bar(/* #0 */)>(/* #0 */ v123)`.
+        // e.g: `spv.OpFoo<Bar(/* #0 */)>(/* #0 */ v123)`.
         let mut next_extra_idx: usize = 0;
         let mut paren_operands = SmallVec::<[_; 16]>::new();
         let mut angle_bracket_operands =
@@ -1067,19 +1111,33 @@ impl<'a> Printer<'a> {
                         // FIXME(eddyb) deduplicate the `Token` match with `pretty_spv_operand_from_imms`.
                         Some(pretty::Fragment::new(operand.tokens.into_iter().map(
                             |token| match token {
-                                spv::print::Token::Error(s) => self.error_style().apply(s),
+                                spv::print::Token::Error(s) => self.error_style().apply(s).into(),
                                 spv::print::Token::Punctuation(s) => s.into(),
-                                spv::print::Token::OperandKindName(s) => {
-                                    self.spv_operand_kind_name_style().apply(s)
+                                spv::print::Token::OperandKindNamespacePrefix(s) => {
+                                    pretty::Fragment::new([
+                                        // HACK(eddyb) double-demote to end up with `spv.A.B`,
+                                        // with increasing size from `spv.` to `A.` to `B`.
+                                        self.demote_style_for_namespace_prefix(
+                                            self.demote_style_for_namespace_prefix(
+                                                self.spv_base_style(),
+                                            ),
+                                        )
+                                        .apply("spv."),
+                                        // FIXME(eddyb) avoid the cost of allocating here.
+                                        self.demote_style_for_namespace_prefix(
+                                            self.declarative_keyword_style(),
+                                        )
+                                        .apply(format!("{s}.")),
+                                    ])
                                 }
                                 spv::print::Token::EnumerandName(s) => {
-                                    self.spv_enumerand_name_style().apply(s)
+                                    self.spv_enumerand_name_style().apply(s).into()
                                 }
                                 spv::print::Token::NumericLiteral(s) => {
-                                    self.numeric_literal_style().apply(s)
+                                    self.numeric_literal_style().apply(s).into()
                                 }
                                 spv::print::Token::StringLiteral(s) => {
-                                    self.string_literal_style().apply(s)
+                                    self.string_literal_style().apply(s).into()
                                 }
                                 spv::print::Token::Id(id) => {
                                     let comment = self
@@ -1092,7 +1150,7 @@ impl<'a> Printer<'a> {
                                     });
                                     paren_operands.push(pretty::join_space(comment.clone(), [id]));
 
-                                    comment
+                                    comment.into()
                                 }
                             },
                         )))
@@ -1101,8 +1159,8 @@ impl<'a> Printer<'a> {
                 .peekable();
 
         // Put together all the pieces, angle-bracketed operands then parenthesized
-        // ones, e.g.: `OpFoo<Bar, 123, "baz">(v1, v2)` (with either group optional).
-        let mut out = spv_inst_name_style.apply(opcode.name()).into();
+        // ones, e.g.: `spv.OpFoo<Bar, 123, "baz">(v1, v2)` (with either group optional).
+        let mut out = self.pretty_spv_opcode(spv_inst_name_style, opcode);
 
         if angle_bracket_operands.peek().is_some() {
             out = pretty::Fragment::new([
@@ -1615,7 +1673,7 @@ impl Print for ExportKey {
                 struct ImplicitTargetId;
 
                 printer.pretty_spv_inst(
-                    printer.declarative_keyword_style(),
+                    printer.spv_op_style(),
                     wk.OpEntryPoint,
                     imms,
                     &[ImplicitTargetId],
@@ -1865,7 +1923,7 @@ impl Print for TypeDef {
             } else {
                 match *ctor {
                     TypeCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                        printer.declarative_keyword_style(),
+                        printer.spv_op_style(),
                         opcode,
                         imms,
                         ctor_args,
@@ -1876,9 +1934,9 @@ impl Print for TypeDef {
                         None,
                     ),
                     TypeCtor::SpvStringLiteralForExtInst => pretty::Fragment::new([
-                        printer.error_style().apply("type_of"),
+                        printer.error_style().apply("type_of").into(),
                         "(".into(),
-                        printer.declarative_keyword_style().apply("OpString"),
+                        printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
                         ")".into(),
                     ]),
                 }
@@ -2020,7 +2078,7 @@ impl Print for ConstDef {
                     pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
                 ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                    printer.declarative_keyword_style(),
+                    printer.spv_op_style(),
                     opcode,
                     imms,
                     ctor_args,
@@ -2028,11 +2086,12 @@ impl Print for ConstDef {
                     Some(*ty),
                 ),
                 ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
-                    printer.declarative_keyword_style().apply("OpString"),
+                    printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
                     "<".into(),
                     printer
                         .string_literal_style()
-                        .apply(format!("{:?}", &printer.cx[s])),
+                        .apply(format!("{:?}", &printer.cx[s]))
+                        .into(),
                     ">".into(),
                 ]),
             }),
@@ -2475,7 +2534,7 @@ impl Print for DataInstDef {
                 return AttrsAndDef {
                     attrs,
                     def_without_name: printer.pretty_spv_inst(
-                        printer.declarative_keyword_style(),
+                        printer.spv_op_style(),
                         opcode,
                         imms,
                         inputs,
@@ -2485,18 +2544,24 @@ impl Print for DataInstDef {
                 };
             }
             DataInstKind::SpvExtInst { ext_set, inst } => {
+                let wk = &spv::spec::Spec::get().well_known;
+
                 // FIXME(eddyb) should this be rendered more compactly?
                 pretty::Fragment::new([
                     "(".into(),
-                    printer.declarative_keyword_style().apply("OpExtInstImport"),
+                    printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInstImport),
                     "<".into(),
                     printer
                         .string_literal_style()
-                        .apply(format!("{:?}", &printer.cx[ext_set])),
+                        .apply(format!("{:?}", &printer.cx[ext_set]))
+                        .into(),
                     ">).".into(),
-                    printer.declarative_keyword_style().apply("OpExtInst"),
+                    printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInst),
                     "<".into(),
-                    printer.numeric_literal_style().apply(format!("{inst}")),
+                    printer
+                        .numeric_literal_style()
+                        .apply(format!("{inst}"))
+                        .into(),
                     ">".into(),
                 ])
             }
