@@ -949,7 +949,7 @@ impl Printer<'_> {
     fn comment_style(&self) -> pretty::Styles {
         pretty::Styles {
             color_opacity: Some(0.3),
-            thickness: Some(-3),
+            size: Some(-4),
             ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
         }
     }

@@ -68,6 +68,12 @@ pub struct Styles {
     /// For HTML output, each unit is equivalent to `±100` in CSS `font-weight`.
     pub thickness: Option<i8>,
 
+    /// `0` corresponds to the default, with positive values meaning larger,
+    /// and negative values smaller text, respectively.
+    ///
+    /// For HTML output, each unit is equivalent to `±0.1em` in CSS `font-size`.
+    pub size: Option<i8>,
+
     pub subscript: bool,
     pub superscript: bool,
 }
@@ -302,6 +308,7 @@ impl FragmentPostLayout {
                             color,
                             color_opacity,
                             thickness,
+                            size,
                             subscript: _,
                             superscript: _,
                         } = *styles;
@@ -323,6 +330,10 @@ impl FragmentPostLayout {
                         }
                         if let Some(thickness) = thickness {
                             write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
+                                .unwrap();
+                        }
+                        if let Some(size) = size {
+                            write!(css_style, "font-size:{}em;", 1.0 + (size as f64) * 0.1)
                                 .unwrap();
                         }
                         if !css_style.is_empty() {
