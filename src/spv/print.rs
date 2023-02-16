@@ -187,25 +187,25 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                     .tokens
                     .push(Token::OperandKindNamespacePrefix(name));
                 if word == 0 {
-                    self.out.tokens.extend([Token::EnumerandName(empty_name)]);
+                    self.out.tokens.push(Token::EnumerandName(empty_name));
+                } else if let Some(bit_idx) = spec::BitIdx::of_single_set_bit(word) {
+                    let (bit_name, bit_def) = bits.get_named(bit_idx).unwrap();
+                    self.out.tokens.push(Token::EnumerandName(bit_name));
+                    self.enumerant_params(bit_def);
                 } else {
-                    // FIXME(eddyb) consider using `A.{B,C}` instead of `A.(.B,.C)`,
-                    // but also skipping the grouping entirely if there's only one.
-                    self.out.tokens.push(Token::Punctuation("("));
+                    self.out.tokens.push(Token::Punctuation("{"));
                     let mut first = true;
                     for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                         if !first {
-                            self.out.tokens.push(Token::Punctuation(" | "));
+                            self.out.tokens.push(Token::Punctuation(", "));
                         }
                         first = false;
 
                         let (bit_name, bit_def) = bits.get_named(bit_idx).unwrap();
-                        self.out
-                            .tokens
-                            .extend([Token::Punctuation("."), Token::EnumerandName(bit_name)]);
+                        self.out.tokens.push(Token::EnumerandName(bit_name));
                         self.enumerant_params(bit_def);
                     }
-                    self.out.tokens.push(Token::Punctuation(")"));
+                    self.out.tokens.push(Token::Punctuation("}"));
                 }
             }
             spec::OperandKindDef::ValueEnum { variants } => {
