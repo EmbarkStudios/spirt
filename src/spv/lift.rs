@@ -201,7 +201,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     }
     fn visit_attr(&mut self, attr: &Attr) {
         match *attr {
-            Attr::SpvAnnotation { .. } | Attr::SpvBitflagsOperand(_) => {}
+            Attr::Diagnostics(_) | Attr::SpvAnnotation { .. } | Attr::SpvBitflagsOperand(_) => {}
             Attr::SpvDebugLine { file_path, .. } => {
                 self.debug_strings.insert(&self.cx[file_path.0]);
             }
@@ -1619,6 +1619,9 @@ impl Module {
 
             for attr in cx[attrs].attrs.iter() {
                 match attr {
+                    Attr::Diagnostics(_)
+                    | Attr::SpvDebugLine { .. }
+                    | Attr::SpvBitflagsOperand(_) => {}
                     Attr::SpvAnnotation(inst @ spv::Inst { opcode, .. }) => {
                         let target_id = result_id.expect(
                             "FIXME: it shouldn't be possible to attach \
@@ -1640,7 +1643,6 @@ impl Module {
                             decoration_insts.push(inst);
                         }
                     }
-                    Attr::SpvDebugLine { .. } | Attr::SpvBitflagsOperand(_) => {}
                 }
 
                 if let Some(import) = import {

@@ -25,10 +25,10 @@ use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
-    ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstKind, DeclDef,
-    EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncParam, FxIndexMap, GlobalVar,
-    GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind,
-    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, Diag,
+    DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncParam,
+    FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
+    ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -419,6 +419,20 @@ impl<'a> Visitor<'a> for Plan<'a> {
         self.use_node(Node::ModuleDebugInfo, debug_info);
     }
 
+    fn visit_attr(&mut self, attr: &'a Attr) {
+        // HACK(eddyb) the interpolated parts aren't visited by default
+        // (as they're "inert data").
+        if let Attr::Diagnostics(OrdAssertEq(diags)) = attr {
+            for diag in diags {
+                let Diag { level, message } = diag;
+                match level {
+                    DiagLevel::Bug(_) | DiagLevel::Error | DiagLevel::Warning => {}
+                }
+                message.inner_visit_with(self);
+            }
+        }
+    }
+
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         if let DeclDef::Present(func_def_body) = &func_decl.def {
             if let Some(cfg) = &func_def_body.unstructured_cfg {
@@ -479,6 +493,27 @@ impl Plan<'_> {
     pub fn pretty_print(&self) -> Versions<pretty::FragmentPostLayout> {
         self.print(&Printer::new(self))
             .map_pretty_fragments(|fragment| fragment.layout_with_max_line_width(MAX_LINE_WIDTH))
+    }
+
+    /// Like `pretty_print`, but separately pretty-printing "root dependencies"
+    /// and the "root" itself (useful for nesting pretty-printed SPIR-T elsewhere).
+    pub fn pretty_print_deps_and_root_separately(
+        &self,
+    ) -> (
+        Versions<pretty::FragmentPostLayout>,
+        Versions<pretty::FragmentPostLayout>,
+    ) {
+        let printer = Printer::new(self);
+        (
+            self.print_with_node_filter(&printer, |node| !matches!(node, Node::Root))
+                .map_pretty_fragments(|fragment| {
+                    fragment.layout_with_max_line_width(MAX_LINE_WIDTH)
+                }),
+            self.print_with_node_filter(&printer, |node| matches!(node, Node::Root))
+                .map_pretty_fragments(|fragment| {
+                    fragment.layout_with_max_line_width(MAX_LINE_WIDTH)
+                }),
+        )
     }
 }
 
@@ -558,7 +593,10 @@ impl<'a> Printer<'a> {
                                             // are printed as comments outside
                                             // the `#{...}` syntax, they can't
                                             // work unless they're printed inline.
-                                            matches!(attr, Attr::SpvDebugLine { .. })
+                                            matches!(
+                                                attr,
+                                                Attr::Diagnostics(_) | Attr::SpvDebugLine { .. }
+                                            )
                                         })
                                 }
                                 CxInterned::Type(ty) => {
@@ -801,6 +839,8 @@ impl Printer<'_> {
         pretty::Styles {
             color_opacity: Some(0.3),
             size: Some(-4),
+            // FIXME(eddyb) this looks wrong for some reason?
+            // subscript: true,
             ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
         }
     }
@@ -1274,6 +1314,16 @@ impl Print for Func {
 impl Print for Plan<'_> {
     type Output = Versions<pretty::Fragment>;
     fn print(&self, printer: &Printer<'_>) -> Versions<pretty::Fragment> {
+        self.print_with_node_filter(printer, |_| true)
+    }
+}
+
+impl Plan<'_> {
+    fn print_with_node_filter(
+        &self,
+        printer: &Printer<'_>,
+        filter: impl Fn(&Node) -> bool,
+    ) -> Versions<pretty::Fragment> {
         let num_versions = self.per_version_name_and_node_defs.len();
         let per_node_versions_with_repeat_count = printer
             .use_styles
@@ -1282,6 +1332,7 @@ impl Print for Plan<'_> {
                 Use::Node(node) => Some(node),
                 _ => None,
             })
+            .filter(filter)
             .map(|node| -> SmallVec<[_; 1]> {
                 if num_versions == 0 {
                     return [].into_iter().collect();
@@ -1717,6 +1768,82 @@ impl Print for Attr {
     type Output = (AttrStyle, pretty::Fragment);
     fn print(&self, printer: &Printer<'_>) -> (AttrStyle, pretty::Fragment) {
         match self {
+            Attr::Diagnostics(diags) => (
+                AttrStyle::Comment,
+                pretty::Fragment::new(
+                    diags
+                        .0
+                        .iter()
+                        .map(|diag| {
+                            let Diag { level, message } = diag;
+
+                            // FIXME(eddyb) the plan was to use 💥/⮿/⚠
+                            // for bug/error/warning, but it doesn't really
+                            // render correctly, so allcaps it is for now.
+                            let (icon, icon_color) = match level {
+                                DiagLevel::Bug(_) => ("BUG", pretty::palettes::simple::MAGENTA),
+                                DiagLevel::Error => ("ERR", pretty::palettes::simple::RED),
+                                DiagLevel::Warning => ("WARN", pretty::palettes::simple::YELLOW),
+                            };
+
+                            let grayish =
+                                |[r, g, b]: [u8; 3]| [(r / 2) + 64, (g / 2) + 64, (b / 2) + 64];
+                            let comment_style = pretty::Styles::color(grayish(icon_color));
+
+                            // FIXME(eddyb) maybe make this a link to the source code?
+                            let bug_location_prefix = match level {
+                                DiagLevel::Bug(location) => {
+                                    let location = location.to_string();
+                                    let location = match location.split_once("/src/") {
+                                        Some((_path_prefix, intra_src)) => intra_src,
+                                        None => &location,
+                                    };
+                                    comment_style.clone().apply(format!("[{location}] ")).into()
+                                }
+                                DiagLevel::Error | DiagLevel::Warning => {
+                                    pretty::Fragment::default()
+                                }
+                            };
+
+                            let mut printed_message = message
+                                .print(printer)
+                                .insert_name_before_def(pretty::Fragment::default());
+
+                            // HACK(eddyb) apply the right style to all the plain
+                            // text parts of the already-printed message.
+                            for node in &mut printed_message.nodes {
+                                if let pretty::Node::Text(text) = node {
+                                    *node = comment_style.clone().apply(mem::take(text));
+                                }
+                            }
+
+                            // HACK(eddyb) this would ideally use line comments,
+                            // but adding the line prefix properly to everything
+                            // is a bit of a pain without special `pretty` support.
+                            pretty::Node::InlineOrIndentedBlock(vec![pretty::Fragment::new([
+                                comment_style.clone().apply("/* ").into(),
+                                pretty::Styles {
+                                    thickness: Some(3),
+
+                                    // HACK(eddyb) this allows larger "icons"
+                                    // without adding gaps via `line-height`.
+                                    subscript: true,
+                                    size: Some(2),
+
+                                    ..pretty::Styles::color(icon_color)
+                                }
+                                .apply(icon)
+                                .into(),
+                                " ".into(),
+                                bug_location_prefix,
+                                printed_message,
+                                comment_style.apply(" */").into(),
+                            ])])
+                        })
+                        .intersperse(pretty::Node::ForceLineSeparation),
+                ),
+            ),
+
             Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
                 struct ImplicitTargetId;
 
@@ -1761,6 +1888,25 @@ impl Print for Attr {
                 AttrStyle::NonComment,
                 printer.pretty_spv_operand_from_imms([imm]),
             ),
+        }
+    }
+}
+
+impl Print for Vec<DiagMsgPart> {
+    // HACK(eddyb) this is only `AttrsAndDef` so it can be pretty-printed as a
+    // root - but ideally `DynNodeDef` should allow `pretty::Fragment` too.
+    type Output = AttrsAndDef;
+
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+        let msg = pretty::Fragment::new(self.iter().map(|part| match part {
+            DiagMsgPart::Plain(text) => pretty::Node::Text(text.clone()).into(),
+            DiagMsgPart::Attrs(attrs) => attrs.print(printer),
+            DiagMsgPart::Type(ty) => ty.print(printer),
+            DiagMsgPart::Const(ct) => ct.print(printer),
+        }));
+        AttrsAndDef {
+            attrs: pretty::Fragment::default(),
+            def_without_name: msg,
         }
     }
 }
