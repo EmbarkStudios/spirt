@@ -78,52 +78,56 @@ impl Transformed<()> {
     }
 }
 
+/// Helper type for [`transform!`] - not public as it's easy to misuse.
+enum TransformedWithOriginal<'a, T> {
+    Original(&'a T),
+    Changed(T),
+}
+
+impl<T> Transformed<T> {
+    fn with_original(self, original: &T) -> TransformedWithOriginal<'_, T> {
+        match self {
+            Transformed::Unchanged => TransformedWithOriginal::Original(original),
+            Transformed::Changed(new) => TransformedWithOriginal::Changed(new),
+        }
+    }
+}
+
+impl<T: Clone> TransformedWithOriginal<'_, T> {
+    fn is_changed(&self) -> bool {
+        matches!(self, TransformedWithOriginal::Changed(_))
+    }
+    fn changed_or_original_cloned(self) -> T {
+        match self {
+            TransformedWithOriginal::Original(original) => original.clone(),
+            TransformedWithOriginal::Changed(new) => new,
+        }
+    }
+}
+
+// HACK(eddyb) `transform!` needs auto-ref-like behavior for inputs.
+trait AutoRef {
+    fn auto_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl<T> AutoRef for T {}
+
 /// Helper macro to create a combined [`Transformed`] out of several variables,
 /// each with their own transformation, where any [`Transformed::Changed`] input
 /// will result in a [`Transformed::Changed`] output, using a combination of the
 /// changed inputs, and clones of the unchanged inputs.
 macro_rules! transform {
-    // User-facing entry-point, dispatches to the internal more-explicit form.
-    ({ $($input:ident -> $input_transformed:expr),+ $(,)? } => $output:expr) => {
-        transform!(@explicit {
-            $($input: transform($input_transformed), clone(Clone::clone($input));)+
-        } => $output)
-    };
-
-    // Single input is just a `map`.
-    (@explicit {
-        $x:ident: transform($x_transformed:expr), clone($x_cloned:expr);
-    } => $output:expr) => {
-        $x_transformed.map(|$x| $output)
-    };
-
-    // Reduce the first two inputs into one input, recursively.
-    (@explicit {
-        $a:ident: transform($a_transformed:expr), clone($a_cloned:expr);
-        $b:ident: transform($b_transformed:expr), clone($b_cloned:expr);
-        $($inputs:tt)*
-    } => $output:expr) => {{
-        // HACK(eddyb) avoid exponential blow-up from duplicating expressions.
-        let clone_a = || $a_cloned;
-        let clone_b = || $b_cloned;
-
-        transform!(@explicit {
-            ab: transform(match ($a_transformed, $b_transformed) {
-                (Transformed::Unchanged, Transformed::Unchanged)
-                    => Transformed::Unchanged,
-                (Transformed::Changed(new_a), Transformed::Unchanged)
-                    => Transformed::Changed((new_a, clone_b())),
-                (Transformed::Unchanged, Transformed::Changed(new_b))
-                    => Transformed::Changed((clone_a(), new_b)),
-                (Transformed::Changed(new_a), Transformed::Changed(new_b))
-                    => Transformed::Changed((new_a, new_b)),
-            }), clone((clone_a(), clone_b()));
-            $($inputs)*
-        } => {
-            let ($a, $b) = ab;
-            $output
-        })
-    }}
+    ({ $($input:ident -> $input_transformed:expr),+ $(,)? } => $output:expr) => {{
+        let ($($input,)+) = ($($input_transformed.with_original($input.auto_ref()),)+);
+        if $($input.is_changed())||+ {
+            let ($($input,)*) = ($($input.changed_or_original_cloned(),)+);
+            Transformed::Changed($output)
+        } else {
+            Transformed::Unchanged
+        }
+    }};
 }
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
