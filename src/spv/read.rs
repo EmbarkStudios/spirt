@@ -362,7 +362,7 @@ impl Iterator for ModuleParser {
             let known_id_def = if opcode == wk.OpTypeInt {
                 KnownIdDef::TypeInt(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
-                        assert!(kind == wk.LiteralInteger);
+                        assert_eq!(kind, wk.LiteralInteger);
                         n.try_into()
                             .ok()
                             .ok_or_else(|| invalid("Width cannot be 0"))?
@@ -372,7 +372,7 @@ impl Iterator for ModuleParser {
             } else if opcode == wk.OpTypeFloat {
                 KnownIdDef::TypeFloat(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
-                        assert!(kind == wk.LiteralInteger);
+                        assert_eq!(kind, wk.LiteralInteger);
                         n.try_into()
                             .ok()
                             .ok_or_else(|| invalid("Width cannot be 0"))?

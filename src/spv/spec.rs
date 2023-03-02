@@ -3,7 +3,7 @@
 use arrayvec::ArrayVec;
 use lazy_static::lazy_static;
 use rustc_hash::FxHashMap;
-use std::iter;
+use std::{fmt, iter};
 
 use self::indexed::FlatIdx as _;
 
@@ -260,6 +260,12 @@ pub struct OperandKind(u8);
 impl indexed::FlatIdx for OperandKind {
     fn to_usize(self) -> usize {
         self.0.into()
+    }
+}
+
+impl fmt::Debug for OperandKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OperandKind({} => {:?})", self.0, self.name())
     }
 }
 

@@ -120,10 +120,10 @@ fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
 
     let mut words = match *imms {
         [Imm::Short(kind, first_word)] | [Imm::LongStart(kind, first_word), ..] => {
-            assert!(kind == wk.LiteralString);
+            assert_eq!(kind, wk.LiteralString);
             iter::once(first_word).chain(imms[1..].iter().map(|&imm| match imm {
                 Imm::LongCont(kind, word) => {
-                    assert!(kind == wk.LiteralString);
+                    assert_eq!(kind, wk.LiteralString);
                     word
                 }
                 _ => unreachable!(),
