@@ -186,8 +186,19 @@ impl HtmlSnippet {
         var params = new URLSearchParams(document.location.search);
         var dark = params.has("dark"), light = params.has("light");
         if(dark || light) {
-            if(dark && !light)
+            if(dark && !light) {
                 document.documentElement.classList.add("simple-dark-theme");
+
+                // HACK(eddyb) forcefully disable Dark Reader, for two reasons:
+                // - its own detection of websites with built-in dark themes
+                //   (https://github.com/darkreader/darkreader/pull/7995)
+                //   isn't on by default, and the combination is jarring
+                // - it interacts badly with whole-document-replacement
+                //   (as used by htmlpreview.github.io)
+                document.documentElement.removeAttribute('data-darkreader-scheme');
+                document.querySelectorAll('style.darkreader')
+                    .forEach(style => style.disabled = true);
+            }
         } else if(matchMedia("(prefers-color-scheme: dark)").matches) {
             // FIXME(eddyb) also use media queries in CSS directly, to ensure dark mode
             // still works with JS disabled (sadly that likely requires CSS duplication).
@@ -198,9 +209,7 @@ impl HtmlSnippet {
 
 <style>
     /* HACK(eddyb) `[data-darkreader-scheme="dark"]` is for detecting Dark Reader,
-      as its own automatic detection of websites with built-in dark themes
-      (https://github.com/darkreader/darkreader/pull/7995) isn't on by default,
-      and the result is jarring when both dark modes combine. */
+      to avoid transient interactions (see also comment in the `<script>`). */
 
     html.simple-dark-theme:not([data-darkreader-scheme="dark"]) {
         background: #16181a;
