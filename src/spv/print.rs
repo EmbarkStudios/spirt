@@ -9,7 +9,8 @@ use std::{iter, mem, str};
 /// The smallest unit produced by printing a ("logical") SPIR-V operand.
 ///
 /// All variants other than `Id` contain a fully formatted string, and the
-/// distinction between variants can be erased to obtain a plain-text version.
+/// distinction between variants can be erased to obtain a plain-text version
+/// (also except `OperandKindNamespacePrefix` requiring an extra implicit `.`).
 //
 // FIXME(eddyb) should there be a `TokenKind` enum and then `Cow<'static, str>`
 // paired with a `TokenKind` in place of all of these individual variants?
@@ -23,7 +24,9 @@ pub enum Token<ID> {
     // parameters, so that the SPIR-T printer can do layout for them.
     Punctuation(&'static str),
 
-    OperandKindName(&'static str),
+    // NOTE(eddyb) this implies a suffix `.` not included in the string.
+    OperandKindNamespacePrefix(&'static str),
+
     EnumerandName(&'static str),
 
     NumericLiteral(String),
@@ -52,16 +55,16 @@ impl TokensForOperand<String> {
     pub fn concat_to_plain_text(self) -> String {
         self.tokens
             .into_iter()
-            .map(|token| -> Cow<'_, str> {
-                match token {
-                    Token::Punctuation(s) | Token::OperandKindName(s) | Token::EnumerandName(s) => {
-                        s.into()
-                    }
+            .flat_map(|token| {
+                let (first, second): (Cow<'_, str>, _) = match token {
+                    Token::OperandKindNamespacePrefix(s) => (s.into(), Some(".".into())),
+                    Token::Punctuation(s) | Token::EnumerandName(s) => (s.into(), None),
                     Token::Error(s)
                     | Token::NumericLiteral(s)
                     | Token::StringLiteral(s)
-                    | Token::Id(s) => s.into(),
-                }
+                    | Token::Id(s) => (s.into(), None),
+                };
+                [first].into_iter().chain(second)
             })
             .reduce(|out, extra| (out.into_owned() + &extra).into())
             .unwrap_or_default()
@@ -115,7 +118,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
             words.push(word);
         }
 
-        let (name, def) = kind.name_and_def();
+        let def = kind.def();
         assert!(matches!(def, spec::OperandKindDef::Literal { .. }));
 
         let literal_token = if kind == spec::Spec::get().well_known.LiteralString {
@@ -151,18 +154,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
             Token::NumericLiteral(s)
         };
 
-        // FIXME(eddyb) decide when it's useful to show the kind of literal.
-        let explicit_kind = false;
-
-        if explicit_kind {
-            self.out
-                .tokens
-                .extend([Token::OperandKindName(name), Token::Punctuation("(")]);
-        }
         self.out.tokens.push(literal_token);
-        if explicit_kind {
-            self.out.tokens.push(Token::Punctuation(")"));
-        }
     }
 
     fn operand(&mut self, kind: spec::OperandKind) {
@@ -191,27 +183,29 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                     None => return emit_missing_error(self),
                 };
 
-                self.out.tokens.push(Token::OperandKindName(name));
+                self.out
+                    .tokens
+                    .push(Token::OperandKindNamespacePrefix(name));
                 if word == 0 {
-                    self.out
-                        .tokens
-                        .extend([Token::Punctuation("."), Token::EnumerandName(empty_name)]);
+                    self.out.tokens.push(Token::EnumerandName(empty_name));
+                } else if let Some(bit_idx) = spec::BitIdx::of_single_set_bit(word) {
+                    let (bit_name, bit_def) = bits.get_named(bit_idx).unwrap();
+                    self.out.tokens.push(Token::EnumerandName(bit_name));
+                    self.enumerant_params(bit_def);
                 } else {
-                    self.out.tokens.push(Token::Punctuation(".("));
+                    self.out.tokens.push(Token::Punctuation("{"));
                     let mut first = true;
                     for bit_idx in spec::BitIdx::of_all_set_bits(word) {
                         if !first {
-                            self.out.tokens.push(Token::Punctuation(" | "));
+                            self.out.tokens.push(Token::Punctuation(", "));
                         }
                         first = false;
 
                         let (bit_name, bit_def) = bits.get_named(bit_idx).unwrap();
-                        self.out
-                            .tokens
-                            .extend([Token::Punctuation("."), Token::EnumerandName(bit_name)]);
+                        self.out.tokens.push(Token::EnumerandName(bit_name));
                         self.enumerant_params(bit_def);
                     }
-                    self.out.tokens.push(Token::Punctuation(")"));
+                    self.out.tokens.push(Token::Punctuation("}"));
                 }
             }
             spec::OperandKindDef::ValueEnum { variants } => {
@@ -223,8 +217,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 let (variant_name, variant_def) =
                     variants.get_named(word.try_into().unwrap()).unwrap();
                 self.out.tokens.extend([
-                    Token::OperandKindName(name),
-                    Token::Punctuation("."),
+                    Token::OperandKindNamespacePrefix(name),
                     Token::EnumerandName(variant_name),
                 ]);
                 self.enumerant_params(variant_def);

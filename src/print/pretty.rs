@@ -68,6 +68,12 @@ pub struct Styles {
     /// For HTML output, each unit is equivalent to `±100` in CSS `font-weight`.
     pub thickness: Option<i8>,
 
+    /// `0` corresponds to the default, with positive values meaning larger,
+    /// and negative values smaller text, respectively.
+    ///
+    /// For HTML output, each unit is equivalent to `±0.1em` in CSS `font-size`.
+    pub size: Option<i8>,
+
     pub subscript: bool,
     pub superscript: bool,
 }
@@ -90,12 +96,16 @@ pub mod palettes {
     /// Minimalist palette, chosen to work with both light and dark backgrounds.
     pub mod simple {
         pub const DARK_GRAY: [u8; 3] = [0x44, 0x44, 0x44];
+
         pub const RED: [u8; 3] = [0xcc, 0x55, 0x55];
         pub const GREEN: [u8; 3] = [0x44, 0x99, 0x44];
         pub const BLUE: [u8; 3] = [0x44, 0x66, 0xcc];
+
         pub const YELLOW: [u8; 3] = [0xcc, 0x99, 0x44];
         pub const MAGENTA: [u8; 3] = [0xcc, 0x44, 0xcc];
         pub const CYAN: [u8; 3] = [0x44, 0x99, 0xcc];
+
+        pub const ORANGE: [u8; 3] = [0xcc, 0x77, 0x55];
     }
 }
 
@@ -176,8 +186,19 @@ impl HtmlSnippet {
         var params = new URLSearchParams(document.location.search);
         var dark = params.has("dark"), light = params.has("light");
         if(dark || light) {
-            if(dark && !light)
+            if(dark && !light) {
                 document.documentElement.classList.add("simple-dark-theme");
+
+                // HACK(eddyb) forcefully disable Dark Reader, for two reasons:
+                // - its own detection of websites with built-in dark themes
+                //   (https://github.com/darkreader/darkreader/pull/7995)
+                //   isn't on by default, and the combination is jarring
+                // - it interacts badly with whole-document-replacement
+                //   (as used by htmlpreview.github.io)
+                document.documentElement.removeAttribute('data-darkreader-scheme');
+                document.querySelectorAll('style.darkreader')
+                    .forEach(style => style.disabled = true);
+            }
         } else if(matchMedia("(prefers-color-scheme: dark)").matches) {
             // FIXME(eddyb) also use media queries in CSS directly, to ensure dark mode
             // still works with JS disabled (sadly that likely requires CSS duplication).
@@ -188,9 +209,7 @@ impl HtmlSnippet {
 
 <style>
     /* HACK(eddyb) `[data-darkreader-scheme="dark"]` is for detecting Dark Reader,
-      as its own automatic detection of websites with built-in dark themes
-      (https://github.com/darkreader/darkreader/pull/7995) isn't on by default,
-      and the result is jarring when both dark modes combine. */
+      to avoid transient interactions (see also comment in the `<script>`). */
 
     html.simple-dark-theme:not([data-darkreader-scheme="dark"]) {
         background: #16181a;
@@ -302,6 +321,7 @@ impl FragmentPostLayout {
                             color,
                             color_opacity,
                             thickness,
+                            size,
                             subscript: _,
                             superscript: _,
                         } = *styles;
@@ -323,6 +343,10 @@ impl FragmentPostLayout {
                         }
                         if let Some(thickness) = thickness {
                             write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
+                                .unwrap();
+                        }
+                        if let Some(size) = size {
+                            write!(css_style, "font-size:{}em;", 1.0 + (size as f64) * 0.1)
                                 .unwrap();
                         }
                         if !css_style.is_empty() {
