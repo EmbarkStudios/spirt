@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed 🛠
+- [PR#21](https://github.com/EmbarkStudios/spirt/pull/21) tweaked pretty-printing
+  styles around de-emphasis (shrinking instead of thinning, for width savings),
+  and SPIR-V ops/enums (via de-emphasized `spv.` prefix and distinct orange color)
+
 ## [0.1.0] - 2022-12-16
 *Initial public release of SPIR-T for minimal Rust-GPU integration.*
 ### Added ⭐
