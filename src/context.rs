@@ -403,7 +403,9 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
         Self::default()
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+    // FIXME(eddyb) this should not allocate space unconditionally, but offer an
+    // API where "vacant entry" may or may not have a `&mut Option<V>` in it.
+    pub fn entry(&mut self, key: K) -> &mut Option<V> {
         let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
         let chunk_value_slots = self
@@ -417,7 +419,11 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
         }
 
         let value_slots = &mut chunk_value_slots[intra_chunk_idx];
-        K::get_dense_value_slot_mut(key, value_slots).replace(value)
+        K::get_dense_value_slot_mut(key, value_slots)
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.entry(key).replace(value)
     }
 
     pub fn get(&self, key: K) -> Option<&V> {
@@ -438,6 +444,7 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
         self.get_slot_mut(key)?.take()
     }
 
+    // FIXME(eddyb) deduplicate with `entry`.
     fn get_slot_mut(&mut self, key: K) -> Option<&mut Option<V>> {
         let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
@@ -514,7 +521,9 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             let old_first_def = &mut defs[old_first];
 
             // FIXME(eddyb) this situation should be impossible anyway, as it
-            // involves the `EntityListNode`s links, which should be unforgeable.
+            // involves the `EntityListNode`s links, which should be unforgeable,
+            // but it's still possible to keep around outdated `EntityList`s
+            // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
             assert!(
                 old_first_def.prev.is_none(),
                 "invalid EntityList: `first->prev != None`"
@@ -543,7 +552,9 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             let old_last_def = &mut defs[old_last];
 
             // FIXME(eddyb) this situation should be impossible anyway, as it
-            // involves the `EntityListNode`s links, which should be unforgeable.
+            // involves the `EntityListNode`s links, which should be unforgeable,
+            // but it's still possible to keep around outdated `EntityList`s
+            // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
             assert!(
                 old_last_def.next.is_none(),
                 "invalid EntityList: `last->next != None`"
@@ -556,6 +567,49 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             first: self.0.map_or(new_node, |this| this.first),
             last: new_node,
         });
+    }
+
+    /// Insert `new_node` (defined in `defs`) into `self`, before `next`.
+    //
+    // FIXME(eddyb) unify this with the other insert methods, maybe with a new
+    // "insert position" type?
+    #[track_caller]
+    pub fn insert_before(&mut self, new_node: E, next: E, defs: &mut EntityDefs<E>) {
+        let prev = defs[next].prev.replace(new_node);
+
+        let new_node_def = &mut defs[new_node];
+        assert!(
+            new_node_def.prev.is_none() && new_node_def.next.is_none(),
+            "EntityList::insert_before: new node already linked into a (different?) list"
+        );
+
+        new_node_def.prev = prev;
+        new_node_def.next = Some(next);
+
+        match prev {
+            Some(prev) => {
+                let old_prev_next = defs[prev].next.replace(new_node);
+
+                // FIXME(eddyb) this situation should be impossible anyway, as it
+                // involves the `EntityListNode`s links, which should be unforgeable.
+                assert!(
+                    old_prev_next == Some(next),
+                    "invalid EntityListNode: `node->prev->next != node`"
+                );
+            }
+            None => {
+                // FIXME(eddyb) this situation should be impossible anyway, as it
+                // involves the `EntityListNode`s links, which should be unforgeable,
+                // but it's still possible to keep around outdated `EntityList`s
+                // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
+                assert!(
+                    self.0.map(|this| this.first) == Some(next),
+                    "invalid EntityList: `node->prev == None` but `node != first`"
+                );
+
+                self.0.as_mut().unwrap().first = new_node;
+            }
+        }
     }
 
     /// Insert all of `list_to_prepend`'s nodes at the start of `self`.
@@ -582,7 +636,9 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             let a_last_def = &mut defs[a.last];
 
             // FIXME(eddyb) this situation should be impossible anyway, as it
-            // involves the `EntityListNode`s links, which should be unforgeable.
+            // involves the `EntityListNode`s links, which should be unforgeable,
+            // but it's still possible to keep around outdated `EntityList`s
+            // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
             assert!(
                 a_last_def.next.is_none(),
                 "invalid EntityList: `last->next != None`"
@@ -594,7 +650,9 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             let b_first_def = &mut defs[b.first];
 
             // FIXME(eddyb) this situation should be impossible anyway, as it
-            // involves the `EntityListNode`s links, which should be unforgeable.
+            // involves the `EntityListNode`s links, which should be unforgeable,
+            // but it's still possible to keep around outdated `EntityList`s
+            // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
             assert!(
                 b_first_def.prev.is_none(),
                 "invalid EntityList: `first->prev != None`"
@@ -607,6 +665,72 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             first: a.first,
             last: b.last,
         }))
+    }
+
+    /// Remove `node` (defined in `defs`) from `self`.
+    #[track_caller]
+    pub fn remove(&mut self, node: E, defs: &mut EntityDefs<E>) {
+        // Unlink `node->{prev,next}` first (also allowing re-insertion elsewhere).
+        let (prev, next) = {
+            let node_def = &mut defs[node];
+            (node_def.prev.take(), node_def.next.take())
+        };
+
+        // Unlink `prev->next = node` (or validate `first = node`).
+        match prev {
+            Some(prev) => {
+                let old_prev_next = mem::replace(&mut defs[prev].next, next);
+
+                // FIXME(eddyb) this situation should be impossible anyway, as it
+                // involves the `EntityListNode`s links, which should be unforgeable.
+                assert!(
+                    old_prev_next == Some(node),
+                    "invalid EntityListNode: `node->prev->next != node`"
+                );
+            }
+            None => {
+                // FIXME(eddyb) this situation should be impossible anyway, as it
+                // involves the `EntityListNode`s links, which should be unforgeable,
+                // but it's still possible to keep around outdated `EntityList`s
+                // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
+                assert!(
+                    self.0.map(|this| this.first) == Some(node),
+                    "invalid EntityList: `node->prev == None` but `node != first`"
+                );
+            }
+        }
+
+        // Unlink `next->prev = node` (or validate `last = node`).
+        match next {
+            Some(next) => {
+                let old_next_prev = mem::replace(&mut defs[next].prev, prev);
+
+                // FIXME(eddyb) this situation should be impossible anyway, as it
+                // involves the `EntityListNode`s links, which should be unforgeable.
+                assert!(
+                    old_next_prev == Some(node),
+                    "invalid EntityListNode: `node->next->prev != node`"
+                );
+            }
+            None => {
+                // FIXME(eddyb) this situation should be impossible anyway, as it
+                // involves the `EntityListNode`s links, which should be unforgeable,
+                // but it's still possible to keep around outdated `EntityList`s
+                // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
+                assert!(
+                    self.0.map(|this| this.last) == Some(node),
+                    "invalid EntityList: `node->next == None` but `node != last`"
+                );
+            }
+        }
+
+        // Update list end-points (overwritten `first`/`last` validated above).
+        match (prev, next) {
+            (Some(_), Some(_)) => {}
+            (None, Some(next)) => self.0.as_mut().unwrap().first = next,
+            (Some(prev), None) => self.0.as_mut().unwrap().last = prev,
+            (None, None) => self.0 = None,
+        }
     }
 }
 
