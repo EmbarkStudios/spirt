@@ -658,7 +658,7 @@ impl Spec {
                     || inst.opname == "OpEmitMeshTasksEXT"
                 {
                     // HACK(eddyb) not category prefixes, but they help with
-                    // working around `Reserved` A with control-flow
+                    // working around `Reserved` extensions with control-flow
                     // instructions. False positives will be caught by the
                     // assert further down, if `category_from_class` differs.
                     Some(InstructionCategory::ControlFlow)
