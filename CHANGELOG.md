@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
-- [PR#26](https://github.com/EmbarkStudios/spirt/pull/26) adds support for `EmitMeshTasksEXT` op
+- [PR#26](https://github.com/EmbarkStudios/spirt/pull/26) allowed using `OpEmitMeshTasksEXT` as a terminator (by hardcoding it as `Control-Flow`)
 - [PR#25](https://github.com/EmbarkStudios/spirt/pull/25) updated SPIRV-headers from 1.5.4 to 1.6.1
 - [PR#21](https://github.com/EmbarkStudios/spirt/pull/21) tweaked pretty-printing
   styles around de-emphasis (shrinking instead of thinning, for width savings),
