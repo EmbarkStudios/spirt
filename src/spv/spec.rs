@@ -655,6 +655,7 @@ impl Spec {
                     Some(InstructionCategory::Const)
                 } else if has_categorical_prefix("OpIgnore")
                     || has_categorical_prefix("OpTerminate")
+                    || inst.opname == "OpEmitMeshTasksEXT"
                 {
                     // HACK(eddyb) not category prefixes, but they help with
                     // working around `Reserved` extensions with control-flow
