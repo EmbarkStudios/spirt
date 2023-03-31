@@ -309,7 +309,10 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
 "
         .replace("SCOPE", &format!("pre.{ROOT_CLASS_NAME}"));
 
-        let mut body = format!("<pre class=\"{ROOT_CLASS_NAME}\">");
+        // HACK(eddyb) load-bearing newline after `<pre ...>`, to front-load any
+        // weird HTML whitespace handling, and allow the actual contents to start
+        // with empty lines (i.e. `\n\n...`), without e.g. losing the first one.
+        let mut body = format!("<pre class=\"{ROOT_CLASS_NAME}\">\n");
         text_ops.into_internal_iter().for_each(|op| match op {
             TextOp::PushStyles(styles) | TextOp::PopStyles(styles) => {
                 let mut special_tags = [
