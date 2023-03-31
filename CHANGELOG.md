@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added ⭐
+- [PR#18](https://github.com/EmbarkStudios/spirt/pull/18) added anchor-based alignment
+  to multi-version pretty-printing output (the same definitions will be kept on
+  the same lines in all columns, wherever possible, to improve readability)
+
 ### Changed 🛠
 - [PR#26](https://github.com/EmbarkStudios/spirt/pull/26) allowed using `OpEmitMeshTasksEXT` as a terminator (by hardcoding it as `Control-Flow`)
 - [PR#25](https://github.com/EmbarkStudios/spirt/pull/25) updated SPIRV-headers from 1.5.4 to 1.6.1
