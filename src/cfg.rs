@@ -78,16 +78,20 @@ impl ControlFlowGraph {
         func_def_body: &FuncDefBody,
     ) -> impl DoubleEndedIterator<Item = ControlRegion> {
         let mut post_order = SmallVec::<[_; 8]>::new();
-        {
-            let mut incoming_edge_counts = EntityOrientedDenseMap::new();
-            self.traverse_whole_func(
-                func_def_body,
-                &mut incoming_edge_counts,
-                &mut |_| {},
-                &mut |region| post_order.push(region),
-            );
-        }
+        self.traverse_whole_func(
+            func_def_body,
+            &mut TraversalState {
+                incoming_edge_counts: EntityOrientedDenseMap::new(),
 
+                pre_order_visit: |_| {},
+                post_order_visit: |region| post_order.push(region),
+
+                // NOTE(eddyb) this doesn't impact semantics, but combined with
+                // the final reversal, it should keep targets in the original
+                // order in the cases when they didn't get deduplicated.
+                reverse_targets: true,
+            },
+        );
         post_order.into_iter().rev()
     }
 }
@@ -120,15 +124,23 @@ mod sealed {
         }
     }
 }
+use itertools::Either;
 use sealed::IncomingEdgeCount;
+
+struct TraversalState<PreVisit: FnMut(ControlRegion), PostVisit: FnMut(ControlRegion)> {
+    incoming_edge_counts: EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
+    pre_order_visit: PreVisit,
+    post_order_visit: PostVisit,
+
+    // FIXME(eddyb) should this be a generic parameter for "targets iterator"?
+    reverse_targets: bool,
+}
 
 impl ControlFlowGraph {
     fn traverse_whole_func(
         &self,
         func_def_body: &FuncDefBody,
-        incoming_edge_counts: &mut EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
-        pre_order_visit: &mut impl FnMut(ControlRegion),
-        post_order_visit: &mut impl FnMut(ControlRegion),
+        state: &mut TraversalState<impl FnMut(ControlRegion), impl FnMut(ControlRegion)>,
     ) {
         let func_at_body = func_def_body.at_body();
 
@@ -139,47 +151,43 @@ impl ControlFlowGraph {
         ));
         assert!(func_at_body.def().outputs.is_empty());
 
-        self.traverse(
-            func_at_body,
-            incoming_edge_counts,
-            pre_order_visit,
-            post_order_visit,
-        );
+        self.traverse(func_at_body, state);
     }
 
     fn traverse(
         &self,
         func_at_region: FuncAt<'_, ControlRegion>,
-        incoming_edge_counts: &mut EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
-        pre_order_visit: &mut impl FnMut(ControlRegion),
-        post_order_visit: &mut impl FnMut(ControlRegion),
+        state: &mut TraversalState<impl FnMut(ControlRegion), impl FnMut(ControlRegion)>,
     ) {
         let region = func_at_region.position;
 
         // FIXME(eddyb) `EntityOrientedDenseMap` should have an `entry` API.
-        if let Some(existing_count) = incoming_edge_counts.get_mut(region) {
+        if let Some(existing_count) = state.incoming_edge_counts.get_mut(region) {
             *existing_count += IncomingEdgeCount::ONE;
             return;
         }
-        incoming_edge_counts.insert(region, IncomingEdgeCount::ONE);
+        state
+            .incoming_edge_counts
+            .insert(region, IncomingEdgeCount::ONE);
 
-        pre_order_visit(region);
+        (state.pre_order_visit)(region);
 
         let control_inst = self
             .control_inst_on_exit_from
             .get(region)
             .expect("cfg: missing `ControlInst`, despite having left structured control-flow");
 
-        for &target in &control_inst.targets {
-            self.traverse(
-                func_at_region.at(target),
-                incoming_edge_counts,
-                pre_order_visit,
-                post_order_visit,
-            );
+        let targets = control_inst.targets.iter().copied();
+        let targets = if state.reverse_targets {
+            Either::Left(targets.rev())
+        } else {
+            Either::Right(targets)
+        };
+        for target in targets {
+            self.traverse(func_at_region.at(target), state);
         }
 
-        post_order_visit(region);
+        (state.post_order_visit)(region);
     }
 }
 
@@ -381,15 +389,21 @@ impl<'a> Structurizer<'a> {
             ctor_args: [].into_iter().collect(),
         });
 
-        let mut incoming_edge_counts = EntityOrientedDenseMap::new();
-        if let Some(cfg) = &func_def_body.unstructured_cfg {
-            cfg.traverse_whole_func(
-                func_def_body,
-                &mut incoming_edge_counts,
-                &mut |_| {},
-                &mut |_| {},
-            );
-        }
+        let incoming_edge_counts = func_def_body
+            .unstructured_cfg
+            .as_ref()
+            .map(|cfg| {
+                let mut state = TraversalState {
+                    incoming_edge_counts: EntityOrientedDenseMap::new(),
+
+                    pre_order_visit: |_| {},
+                    post_order_visit: |_| {},
+                    reverse_targets: false,
+                };
+                cfg.traverse_whole_func(func_def_body, &mut state);
+                state.incoming_edge_counts
+            })
+            .unwrap_or_default();
 
         Self {
             cx,
