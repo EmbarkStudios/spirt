@@ -5,10 +5,10 @@ use crate::FxIndexMap;
 use internal_iterator::{
     FromInternalIterator, InternalIterator, IntoInternalIterator, IteratorExt,
 };
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use smallvec::SmallVec;
 use std::fmt::Write;
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 
 #[allow(rustdoc::private_intra_doc_links)]
 /// Wrapper for handling the difference between single-version and multi-version
@@ -27,6 +27,8 @@ pub enum Versions<PF> {
         /// multiple versions (columns) have the exact same content.
         ///
         /// For HTML output, "repeat count"s map to `colspan` attributes.
+        //
+        // FIXME(eddyb) remove the "repeat count" mechanism.
         per_row_versions_with_repeat_count: Vec<SmallVec<[(PF, usize); 1]>>,
     },
 }
@@ -105,8 +107,6 @@ impl Versions<pretty::FragmentPostLayout> {
                     "
 <style>
     SCOPE {
-        min-width: 100%;
-
         border-collapse: collapse;
     }
     SCOPE>tbody>tr>*:not(:only-child) {
@@ -121,16 +121,12 @@ impl Versions<pretty::FragmentPostLayout> {
     }
     SCOPE>tbody>tr>td {
         vertical-align: top;
-
-        /* HACK(eddyb) force local scroll when table isn't wide enough. */
-        max-width: 40ch;
-    }
-    SCOPE>tbody>tr>td>pre {
-        overflow-x: auto;
+        max-width: MAX_LINE_WIDTHch;
     }
 </style>
         "
-                    .replace("SCOPE", &format!("table.{TABLE_CLASS_NAME}")),
+                    .replace("SCOPE", &format!("table.{TABLE_CLASS_NAME}"))
+                    .replace("MAX_LINE_WIDTH", &super::MAX_LINE_WIDTH.to_string()),
                 );
 
                 let headings = {
@@ -144,6 +140,7 @@ impl Versions<pretty::FragmentPostLayout> {
                 html.body = format!("<table class=\"{TABLE_CLASS_NAME}\">\n");
                 let mut last_was_uniform = true;
                 for versions_with_repeat_count in per_row_versions_with_repeat_count {
+                    // FIXME(eddyb) remove the "repeat count" mechanism.
                     let is_uniform = match versions_with_repeat_count[..] {
                         [(_, repeat_count)] => repeat_count == version_names.len(),
                         _ => false,
@@ -167,20 +164,115 @@ impl Versions<pretty::FragmentPostLayout> {
                     }
 
                     html.body += "<tr>\n";
-                    for ((_, repeat_count), column) in versions_with_repeat_count
-                        .iter()
-                        .zip(anchor_aligner.merged_columns())
-                    {
-                        writeln!(html.body, "<td colspan=\"{repeat_count}\">").unwrap();
-
+                    if is_uniform {
+                        // FIXME(eddyb) avoid duplication with the non-uniform case.
                         let pretty::HtmlSnippet {
                             head_deduplicatable_elements: fragment_head,
                             body: fragment_body,
-                        } = column.into_internal().collect();
-                        html.head_deduplicatable_elements.extend(fragment_head);
-                        html.body += &fragment_body;
+                        } = anchor_aligner
+                            .merged_columns()
+                            .next()
+                            .unwrap()
+                            .lines()
+                            .intersperse(&[TextOp::Text("\n")])
+                            .flatten()
+                            .copied()
+                            .into_internal()
+                            .collect();
 
+                        html.head_deduplicatable_elements.extend(fragment_head);
+
+                        writeln!(html.body, "<td colspan=\"{}\">", version_names.len()).unwrap();
+                        html.body += &fragment_body;
                         html.body += "</td>\n";
+                    } else {
+                        let mut merged_columns = versions_with_repeat_count
+                            .iter()
+                            .zip(anchor_aligner.merged_columns())
+                            .flat_map(|(&(_, repeat_count), column)| {
+                                iter::repeat(column).take(repeat_count)
+                            })
+                            .peekable();
+
+                        let mut prev_column = None;
+                        while let Some(column) = merged_columns.next() {
+                            let prev_column = prev_column.replace(column);
+                            let next_column = merged_columns.peek().copied();
+
+                            let unchanged_line_style = pretty::Styles {
+                                desaturate_and_dim_for_unchanged_multiversion_line: true,
+                                ..Default::default()
+                            };
+
+                            // NOTE(eddyb) infinite (but limited by `zip` below),
+                            // and `Some([])`/`None` distinguishes empty/missing.
+                            let prev_lines = prev_column
+                                .iter()
+                                .flat_map(|prev| prev.lines().map(Some))
+                                .chain(iter::repeat(prev_column.map(|_| &[][..])));
+                            let next_lines = next_column
+                                .iter()
+                                .flat_map(|next| next.lines().map(Some))
+                                .chain(iter::repeat(next_column.map(|_| &[][..])));
+
+                            let lines = column.lines().zip(prev_lines).zip(next_lines).map(
+                                |((line, prev_line), next_line)| {
+                                    // FIXME(eddyb) apply a `class` instead of an inline `style`,
+                                    // and allow `:hover` to disable the desaturation/dimming.
+                                    // FIXME(eddyb) maybe indicate when lines
+                                    // were removed (red "hashed" background?).
+                                    let diff = |other: Option<_>| {
+                                        // Ignore indendation-only changes.
+                                        fn strip_indents<'a, 'b>(
+                                            mut line: &'b [TextOp<'a>],
+                                        ) -> &'b [TextOp<'a>]
+                                        {
+                                            // HACK(eddyb) also ignore helper anchors,
+                                            // which can go before indents.
+                                            while let [TextOp::Text(pretty::INDENT), rest @ ..]
+                                            | [
+                                                TextOp::PushStyles(_),
+                                                TextOp::PopStyles(_),
+                                                rest @ ..,
+                                            ] = line
+                                            {
+                                                line = rest;
+                                            }
+                                            line
+                                        }
+                                        other.map_or(false, |other| {
+                                            strip_indents(line) != strip_indents(other)
+                                        })
+                                    };
+                                    let line_style = if !diff(prev_line) && !diff(next_line) {
+                                        Some(&unchanged_line_style)
+                                    } else {
+                                        None
+                                    };
+                                    line_style
+                                        .map(TextOp::PushStyles)
+                                        .into_iter()
+                                        .chain(line.iter().copied())
+                                        .chain(line_style.map(TextOp::PopStyles))
+                                },
+                            );
+
+                            let pretty::HtmlSnippet {
+                                head_deduplicatable_elements: fragment_head,
+                                body: fragment_body,
+                            } = lines
+                                .map(Either::Left)
+                                .intersperse(Either::Right([TextOp::Text("\n")].into_iter()))
+                                .flatten()
+                                .into_internal()
+                                .collect();
+
+                            html.head_deduplicatable_elements.extend(fragment_head);
+
+                            html.body += "<td>\n";
+                            html.body += &fragment_body;
+                            html.body += "</td>\n";
+                        }
                     }
                     html.body += "</tr>\n";
                 }
@@ -293,32 +385,46 @@ impl<'a> FromInternalIterator<TextOp<'a>> for AAColumn<'a> {
     }
 }
 
+#[derive(Copy, Clone)]
+struct AAMergedColumn<'a, 'b> {
+    original_column: &'b AAColumn<'a>,
+    column_idx: usize,
+    merged_lines: &'b [AAMergedLine],
+}
+
+impl<'a, 'b> AAMergedColumn<'a, 'b> {
+    fn lines(&self) -> impl Iterator<Item = &'b [TextOp<'a>]> + '_ {
+        let column_idx = self.column_idx;
+        let line_lengths = self
+            .merged_lines
+            .iter()
+            .map(move |line| line.per_column_line_lengths[column_idx]);
+        self.original_column.lines(line_lengths)
+    }
+}
+
 impl<'a> AnchorAligner<'a> {
     /// Flatten all columns to `TextOp`s (including line separators).
-    fn merged_columns(&self) -> impl Iterator<Item = impl Iterator<Item = TextOp<'a>> + '_> {
+    fn merged_columns(&self) -> impl Iterator<Item = AAMergedColumn<'a, '_>> {
         self.original_columns
             .iter()
             .enumerate()
-            .map(|(column_idx, column)| {
-                let line_lengths = self
-                    .merged_lines
-                    .iter()
-                    .map(move |line| line.per_column_line_lengths[column_idx]);
+            .map(|(column_idx, original_column)| {
+                let mut merged_lines = &self.merged_lines[..];
 
-                // HACK(eddyb) trim all trailing empty lines (which is done on
-                // a `peekable` of the reverse, followed by reversing *again*,
-                // equivalent to a hypothetical `peekable_back` and no reversing).
-                let mut rev_line_lengths = line_lengths.rev().peekable();
-                while rev_line_lengths.peek() == Some(&0) {
-                    rev_line_lengths.next().unwrap();
+                // Trim all trailing lines that are empty in this column.
+                while let Some((last, before_last)) = merged_lines.split_last() {
+                    if last.per_column_line_lengths[column_idx] > 0 {
+                        break;
+                    }
+                    merged_lines = before_last;
                 }
-                let line_lengths = rev_line_lengths.rev();
 
-                column
-                    .lines(line_lengths)
-                    .intersperse(&[TextOp::Text("\n")])
-                    .flatten()
-                    .copied()
+                AAMergedColumn {
+                    original_column,
+                    column_idx,
+                    merged_lines,
+                }
             })
     }
 

@@ -80,6 +80,9 @@ pub struct Styles {
 
     pub subscript: bool,
     pub superscript: bool,
+
+    // FIXME(eddyb) maybe a more general `filter` system would be better?
+    pub desaturate_and_dim_for_unchanged_multiversion_line: bool,
 }
 
 impl Styles {
@@ -352,6 +355,7 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                         size,
                         subscript: _,
                         superscript: _,
+                        desaturate_and_dim_for_unchanged_multiversion_line,
                     } = *styles;
 
                     if let Some(id) = anchor {
@@ -375,6 +379,9 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                     }
                     if let Some(size) = size {
                         write!(css_style, "font-size:{}em;", 1.0 + (size as f64) * 0.1).unwrap();
+                    }
+                    if desaturate_and_dim_for_unchanged_multiversion_line {
+                        write!(css_style, "filter:saturate(0.3)opacity(0.5);").unwrap();
                     }
                     if !css_style.is_empty() {
                         push_attr("style", &css_style);
@@ -487,7 +494,7 @@ struct MaxWidths {
 }
 
 // FIXME(eddyb) make this configurable.
-const INDENT: &str = "  ";
+pub(super) const INDENT: &str = "  ";
 
 impl Node {
     /// Determine the "rigid" component of the [`ApproxLayout`] of this [`Node`].
@@ -837,7 +844,7 @@ impl Fragment {
 }
 
 /// Text-oriented operation (plain text snippets interleaved with style push/pop).
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub(super) enum TextOp<'a> {
     PushStyles(&'a Styles),
     PopStyles(&'a Styles),

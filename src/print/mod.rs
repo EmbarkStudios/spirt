@@ -465,6 +465,9 @@ impl Visit for AllCxInterned {
     fn visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {}
 }
 
+// FIXME(eddyb) make max line width configurable.
+const MAX_LINE_WIDTH: usize = 120;
+
 impl Plan<'_> {
     #[allow(rustdoc::private_intra_doc_links)]
     /// Print the whole [`Plan`] to a [`Versions<pretty::Fragment>`] and perform
@@ -474,11 +477,8 @@ impl Plan<'_> {
     /// [`fmt::Display`] for convenience, but also more specific methods
     /// (e.g. HTML output).
     pub fn pretty_print(&self) -> Versions<pretty::FragmentPostLayout> {
-        // FIXME(eddyb) make max line width configurable.
-        let max_line_width = 120;
-
         self.print(&Printer::new(self))
-            .map_pretty_fragments(|fragment| fragment.layout_with_max_line_width(max_line_width))
+            .map_pretty_fragments(|fragment| fragment.layout_with_max_line_width(MAX_LINE_WIDTH))
     }
 }
 
