@@ -20,6 +20,7 @@
 use itertools::Itertools as _;
 
 use crate::func_at::FuncAt;
+use crate::print::multiversion::Versions;
 use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
@@ -32,9 +33,9 @@ use crate::{
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
-use std::fmt::Write;
-use std::{fmt, mem};
+use std::mem;
 
+mod multiversion;
 mod pretty;
 
 /// "Definitions-before-uses" / "topo-sorted" printing plan.
@@ -182,6 +183,12 @@ enum Use {
         output_idx: u32,
     },
     DataInstOutput(DataInst),
+
+    // NOTE(eddyb) these overlap somewhat with other cases, but they're always
+    // generated, even when there is no "use", for `multiversion` alignment.
+    AlignmentAnchorForControlRegion(ControlRegion),
+    AlignmentAnchorForControlNode(ControlNode),
+    AlignmentAnchorForDataInst(DataInst),
 }
 
 impl From<Value> for Use {
@@ -204,14 +211,24 @@ impl From<Value> for Use {
 }
 
 impl Use {
+    // HACK(eddyb) this is used in `AttrsAndDef::insert_name_before_def` to
+    // detect alignment anchors specifically, so it needs to not overlap with
+    // any other category name.
+    const ANCHOR_ALIGNMENT_CATEGORY: &str = "AA";
+
     fn category(self) -> &'static str {
         match self {
             Self::Node(node) => node.category().unwrap(),
             Self::CxInterned(interned) => interned.category(),
             Self::ControlRegionLabel(_) => "label",
+
             Self::ControlRegionInput { .. }
             | Self::ControlNodeOutput { .. }
             | Self::DataInstOutput(_) => "v",
+
+            Self::AlignmentAnchorForControlRegion(_)
+            | Self::AlignmentAnchorForControlNode(_)
+            | Self::AlignmentAnchorForDataInst(_) => Self::ANCHOR_ALIGNMENT_CATEGORY,
         }
     }
 }
@@ -448,197 +465,8 @@ impl Visit for AllCxInterned {
     fn visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {}
 }
 
-#[allow(rustdoc::private_intra_doc_links)]
-/// Wrapper for handling the difference between single-version and multi-version
-/// output, which aren't expressible in [`pretty::Fragment`].
-//
-// FIXME(eddyb) introduce a `pretty::Node` variant capable of handling this,
-// but that's complicated wrt non-HTML output, if they're to also be 2D tables.
-pub enum Versions<PF> {
-    Single(PF),
-    Multiple {
-        // FIXME(eddyb) avoid allocating this if possible.
-        version_names: Vec<String>,
-
-        /// Each node has definitions "tagged" with an `usize` indicating the
-        /// number of versions that share that definition, aka "repeat count"
-        /// (i.e. "repeat counts" larger than `1` indicate deduplication).
-        per_node_versions_with_repeat_count: Vec<SmallVec<[(PF, usize); 1]>>,
-    },
-}
-
-impl fmt::Display for Versions<pretty::FragmentPostLayout> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Single(fragment) => fragment.fmt(f),
-            Self::Multiple {
-                version_names,
-                per_node_versions_with_repeat_count,
-            } => {
-                let mut first = true;
-
-                // HACK(eddyb) this is not the nicest output, but multi-version
-                // is intended for HTML input primarily anyway.
-                for versions_with_repeat_count in per_node_versions_with_repeat_count {
-                    if !first {
-                        writeln!(f)?;
-                    }
-                    first = false;
-
-                    let mut next_version_idx = 0;
-                    let mut any_headings = false;
-                    for (fragment, repeat_count) in versions_with_repeat_count {
-                        // No headings for anything uniform across versions.
-                        if (next_version_idx, *repeat_count) != (0, version_names.len()) {
-                            any_headings = true;
-
-                            if next_version_idx == 0 {
-                                write!(f, "//#IF ")?;
-                            } else {
-                                write!(f, "//#ELSEIF ")?;
-                            }
-                            let mut first_name = true;
-                            for name in &version_names[next_version_idx..][..*repeat_count] {
-                                if !first_name {
-                                    write!(f, " | ")?;
-                                }
-                                first_name = false;
-
-                                write!(f, "`{name}`")?;
-                            }
-                            writeln!(f)?;
-                        }
-
-                        writeln!(f, "{fragment}")?;
-
-                        next_version_idx += repeat_count;
-                    }
-                    if any_headings {
-                        writeln!(f, "//#ENDIF")?;
-                    }
-                }
-
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Versions<pretty::FragmentPostLayout> {
-    // FIXME(eddyb) provide a non-allocating version.
-    pub fn render_to_html(&self) -> pretty::HtmlSnippet {
-        match self {
-            Self::Single(fragment) => fragment.render_to_html(),
-            Self::Multiple {
-                version_names,
-                per_node_versions_with_repeat_count,
-            } => {
-                // HACK(eddyb) using an UUID as a class name in lieu of "scoped <style>".
-                const TABLE_CLASS_NAME: &str = "spirt-table-90c2056d-5b38-4644-824a-b4be1c82f14d";
-
-                let mut html = pretty::HtmlSnippet::default();
-                html.head_deduplicatable_elements.insert(
-                    "
-<style>
-    SCOPE {
-        min-width: 100%;
-
-        border-collapse: collapse;
-    }
-    SCOPE>tbody>tr>*:not(:only-child) {
-        border: solid 1px;
-    }
-    SCOPE>tbody>tr>th {
-        /* HACK(eddyb) these are relative to `pretty`'s own HTML styles. */
-        font-size: 17px;
-        font-weight: 700;
-
-        font-style: italic;
-    }
-    SCOPE>tbody>tr>td {
-        vertical-align: top;
-
-        /* HACK(eddyb) force local scroll when table isn't wide enough. */
-        max-width: 40ch;
-    }
-    SCOPE>tbody>tr>td>pre {
-        overflow-x: auto;
-    }
-</style>
-        "
-                    .replace("SCOPE", &format!("table.{TABLE_CLASS_NAME}")),
-                );
-
-                let headings = {
-                    let mut h = "<tr>".to_string();
-                    for name in version_names {
-                        write!(h, "<th><code>{name}</code></th>").unwrap();
-                    }
-                    h + "</tr>\n"
-                };
-
-                html.body = format!("<table class=\"{TABLE_CLASS_NAME}\">\n");
-                let mut last_was_uniform = true;
-                for versions_with_repeat_count in per_node_versions_with_repeat_count {
-                    let is_uniform = match versions_with_repeat_count[..] {
-                        [(_, repeat_count)] => repeat_count == version_names.len(),
-                        _ => false,
-                    };
-
-                    if last_was_uniform && is_uniform {
-                        // Headings unnecessary, they would be between uniform
-                        // rows (or at the very start, before an uniform row).
-                    } else {
-                        // Repeat the headings often, where necessary.
-                        html.body += &headings;
-                    }
-                    last_was_uniform = is_uniform;
-
-                    html.body += "<tr>\n";
-                    for (fragment, repeat_count) in versions_with_repeat_count {
-                        writeln!(html.body, "<td colspan=\"{repeat_count}\">").unwrap();
-
-                        let pretty::HtmlSnippet {
-                            head_deduplicatable_elements: fragment_head,
-                            body: fragment_body,
-                        } = fragment.render_to_html();
-                        html.head_deduplicatable_elements.extend(fragment_head);
-                        html.body += &fragment_body;
-
-                        html.body += "</td>\n";
-                    }
-                    html.body += "</tr>\n";
-                }
-                html.body += "</table>";
-
-                html
-            }
-        }
-    }
-}
-
-impl<PF> Versions<PF> {
-    fn map_pretty_fragments<PF2>(self, f: impl Fn(PF) -> PF2) -> Versions<PF2> {
-        match self {
-            Versions::Single(fragment) => Versions::Single(f(fragment)),
-            Versions::Multiple {
-                version_names,
-                per_node_versions_with_repeat_count,
-            } => Versions::Multiple {
-                version_names,
-                per_node_versions_with_repeat_count: per_node_versions_with_repeat_count
-                    .into_iter()
-                    .map(|versions_with_repeat_count| {
-                        versions_with_repeat_count
-                            .into_iter()
-                            .map(|(fragment, repeat_count)| (f(fragment), repeat_count))
-                            .collect()
-                    })
-                    .collect(),
-            },
-        }
-    }
-}
+// FIXME(eddyb) make max line width configurable.
+const MAX_LINE_WIDTH: usize = 100;
 
 impl Plan<'_> {
     #[allow(rustdoc::private_intra_doc_links)]
@@ -649,11 +477,8 @@ impl Plan<'_> {
     /// [`fmt::Display`] for convenience, but also more specific methods
     /// (e.g. HTML output).
     pub fn pretty_print(&self) -> Versions<pretty::FragmentPostLayout> {
-        // FIXME(eddyb) make max line width configurable.
-        let max_line_width = 120;
-
         self.print(&Printer::new(self))
-            .map_pretty_fragments(|fragment| fragment.layout_with_max_line_width(max_line_width))
+            .map_pretty_fragments(|fragment| fragment.layout_with_max_line_width(MAX_LINE_WIDTH))
     }
 }
 
@@ -778,7 +603,10 @@ impl<'a> Printer<'a> {
                     Use::ControlRegionLabel(_)
                     | Use::ControlRegionInput { .. }
                     | Use::ControlNodeOutput { .. }
-                    | Use::DataInstOutput(_) => {
+                    | Use::DataInstOutput(_)
+                    | Use::AlignmentAnchorForControlRegion(_)
+                    | Use::AlignmentAnchorForControlNode(_)
+                    | Use::AlignmentAnchorForDataInst(_) => {
                         unreachable!()
                     }
                 };
@@ -792,6 +620,7 @@ impl<'a> Printer<'a> {
                         Use::CxInterned(CxInterned::Const(_)) => &mut ac.consts,
                         Use::Node(Node::GlobalVar(_)) => &mut ac.global_vars,
                         Use::Node(Node::Func(_)) => &mut ac.funcs,
+
                         Use::Node(
                             Node::Root
                             | Node::AllCxInterned
@@ -801,7 +630,10 @@ impl<'a> Printer<'a> {
                         | Use::ControlRegionLabel(_)
                         | Use::ControlRegionInput { .. }
                         | Use::ControlNodeOutput { .. }
-                        | Use::DataInstOutput(_) => {
+                        | Use::DataInstOutput(_)
+                        | Use::AlignmentAnchorForControlRegion(_)
+                        | Use::AlignmentAnchorForControlNode(_)
+                        | Use::AlignmentAnchorForDataInst(_) => {
                             unreachable!()
                         }
                     };
@@ -831,16 +663,32 @@ impl<'a> Printer<'a> {
 
             let mut control_region_label_counter = 0;
             let mut value_counter = 0;
+            let mut alignment_anchor_counter = 0;
 
-            // Assign a new label/value index, but only if:
-            // * the definition is actually used
+            // Assign a new label/value/alignment-anchor index, but only if:
+            // * the definition is actually used (except for alignment anchors)
             // * it doesn't already have an index (e.g. from a previous version)
-            let mut define_label_or_value = |use_kind: Use| {
-                if let Some(use_style @ UseStyle::Inline) = use_styles.get_mut(&use_kind) {
-                    let counter = match use_kind {
-                        Use::ControlRegionLabel(_) => &mut control_region_label_counter,
-                        _ => &mut value_counter,
-                    };
+            let mut define = |use_kind: Use| {
+                let (counter, use_style_slot) = match use_kind {
+                    Use::ControlRegionLabel(_) => (
+                        &mut control_region_label_counter,
+                        use_styles.get_mut(&use_kind),
+                    ),
+
+                    Use::ControlRegionInput { .. }
+                    | Use::ControlNodeOutput { .. }
+                    | Use::DataInstOutput(_) => (&mut value_counter, use_styles.get_mut(&use_kind)),
+
+                    Use::AlignmentAnchorForControlRegion(_)
+                    | Use::AlignmentAnchorForControlNode(_)
+                    | Use::AlignmentAnchorForDataInst(_) => (
+                        &mut alignment_anchor_counter,
+                        Some(use_styles.entry(use_kind).or_insert(UseStyle::Inline)),
+                    ),
+
+                    _ => unreachable!(),
+                };
+                if let Some(use_style @ UseStyle::Inline) = use_style_slot {
                     let idx = *counter;
                     *counter += 1;
                     *use_style = UseStyle::Anon {
@@ -868,7 +716,8 @@ impl<'a> Printer<'a> {
                 let visit_region = |func_at_region: FuncAt<'_, ControlRegion>| {
                     let region = func_at_region.position;
 
-                    define_label_or_value(Use::ControlRegionLabel(region));
+                    define(Use::AlignmentAnchorForControlRegion(region));
+                    define(Use::ControlRegionLabel(region));
 
                     let ControlRegionDef {
                         inputs,
@@ -877,7 +726,7 @@ impl<'a> Printer<'a> {
                     } = func_def_body.at(region).def();
 
                     for (i, _) in inputs.iter().enumerate() {
-                        define_label_or_value(Use::ControlRegionInput {
+                        define(Use::ControlRegionInput {
                             region,
                             input_idx: i.try_into().unwrap(),
                         });
@@ -885,20 +734,22 @@ impl<'a> Printer<'a> {
 
                     for func_at_control_node in func_def_body.at(*children) {
                         let control_node = func_at_control_node.position;
+
+                        define(Use::AlignmentAnchorForControlNode(control_node));
+
                         let ControlNodeDef { kind, outputs } = func_at_control_node.def();
 
                         if let ControlNodeKind::Block { insts } = *kind {
                             for func_at_inst in func_def_body.at(insts) {
+                                define(Use::AlignmentAnchorForDataInst(func_at_inst.position));
                                 if func_at_inst.def().output_type.is_some() {
-                                    define_label_or_value(Use::DataInstOutput(
-                                        func_at_inst.position,
-                                    ));
+                                    define(Use::DataInstOutput(func_at_inst.position));
                                 }
                             }
                         }
 
                         for (i, _) in outputs.iter().enumerate() {
-                            define_label_or_value(Use::ControlNodeOutput {
+                            define(Use::ControlNodeOutput {
                                 control_node,
                                 output_idx: i.try_into().unwrap(),
                             });
@@ -1195,20 +1046,69 @@ impl AttrsAndDef {
         } = self;
 
         let mut maybe_hoisted_anchor = pretty::Fragment::default();
+        let mut maybe_def_start_anchor = pretty::Fragment::default();
+        let mut maybe_def_end_anchor = pretty::Fragment::default();
         let mut name = name.into();
-        if let [pretty::Node::StyledText(ref mut styles_and_text), ..] = name.nodes[..] {
-            let styles = &mut styles_and_text.0;
-            if !attrs.nodes.is_empty() && mem::take(&mut styles.anchor_is_def) {
-                maybe_hoisted_anchor = pretty::Styles {
-                    anchor: styles.anchor.clone(),
-                    anchor_is_def: true,
-                    ..Default::default()
+        if let [pretty::Node::StyledText(name_start_styles_and_text), ..] = &mut name.nodes[..] {
+            let name_start_styles = &mut name_start_styles_and_text.0;
+            if name_start_styles.anchor_is_def {
+                let anchor = name_start_styles.anchor.as_ref().unwrap();
+                if !attrs.nodes.is_empty() {
+                    name_start_styles.anchor_is_def = false;
+                    maybe_hoisted_anchor = pretty::Styles {
+                        anchor: Some(anchor.clone()),
+                        anchor_is_def: true,
+                        ..Default::default()
+                    }
+                    .apply("")
+                    .into();
                 }
-                .apply("")
-                .into();
+
+                // HACK(eddyb) add a pair of anchors "bracketing" the definition
+                // (though see below for why only the "start" side is currently
+                // in use), to help with `multiversion` alignment, as long as
+                // there's no alignment anchor already starting the definition.
+                let has_alignment_anchor = match &def_without_name.nodes[..] {
+                    [pretty::Node::StyledText(def_start_styles_and_text), ..] => {
+                        let (def_start_styles, def_start_text) = &**def_start_styles_and_text;
+                        def_start_text == ""
+                            && def_start_styles.anchor_is_def
+                            && def_start_styles
+                                .anchor
+                                .as_ref()
+                                .unwrap()
+                                .contains(Use::ANCHOR_ALIGNMENT_CATEGORY)
+                    }
+                    _ => false,
+                };
+                let mk_anchor_def = |suffix| {
+                    pretty::Styles {
+                        anchor: Some(format!("{anchor}.{suffix}")),
+                        anchor_is_def: true,
+                        ..Default::default()
+                    }
+                    .apply("")
+                    .into()
+                };
+                if !has_alignment_anchor {
+                    maybe_def_start_anchor = mk_anchor_def("start");
+                    // FIXME(eddyb) having end alignment may be useful, but the
+                    // current logic in `multiversion` would prefer aligning
+                    // the ends, to the detriment of the rest (causing huge gaps).
+                    if false {
+                        maybe_def_end_anchor = mk_anchor_def("end");
+                    }
+                }
             }
         }
-        pretty::Fragment::new([maybe_hoisted_anchor, attrs, name, def_without_name])
+        pretty::Fragment::new([
+            maybe_hoisted_anchor,
+            attrs,
+            name,
+            maybe_def_start_anchor,
+            def_without_name,
+            maybe_def_end_anchor,
+        ])
     }
 }
 
@@ -1280,6 +1180,11 @@ impl Use {
                     Self::CxInterned(CxInterned::AttrSet(_)) => {
                         (format!("#{name}"), printer.attr_style())
                     }
+
+                    Self::AlignmentAnchorForControlRegion(_)
+                    | Self::AlignmentAnchorForControlNode(_)
+                    | Self::AlignmentAnchorForDataInst(_) => ("".to_string(), Default::default()),
+
                     _ => (name, Default::default()),
                 };
                 let name = pretty::Styles {
@@ -1311,6 +1216,10 @@ impl Use {
                 | Self::ControlRegionInput { .. }
                 | Self::ControlNodeOutput { .. }
                 | Self::DataInstOutput(_) => "_".into(),
+
+                Self::AlignmentAnchorForControlRegion(_)
+                | Self::AlignmentAnchorForControlNode(_)
+                | Self::AlignmentAnchorForDataInst(_) => unreachable!(),
             },
         }
     }
@@ -1439,7 +1348,7 @@ impl Print for Plan<'_> {
                     .iter()
                     .map(|(name, _)| name.clone())
                     .collect(),
-                per_node_versions_with_repeat_count: per_node_versions_with_repeat_count.collect(),
+                per_row_versions_with_repeat_count: per_node_versions_with_repeat_count.collect(),
             }
         }
     }
@@ -2318,6 +2227,7 @@ impl Print for FuncAt<'_, ControlRegion> {
         };
 
         pretty::Fragment::new([
+            Use::AlignmentAnchorForControlRegion(self.position).print_as_def(printer),
             self.at(*children).into_iter().print(printer),
             outputs_footer,
         ])
@@ -2373,7 +2283,14 @@ impl Print for FuncAt<'_, ControlNode> {
                         .into_iter()
                         .map(|func_at_inst| {
                             let data_inst_def = func_at_inst.def();
-                            data_inst_def.print(printer).insert_name_before_def(
+                            let mut data_inst_attrs_and_def = data_inst_def.print(printer);
+                            // FIXME(eddyb) this is quite verbose for prepending.
+                            data_inst_attrs_and_def.def_without_name = pretty::Fragment::new([
+                                Use::AlignmentAnchorForDataInst(func_at_inst.position)
+                                    .print_as_def(printer),
+                                data_inst_attrs_and_def.def_without_name,
+                            ]);
+                            data_inst_attrs_and_def.insert_name_before_def(
                                 if data_inst_def.output_type.is_none() {
                                     pretty::Fragment::default()
                                 } else {
@@ -2484,7 +2401,11 @@ impl Print for FuncAt<'_, ControlNode> {
                 ])
             }
         };
-        pretty::Fragment::new([outputs_header, control_node_body])
+        pretty::Fragment::new([
+            Use::AlignmentAnchorForControlNode(self.position).print_as_def(printer),
+            outputs_header,
+            control_node_body,
+        ])
     }
 }
 
