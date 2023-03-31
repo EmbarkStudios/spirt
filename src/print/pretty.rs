@@ -708,6 +708,10 @@ enum LineOp<'a> {
     PushStyles(&'a Styles),
     PopStyles(&'a Styles),
 
+    // HACK(eddyb) `PushStyles`+`PopStyles`, indicating no visible text is needed
+    // (i.e. this is only for helper anchors, which only need vertical positioning).
+    StyledEmptyText(&'a Styles),
+
     AppendToLine(&'a str),
     StartNewLine,
     BreakIfWithinLine(Break),
@@ -772,8 +776,12 @@ impl Node {
                 text_render_to_line_ops(None, text).try_for_each(each_line_op)?;
             }
             Self::StyledText(styles_and_text) => {
-                text_render_to_line_ops(Some(&styles_and_text.0), &styles_and_text.1)
-                    .try_for_each(each_line_op)?;
+                let (styles, text) = &**styles_and_text;
+                if text.is_empty() {
+                    each_line_op(LineOp::StyledEmptyText(styles))?;
+                } else {
+                    text_render_to_line_ops(Some(styles), text).try_for_each(each_line_op)?;
+                }
             }
 
             Self::IndentedBlock(fragments) => {
@@ -864,14 +872,35 @@ impl<'a> LineOp<'a> {
     ) -> ControlFlow<T> {
         let mut indent = 0;
 
-        // When `on_empty_new_line` is `true`, a new line was started, but
-        // lacks text, so the `LineOp::AppendToLine { indent_before, text }`
-        // first on that line (with non-empty `text`) needs to materialize
-        // `indent_before` levels of indentation (before its `text` content).
-        //
-        // NOTE(eddyb) indentation is not immediatelly materialized in order
-        // to avoid trailing whitespace on otherwise-empty lines.
-        let mut on_empty_new_line = true;
+        enum LineState {
+            /// This line was just started, lacking any text.
+            ///
+            /// The first (non-empty) `LineOp::AppendToLine` on that line, or
+            /// `LineOp::PushStyles`/`LineOp::PopStyles`, needs to materialize
+            /// `indent` levels of indentation (before emitting its `TextOp`s).
+            //
+            // NOTE(eddyb) indentation is not immediatelly materialized in order
+            // to avoid trailing whitespace on otherwise-empty lines.
+            Empty,
+
+            /// This line has `indent_so_far` levels of indentation, and may have
+            /// styling applied to it, but lacks any other text.
+            ///
+            /// Only used by `LineOp::StyledEmptyText` (i.e. helper anchors),
+            /// to avoid them adding trailing-whitespace-only lines.
+            //
+            // NOTE(eddyb) the new line is started by `StyledEmptyText` so that
+            // there remains separation with the previous (unrelated) line,
+            // whereas the following lines are very likely related to the
+            // helper anchor (but if that changes, this would need to be fixed).
+            // HACK(eddyb) `StyledEmptyText` uses `indent_so_far: 0` to
+            // allow lower-indentation text to follow on the same line.
+            OnlyIndentedOrStyled { indent_so_far: usize },
+
+            /// This line has had text emitted (other than indentation).
+            HasText,
+        }
+        let mut line_state = LineState::Empty;
 
         // Deferred `LineOp::BreakIfWithinLine`, which will be materialized
         // only between two consecutive `LineOp::AppendToLine { text, .. }`
@@ -884,22 +913,59 @@ impl<'a> LineOp<'a> {
                 return ControlFlow::Continue(());
             }
 
-            if let LineOp::AppendToLine(_) | LineOp::PushStyles(_) = op {
-                let need_indent = match pending_break_if_within_line.take() {
-                    Some(br) => {
-                        each_text_op(TextOp::Text(match br {
-                            Break::Space => " ",
-                            Break::NewLine => "\n",
-                        }))?;
-                        matches!(br, Break::NewLine)
+            if let LineOp::AppendToLine(_)
+            | LineOp::PushStyles(_)
+            | LineOp::PopStyles(_)
+            | LineOp::StyledEmptyText(_) = op
+            {
+                if let Some(br) = pending_break_if_within_line.take() {
+                    each_text_op(TextOp::Text(match br {
+                        Break::Space => " ",
+                        Break::NewLine => "\n",
+                    }))?;
+                    if matches!(br, Break::NewLine) {
+                        line_state = LineState::Empty;
                     }
-                    None => on_empty_new_line,
+                }
+
+                let target_indent = match line_state {
+                    // HACK(eddyb) `StyledEmptyText` uses `indent_so_far: 0` to
+                    // allow lower-indentation text to follow on the same line.
+                    LineState::Empty | LineState::OnlyIndentedOrStyled { indent_so_far: 0 }
+                        if matches!(op, LineOp::StyledEmptyText(_)) =>
+                    {
+                        Some(0)
+                    }
+
+                    LineState::Empty | LineState::OnlyIndentedOrStyled { .. } => Some(indent),
+                    LineState::HasText => None,
                 };
-                if need_indent {
-                    for _ in 0..indent {
+
+                if let Some(target_indent) = target_indent {
+                    let indent_so_far = match line_state {
+                        LineState::Empty => 0,
+
+                        // FIXME(eddyb) `StyledEmptyText` doesn't need this, so this
+                        // is perhaps unnecessarily over-engineered? (see above)
+                        LineState::OnlyIndentedOrStyled { indent_so_far } => {
+                            // Disallow reusing lines already indented too much.
+                            if indent_so_far > target_indent {
+                                each_text_op(TextOp::Text("\n"))?;
+                                line_state = LineState::Empty;
+                                0
+                            } else {
+                                indent_so_far
+                            }
+                        }
+
+                        LineState::HasText => unreachable!(),
+                    };
+                    for _ in indent_so_far..target_indent {
                         each_text_op(TextOp::Text(INDENT))?;
                     }
-                    on_empty_new_line = false;
+                    line_state = LineState::OnlyIndentedOrStyled {
+                        indent_so_far: target_indent,
+                    };
                 }
             }
 
@@ -916,17 +982,33 @@ impl<'a> LineOp<'a> {
                 LineOp::PushStyles(styles) => each_text_op(TextOp::PushStyles(styles))?,
                 LineOp::PopStyles(styles) => each_text_op(TextOp::PopStyles(styles))?,
 
-                LineOp::AppendToLine(text) => each_text_op(TextOp::Text(text))?,
+                LineOp::StyledEmptyText(styles) => {
+                    each_text_op(TextOp::PushStyles(styles))?;
+                    each_text_op(TextOp::PopStyles(styles))?;
+                }
+
+                LineOp::AppendToLine(text) => {
+                    each_text_op(TextOp::Text(text))?;
+
+                    line_state = LineState::HasText;
+                }
 
                 LineOp::StartNewLine => {
                     each_text_op(TextOp::Text("\n"))?;
 
-                    on_empty_new_line = true;
+                    line_state = LineState::Empty;
                     pending_break_if_within_line = None;
                 }
 
                 LineOp::BreakIfWithinLine(br) => {
-                    if !on_empty_new_line {
+                    let elide = match line_state {
+                        LineState::Empty => true,
+                        LineState::OnlyIndentedOrStyled { indent_so_far } => {
+                            indent_so_far <= indent
+                        }
+                        LineState::HasText => false,
+                    };
+                    if !elide {
                         // Merge two pending `Break`s if necessary,
                         // preferring newlines over spaces.
                         let br = match (pending_break_if_within_line, br) {
