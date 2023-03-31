@@ -410,9 +410,18 @@ impl<'a> AnchorAligner<'a> {
             // any others that cannot be relevant anymore - this can occur when
             // multiple anchors coincide on the same line.
             while let Some((anchor_old, anchor_new)) = next_anchor {
-                let obsolete = old_line_idx.map_or(false, |old| old > anchor_old)
-                    || new_line_idx.map_or(false, |new| new > anchor_new);
-                if !obsolete {
+                // NOTE(eddyb) noop anchors (i.e. those describing an alignment
+                // between "old" and "new", which has already beeing reached)
+                // are not considered "relevant" here, and "misalignments" are
+                // preferred instead - the outcome is mostly identical to always
+                // eagerly processing noop anchors, except when another anchor
+                // is overlapping (in only one of "old" or "new"), as it will
+                // only get get processed if the noop one is skipped first.
+                let relevant = match (old_line_idx, new_line_idx) {
+                    (Some(old), Some(new)) => old < anchor_old || new < anchor_new,
+                    _ => false,
+                };
+                if relevant {
                     break;
                 }
                 monotonic_common_anchors.next().unwrap();
