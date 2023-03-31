@@ -466,7 +466,7 @@ impl Visit for AllCxInterned {
 }
 
 // FIXME(eddyb) make max line width configurable.
-const MAX_LINE_WIDTH: usize = 120;
+const MAX_LINE_WIDTH: usize = 100;
 
 impl Plan<'_> {
     #[allow(rustdoc::private_intra_doc_links)]
