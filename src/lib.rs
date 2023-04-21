@@ -169,6 +169,7 @@ pub mod passes {
 pub mod spv;
 
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 // HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
@@ -290,6 +291,45 @@ pub struct AttrSetDef {
     pub attrs: BTreeSet<Attr>,
 }
 
+impl AttrSetDef {
+    pub fn push_diag(&mut self, diag: Diag) {
+        // FIXME(eddyb) seriously consider moving to `BTreeMap` (see above).
+        // HACK(eddyb) this assumes `Attr::Diagnostics` is the last of `Attr`!
+        let mut attr = if let Some(Attr::Diagnostics(_)) = self.attrs.last() {
+            self.attrs.pop_last().unwrap()
+        } else {
+            Attr::Diagnostics(OrdAssertEq(vec![]))
+        };
+        match &mut attr {
+            Attr::Diagnostics(OrdAssertEq(diags)) => diags.push(diag),
+            _ => unreachable!(),
+        }
+        self.attrs.insert(attr);
+    }
+
+    // FIXME(eddyb) should this be hidden in favor of `AttrSet::append_diag`?
+    pub fn append_diag(&self, diag: Diag) -> Self {
+        let mut new_attrs = Self {
+            attrs: self.attrs.clone(),
+        };
+        new_attrs.push_diag(diag);
+        new_attrs
+    }
+}
+
+// FIXME(eddyb) should these methods be elsewhere?
+impl AttrSet {
+    // FIXME(eddyb) should this be hidden in favor of `push_diag`?
+    // FIXME(eddyb) should these methods always take multiple values?
+    pub fn append_diag(self, cx: &Context, diag: Diag) -> Self {
+        cx.intern(cx[self].append_diag(diag))
+    }
+
+    pub fn push_diag(&mut self, cx: &Context, diag: Diag) {
+        *self = self.append_diag(cx, diag);
+    }
+}
+
 /// Any semantic or non-semantic (debuginfo) decoration/modifier, that can be
 /// *optionally* applied to some declaration/definition.
 ///
@@ -310,6 +350,99 @@ pub enum Attr {
     /// that is effectively an optimization over using `OpDecorate`.
     // FIXME(eddyb) handle flags having further operands as parameters.
     SpvBitflagsOperand(spv::Imm),
+
+    /// Can be used anywhere to record [`Diag`]nostics produced during a pass,
+    /// while allowing the pass to continue (and its output to be pretty-printed).
+    //
+    // HACK(eddyb) this is the last variant to control printing order, but also
+    // to make `push_diag`/`append_diag` above work correctly!
+    Diagnostics(OrdAssertEq<Vec<Diag>>),
+}
+
+/// Diagnostics produced by SPIR-T passes, and recorded in [`Attr::Diagnostics`].
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Diag {
+    pub level: DiagLevel,
+    // FIXME(eddyb) this may want to be `SmallVec` and/or `Rc`?
+    pub message: Vec<DiagMsgPart>,
+}
+
+impl Diag {
+    pub fn new(level: DiagLevel, message: impl IntoIterator<Item = DiagMsgPart>) -> Self {
+        Self {
+            level,
+            message: message.into_iter().collect(),
+        }
+    }
+
+    // FIMXE(eddyb) make macros more ergonomic than this, for interpolation.
+    #[track_caller]
+    pub fn bug(message: impl IntoIterator<Item = DiagMsgPart>) -> Self {
+        Self::new(DiagLevel::Bug(std::panic::Location::caller()), message)
+    }
+
+    pub fn err(message: impl IntoIterator<Item = DiagMsgPart>) -> Self {
+        Self::new(DiagLevel::Error, message)
+    }
+
+    pub fn warn(message: impl IntoIterator<Item = DiagMsgPart>) -> Self {
+        Self::new(DiagLevel::Warning, message)
+    }
+}
+
+/// The "severity" level of a [`Diag`]nostic.
+///
+/// Note: `Bug` diagnostics track their emission point for easier identification.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum DiagLevel {
+    Bug(&'static std::panic::Location<'static>),
+    Error,
+    Warning,
+}
+
+/// One part of a [`Diag`]nostic message, allowing rich interpolation.
+///
+/// Note: [`visit::Visitor`] and [`transform::Transformer`] *do not* interact
+/// with any interpolated information, and it's instead treated as "frozen" data.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum DiagMsgPart {
+    Plain(Cow<'static, str>),
+
+    // FIXME(eddyb) use `dyn Trait` instead of listing out a few cases.
+    Attrs(AttrSet),
+    Type(Type),
+    Const(Const),
+}
+
+// FIXME(eddyb) move this out of `lib.rs` and/or define with a macro.
+impl From<&'static str> for DiagMsgPart {
+    fn from(s: &'static str) -> Self {
+        Self::Plain(s.into())
+    }
+}
+
+impl From<String> for DiagMsgPart {
+    fn from(s: String) -> Self {
+        Self::Plain(s.into())
+    }
+}
+
+impl From<AttrSet> for DiagMsgPart {
+    fn from(attrs: AttrSet) -> Self {
+        Self::Attrs(attrs)
+    }
+}
+
+impl From<Type> for DiagMsgPart {
+    fn from(ty: Type) -> Self {
+        Self::Type(ty)
+    }
+}
+
+impl From<Const> for DiagMsgPart {
+    fn from(ct: Const) -> Self {
+        Self::Const(ct)
+    }
 }
 
 /// Wrapper to limit `Ord` for interned index types (e.g. [`InternedStr`])

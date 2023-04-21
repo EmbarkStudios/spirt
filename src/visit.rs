@@ -4,10 +4,10 @@ use crate::func_at::FuncAt;
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
-    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, DiagMsgPart, EntityListIter,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type,
+    TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -27,7 +27,7 @@ pub trait Visitor<'a>: Sized {
     // Leaves (noop default behavior).
     fn visit_spv_dialect(&mut self, _dialect: &spv::Dialect) {}
     fn visit_spv_module_debug_info(&mut self, _debug_info: &spv::ModuleDebugInfo) {}
-    fn visit_attr(&mut self, _attr: &Attr) {}
+    fn visit_attr(&mut self, _attr: &'a Attr) {}
     fn visit_import(&mut self, _import: &Import) {}
 
     // Non-leaves (defaulting to calling `.inner_visit_with(self)`).
@@ -83,6 +83,7 @@ macro_rules! impl_visit {
     (
         by_val { $($by_val_method:ident($by_val_ty:ty)),* $(,)? }
         by_ref { $($by_ref_method:ident($by_ref_ty:ty)),* $(,)? }
+        forward_to_inner_visit { $($forward_to_inner_visit_ty:ty),* $(,)? }
     ) => {
         $(impl Visit for $by_val_ty {
             fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
@@ -92,6 +93,11 @@ macro_rules! impl_visit {
         $(impl Visit for $by_ref_ty {
             fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
                 visitor.$by_ref_method(self);
+            }
+        })*
+        $(impl Visit for $forward_to_inner_visit_ty {
+            fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+                self.inner_visit_with(visitor);
             }
         })*
     };
@@ -120,6 +126,11 @@ impl_visit! {
         visit_func_decl(FuncDecl),
         visit_data_inst_def(DataInstDef),
         visit_value_use(Value),
+    }
+    forward_to_inner_visit {
+        // NOTE(eddyb) the interpolated parts of `Attr::Diagnostics` aren't visited
+        // by default (as they're "inert data"), this is only for `print`'s usage.
+        Vec<DiagMsgPart>,
     }
 }
 
@@ -235,6 +246,32 @@ impl InnerVisit for AttrSetDef {
 
         for attr in attrs {
             visitor.visit_attr(attr);
+        }
+    }
+}
+
+impl InnerVisit for Attr {
+    fn inner_visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {
+        match self {
+            Attr::Diagnostics(_)
+            | Attr::SpvAnnotation(_)
+            | Attr::SpvDebugLine { .. }
+            | Attr::SpvBitflagsOperand(_) => {}
+        }
+    }
+}
+
+// NOTE(eddyb) the interpolated parts of `Attr::Diagnostics` aren't visited
+// by default (as they're "inert data"), this is only for `print`'s usage.
+impl InnerVisit for Vec<DiagMsgPart> {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        for part in self {
+            match part {
+                DiagMsgPart::Plain(_) => {}
+                &DiagMsgPart::Attrs(attrs) => visitor.visit_attr_set_use(attrs),
+                &DiagMsgPart::Type(ty) => visitor.visit_type_use(ty),
+                &DiagMsgPart::Const(ct) => visitor.visit_const_use(ct),
+            }
         }
     }
 }

@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Added ⭐
+- [PR#22](https://github.com/EmbarkStudios/spirt/pull/22) added `Diag` and `Attr::Diagnostics`,
+  for embedding diagnostics (errors or warnings) in SPIR-T itself
 - [PR#18](https://github.com/EmbarkStudios/spirt/pull/18) added anchor-based alignment
   to multi-version pretty-printing output (the same definitions will be kept on
   the same lines in all columns, wherever possible, to improve readability)
