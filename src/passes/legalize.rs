@@ -15,7 +15,8 @@ pub fn structurize_func_cfgs(module: &mut Module) {
         seen_global_vars: FxIndexSet::default(),
         seen_funcs: FxIndexSet::default(),
     };
-    for &exportee in module.exports.values() {
+    for (export_key, &exportee) in &module.exports {
+        export_key.inner_visit_with(&mut collector);
         exportee.inner_visit_with(&mut collector);
     }
 

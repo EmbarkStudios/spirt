@@ -691,6 +691,7 @@ impl Module {
                     GlobalVarDecl {
                         attrs: mem::take(&mut attrs),
                         type_of_ptr_to: type_of_ptr_to_global_var,
+                        shape: None,
                         addr_space: AddrSpace::SpvStorageClass(storage_class),
                         def,
                     },

@@ -122,6 +122,12 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
         let ty_def = &self.cx[ty];
         match ty_def.ctor {
+            // FIXME(eddyb) this should be a proper `Result`-based error instead,
+            // and/or `spv::lift` should mutate the module for legalization.
+            TypeCtor::QPtr => {
+                unreachable!("`TypeCtor::QPtr` should be legalized away before lifting");
+            }
+
             TypeCtor::SpvInst(_) => {}
             TypeCtor::SpvStringLiteralForExtInst => {
                 unreachable!(
@@ -201,16 +207,26 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     }
     fn visit_attr(&mut self, attr: &Attr) {
         match *attr {
-            Attr::Diagnostics(_) | Attr::SpvAnnotation { .. } | Attr::SpvBitflagsOperand(_) => {}
+            Attr::Diagnostics(_)
+            | Attr::QPtr(_)
+            | Attr::SpvAnnotation { .. }
+            | Attr::SpvBitflagsOperand(_) => {}
             Attr::SpvDebugLine { file_path, .. } => {
                 self.debug_strings.insert(&self.cx[file_path.0]);
             }
         }
+        attr.inner_visit_with(self);
     }
 
     fn visit_data_inst_def(&mut self, data_inst_def: &DataInstDef) {
         #[allow(clippy::match_same_arms)]
         match data_inst_def.kind {
+            // FIXME(eddyb) this should be a proper `Result`-based error instead,
+            // and/or `spv::lift` should mutate the module for legalization.
+            DataInstKind::QPtr(_) => {
+                unreachable!("`DataInstKind::QPtr` should be legalized away before lifting");
+            }
+
             DataInstKind::FuncCall(_) => {}
 
             DataInstKind::SpvInst(_) => {}
@@ -1192,7 +1208,7 @@ impl LazyInst<'_, '_> {
                         },
 
                         // Not inserted into `globals` while visiting.
-                        TypeCtor::SpvStringLiteralForExtInst => unreachable!(),
+                        TypeCtor::QPtr | TypeCtor::SpvStringLiteralForExtInst => unreachable!(),
                     }
                 }
                 Global::Const(ct) => {
@@ -1207,6 +1223,11 @@ impl LazyInst<'_, '_> {
                             assert!(ct_def.ty == gv_decl.type_of_ptr_to);
 
                             let storage_class = match gv_decl.addr_space {
+                                AddrSpace::Handles => {
+                                    unreachable!(
+                                        "`AddrSpace::Handles` should be legalized away before lifting"
+                                    );
+                                }
                                 AddrSpace::SpvStorageClass(sc) => {
                                     spv::Imm::Short(wk.StorageClass, sc)
                                 }
@@ -1306,6 +1327,9 @@ impl LazyInst<'_, '_> {
                 data_inst_def,
             } => {
                 let (inst, extra_initial_id_operand) = match &data_inst_def.kind {
+                    // Disallowed while visiting.
+                    DataInstKind::QPtr(_) => unreachable!(),
+
                     &DataInstKind::FuncCall(callee) => {
                         (wk.OpFunctionCall.into(), Some(ids.funcs[&callee].func_id))
                     }
@@ -1620,6 +1644,7 @@ impl Module {
             for attr in cx[attrs].attrs.iter() {
                 match attr {
                     Attr::Diagnostics(_)
+                    | Attr::QPtr(_)
                     | Attr::SpvDebugLine { .. }
                     | Attr::SpvBitflagsOperand(_) => {}
                     Attr::SpvAnnotation(inst @ spv::Inst { opcode, .. }) => {

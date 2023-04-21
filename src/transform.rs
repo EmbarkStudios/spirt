@@ -1,15 +1,17 @@
 //! Mutable IR traversal.
 
 use crate::func_at::FuncAtMut;
+use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
-    ControlRegionInputDecl, DataInstDef, DataInstKind, DeclDef, EntityListIter, ExportKey,
-    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    ControlRegionInputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, EntityListIter,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, GlobalVar, GlobalVarDecl,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind,
+    Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use std::cmp::Ordering;
+use std::rc::Rc;
 use std::slice;
 
 /// The result of a transformation (which is not in-place).
@@ -152,11 +154,6 @@ pub trait Transformer: Sized {
         Transformed::Unchanged
     }
 
-    // Leaves (noop default behavior).
-    fn transform_attr(&mut self, _attr: &Attr) -> Transformed<Attr> {
-        Transformed::Unchanged
-    }
-
     // Leaves transformed in-place (noop default behavior).
     fn in_place_transform_spv_dialect(&mut self, _dialect: &mut spv::Dialect) {}
     fn in_place_transform_spv_module_debug_info(&mut self, _debug_info: &mut spv::ModuleDebugInfo) {
@@ -165,6 +162,9 @@ pub trait Transformer: Sized {
     // Non-leaves (defaulting to calling `.inner_transform_with(self)`).
     fn transform_attr_set_def(&mut self, attrs_def: &AttrSetDef) -> Transformed<AttrSetDef> {
         attrs_def.inner_transform_with(self)
+    }
+    fn transform_attr(&mut self, attr: &Attr) -> Transformed<Attr> {
+        attr.inner_transform_with(self)
     }
     fn transform_type_def(&mut self, ty_def: &TypeDef) -> Transformed<TypeDef> {
         ty_def.inner_transform_with(self)
@@ -199,8 +199,8 @@ pub trait Transformer: Sized {
     ) {
         func_at_control_node.inner_in_place_transform_with(self);
     }
-    fn in_place_transform_data_inst_def(&mut self, data_inst_def: &mut DataInstDef) {
-        data_inst_def.inner_in_place_transform_with(self);
+    fn in_place_transform_data_inst_def(&mut self, mut func_at_data_inst: FuncAtMut<'_, DataInst>) {
+        func_at_data_inst.inner_in_place_transform_with(self);
     }
 }
 
@@ -328,6 +328,95 @@ impl InnerTransform for AttrSetDef {
     }
 }
 
+impl InnerTransform for Attr {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        match self {
+            Attr::Diagnostics(_)
+            | Attr::SpvAnnotation(_)
+            | Attr::SpvDebugLine { .. }
+            | Attr::SpvBitflagsOperand(_) => Transformed::Unchanged,
+
+            Attr::QPtr(attr) => transform!({
+                attr -> match attr {
+                    &QPtrAttr::ToSpvPtrInput { input_idx, pointee } => transform!({
+                        pointee -> transformer.transform_type_use(pointee.0).map(OrdAssertEq),
+                    } => QPtrAttr::ToSpvPtrInput { input_idx, pointee }),
+
+                    &QPtrAttr::FromSpvPtrOutput {
+                        addr_space,
+                        pointee,
+                    } => transform!({
+                        pointee -> transformer.transform_type_use(pointee.0).map(OrdAssertEq),
+                    } => QPtrAttr::FromSpvPtrOutput {
+                        addr_space,
+                        pointee,
+                    }),
+
+                    QPtrAttr::Usage(OrdAssertEq(usage)) => transform!({
+                        usage -> match usage {
+                            &QPtrUsage::Handles(qptr::shapes::Handle::Opaque(ty)) => transform!({
+                                ty -> transformer.transform_type_use(ty),
+                            } => QPtrUsage::Handles(qptr::shapes::Handle::Opaque(ty))),
+                            QPtrUsage::Handles(qptr::shapes::Handle::Buffer(addr_space, data_usage)) => transform!({
+                                data_usage -> data_usage.inner_transform_with(transformer),
+                            } => QPtrUsage::Handles(qptr::shapes::Handle::Buffer(*addr_space, data_usage))),
+                            QPtrUsage::Memory(usage) => transform!({
+                                usage -> usage.inner_transform_with(transformer),
+                            } => QPtrUsage::Memory(usage)),
+                        }
+                    } => QPtrAttr::Usage(OrdAssertEq(usage))),
+                }
+            } => Attr::QPtr(attr)),
+        }
+    }
+}
+
+// FIXME(eddyb) this should maybe be in a more general spot.
+impl<T: InnerTransform> InnerTransform for Rc<T> {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        (**self).inner_transform_with(transformer).map(Rc::new)
+    }
+}
+
+impl InnerTransform for QPtrMemUsage {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        let Self { max_size, kind } = self;
+
+        transform!({
+            kind -> kind.inner_transform_with(transformer)
+        } => Self {
+            max_size: *max_size,
+            kind,
+        })
+    }
+}
+
+impl InnerTransform for QPtrMemUsageKind {
+    fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
+        match self {
+            Self::Unused => Transformed::Unchanged,
+            &Self::StrictlyTyped(ty) => transform!({
+                ty -> transformer.transform_type_use(ty),
+            } => Self::StrictlyTyped(ty)),
+            &Self::DirectAccess(ty) => transform!({
+                ty -> transformer.transform_type_use(ty),
+            } => Self::DirectAccess(ty)),
+            Self::OffsetBase(entries) => transform!({
+                entries -> Transformed::map_iter(entries.values(), |sub_usage| {
+                    sub_usage.inner_transform_with(transformer)
+                }).map(|new_iter| {
+                    // HACK(eddyb) this is a bit inefficient but `Transformed::map_iter`
+                    // limits us here in how it handles the whole `Clone` thing.
+                    entries.keys().copied().zip(new_iter).collect()
+                }).map(Rc::new)
+            } => Self::OffsetBase(entries)),
+            Self::DynOffsetBase { element, stride } => transform!({
+                element -> element.inner_transform_with(transformer),
+            } => Self::DynOffsetBase { element, stride: *stride }),
+        }
+    }
+}
+
 impl InnerTransform for TypeDef {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
         let Self {
@@ -339,7 +428,8 @@ impl InnerTransform for TypeDef {
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
             ctor -> match ctor {
-                TypeCtor::SpvInst(_)
+                TypeCtor::QPtr
+                | TypeCtor::SpvInst(_)
                 | TypeCtor::SpvStringLiteralForExtInst => Transformed::Unchanged,
             },
             ctor_args -> Transformed::map_iter(ctor_args.iter(), |arg| match *arg {
@@ -408,6 +498,7 @@ impl InnerInPlaceTransform for GlobalVarDecl {
         let Self {
             attrs,
             type_of_ptr_to,
+            shape,
             addr_space,
             def,
         } = self;
@@ -416,8 +507,17 @@ impl InnerInPlaceTransform for GlobalVarDecl {
         transformer
             .transform_type_use(*type_of_ptr_to)
             .apply_to(type_of_ptr_to);
+        if let Some(shape) = shape {
+            match shape {
+                qptr::shapes::GlobalVarShape::TypedInterface(ty) => {
+                    transformer.transform_type_use(*ty).apply_to(ty);
+                }
+                qptr::shapes::GlobalVarShape::Handles { .. }
+                | qptr::shapes::GlobalVarShape::UntypedData(_) => {}
+            }
+        }
         match addr_space {
-            AddrSpace::SpvStorageClass(_) => {}
+            AddrSpace::Handles | AddrSpace::SpvStorageClass(_) => {}
         }
         def.inner_in_place_transform_with(transformer);
     }
@@ -562,7 +662,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
             &mut ControlNodeKind::Block { insts } => {
                 let mut func_at_inst_iter = self.reborrow().at(insts).into_iter();
                 while let Some(func_at_inst) = func_at_inst_iter.next() {
-                    transformer.in_place_transform_data_inst_def(func_at_inst.def());
+                    transformer.in_place_transform_data_inst_def(func_at_inst);
                 }
             }
             ControlNodeKind::Select {
@@ -636,18 +736,28 @@ impl InnerTransform for ControlNodeOutputDecl {
     }
 }
 
-impl InnerInPlaceTransform for DataInstDef {
+impl InnerInPlaceTransform for FuncAtMut<'_, DataInst> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self {
+        let DataInstDef {
             attrs,
             kind,
             output_type,
             inputs,
-        } = self;
+        } = self.reborrow().def();
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
             DataInstKind::FuncCall(func) => transformer.transform_func_use(*func).apply_to(func),
+            DataInstKind::QPtr(op) => match op {
+                QPtrOp::FuncLocalVar(_)
+                | QPtrOp::HandleArrayIndex
+                | QPtrOp::BufferData
+                | QPtrOp::BufferDynLen { .. }
+                | QPtrOp::Offset(_)
+                | QPtrOp::DynOffset { .. }
+                | QPtrOp::Load
+                | QPtrOp::Store => {}
+            },
             DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = output_type {

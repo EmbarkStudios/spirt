@@ -165,7 +165,9 @@ pub mod passes {
 
     pub mod legalize;
     pub mod link;
+    pub mod qptr;
 }
+pub mod qptr;
 pub mod spv;
 
 use smallvec::SmallVec;
@@ -338,6 +340,9 @@ impl AttrSet {
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Attr {
+    /// `QPtr`-specific attributes (see [`qptr::QPtrAttr`]).
+    QPtr(qptr::QPtrAttr),
+
     SpvAnnotation(spv::Inst),
 
     SpvDebugLine {
@@ -348,6 +353,7 @@ pub enum Attr {
 
     /// Some SPIR-V instructions, like `OpFunction`, take a bitflags operand
     /// that is effectively an optimization over using `OpDecorate`.
+    //
     // FIXME(eddyb) handle flags having further operands as parameters.
     SpvBitflagsOperand(spv::Imm),
 
@@ -412,6 +418,7 @@ pub enum DiagMsgPart {
     Attrs(AttrSet),
     Type(Type),
     Const(Const),
+    QPtrUsage(qptr::QPtrUsage),
 }
 
 // FIXME(eddyb) move this out of `lib.rs` and/or define with a macro.
@@ -442,6 +449,12 @@ impl From<Type> for DiagMsgPart {
 impl From<Const> for DiagMsgPart {
     fn from(ct: Const) -> Self {
         Self::Const(ct)
+    }
+}
+
+impl From<qptr::QPtrUsage> for DiagMsgPart {
+    fn from(usage: qptr::QPtrUsage) -> Self {
+        Self::QPtrUsage(usage)
     }
 }
 
@@ -488,6 +501,22 @@ pub struct TypeDef {
 /// [`Type`] "constructor": a [`TypeDef`] wiithout any [`TypeCtorArg`]s ([`Type`]s/[`Const`]s).
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum TypeCtor {
+    /// "Quasi-pointer", an untyped pointer-like abstract scalar that can represent
+    /// both memory locations (in any address space) and other kinds of locations
+    /// (e.g. SPIR-V `OpVariable`s in non-memory "storage classes").
+    ///
+    /// This flexibility can be used to represent pointers from source languages
+    /// that expect/are defined to operate on untyped memory (C, C++, Rust, etc.),
+    /// that can then be legalized away (e.g. via inlining) or even emulated.
+    ///
+    /// Information narrowing down how values of the type may be created/used
+    /// (e.g. "points to variable `x`" or "accessed at offset `y`") can be found
+    /// attached as `Attr`s on those `Value`s (see [`Attr::QPtr`]).
+    //
+    // FIXME(eddyb) a "refinement system" that's orthogonal from types, and kept
+    // separately in e.g. `ControlRegionInputDecl`, might be a better approach?
+    QPtr,
+
     SpvInst(spv::Inst),
 
     /// The type of a [`ConstCtor::SpvStringLiteralForExtInst`] constant, i.e.
@@ -560,14 +589,24 @@ pub struct GlobalVarDecl {
     // FIXME(eddyb) try to replace with value type (or at least have that too).
     pub type_of_ptr_to: Type,
 
+    /// When `type_of_ptr_to` is `QPtr`, `shape` must be used to describe the
+    /// global variable (see `GlobalVarShape`'s documentation for more details).
+    pub shape: Option<qptr::shapes::GlobalVarShape>,
+
     /// The address space the global variable will be allocated into.
     pub addr_space: AddrSpace,
 
     pub def: DeclDef<GlobalVarDefBody>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum AddrSpace {
+    /// Placeholder for `GlobalVar`s with `GlobalVarShape::Handles`.
+    ///
+    /// In SPIR-V, this corresponds to `UniformConstant` for `Handle::Opaque`,
+    /// or the buffer's storage class for `Handle::Buffer`.
+    Handles,
+
     SpvStorageClass(u32),
 }
 
@@ -845,8 +884,14 @@ pub enum DataInstKind {
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
 
+    /// `QPtr`-specific operations (see [`qptr::QPtrOp`]).
+    QPtr(qptr::QPtrOp),
+
     SpvInst(spv::Inst),
-    SpvExtInst { ext_set: InternedStr, inst: u32 },
+    SpvExtInst {
+        ext_set: InternedStr,
+        inst: u32,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]

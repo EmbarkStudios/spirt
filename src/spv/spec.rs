@@ -85,9 +85,17 @@ def_well_known! {
         OpTypeInt,
         OpTypeFloat,
         OpTypeVector,
+        OpTypeMatrix,
+        OpTypeArray,
+        OpTypeRuntimeArray,
+        OpTypeStruct,
         OpTypeForwardPointer,
         OpTypePointer,
         OpTypeFunction,
+        OpTypeImage,
+        OpTypeSampler,
+        OpTypeSampledImage,
+        OpTypeAccelerationStructureKHR,
 
         OpConstantFalse,
         OpConstantTrue,
@@ -113,6 +121,15 @@ def_well_known! {
         OpSwitch,
 
         OpFunctionCall,
+
+        OpLoad,
+        OpStore,
+        OpArrayLength,
+        OpAccessChain,
+        OpInBoundsAccessChain,
+        OpPtrAccessChain,
+        OpInBoundsPtrAccessChain,
+        OpBitcast,
     ],
     operand_kind: OperandKind = [
         Capability,
@@ -129,13 +146,30 @@ def_well_known! {
         LiteralInteger,
         LiteralExtInstInteger,
         LiteralString,
+        LiteralContextDependentNumber,
     ],
     // FIXME(eddyb) find a way to namespace these to avoid conflicts.
     storage_class: u32 = [
         Function,
+
+        UniformConstant,
+        Input,
+        Output,
+
+        IncomingRayPayloadKHR,
+        IncomingCallableDataKHR,
+        HitAttributeKHR,
+        RayPayloadKHR,
+        CallableDataKHR,
     ],
     decoration: u32 = [
         LinkageAttributes,
+
+        ArrayStride,
+
+        Block,
+        RowMajor,
+        Offset,
     ],
     linkage_type: u32 = [
         Import,

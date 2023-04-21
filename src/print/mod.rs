@@ -21,6 +21,7 @@ use itertools::Itertools as _;
 
 use crate::func_at::FuncAt;
 use crate::print::multiversion::Versions;
+use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
@@ -420,6 +421,8 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
 
     fn visit_attr(&mut self, attr: &'a Attr) {
+        attr.inner_visit_with(self);
+
         // HACK(eddyb) the interpolated parts aren't visited by default
         // (as they're "inert data").
         if let Attr::Diagnostics(OrdAssertEq(diags)) = attr {
@@ -613,7 +616,9 @@ impl<'a> Printer<'a> {
                                         ]
                                         .contains(&inst.opcode),
 
-                                        TypeCtor::SpvStringLiteralForExtInst => true,
+                                        TypeCtor::QPtr | TypeCtor::SpvStringLiteralForExtInst => {
+                                            true
+                                        }
                                     };
 
                                     ty_def.attrs == AttrSet::default()
@@ -1844,6 +1849,53 @@ impl Print for Attr {
                 ),
             ),
 
+            Attr::QPtr(attr) => {
+                let (name, params_inputs) = match attr {
+                    QPtrAttr::ToSpvPtrInput { input_idx, pointee } => (
+                        "to_spv_ptr_input",
+                        pretty::Fragment::new([
+                            // FIXME(eddyb) is using angle brackets like this consistent styling?
+                            pretty::join_comma_sep(
+                                "<",
+                                [printer
+                                    .numeric_literal_style()
+                                    .apply(format!("{input_idx}"))],
+                                ">",
+                            ),
+                            pretty::join_comma_sep("(", [pointee.0.print(printer)], ")"),
+                        ]),
+                    ),
+
+                    QPtrAttr::FromSpvPtrOutput {
+                        addr_space,
+                        pointee,
+                    } => (
+                        "from_spv_ptr_output",
+                        pretty::Fragment::new([
+                            // FIXME(eddyb) is using angle brackets like this consistent styling?
+                            pretty::join_comma_sep("<", [addr_space.0.print(printer)], ">"),
+                            pretty::join_comma_sep("(", [pointee.0.print(printer)], ")"),
+                        ]),
+                    ),
+
+                    QPtrAttr::Usage(usage) => (
+                        "usage",
+                        pretty::join_comma_sep("(", [usage.0.print(printer)], ")"),
+                    ),
+                };
+                (
+                    AttrStyle::NonComment,
+                    pretty::Fragment::new([
+                        printer
+                            .demote_style_for_namespace_prefix(printer.attr_style())
+                            .apply("qptr.")
+                            .into(),
+                        printer.attr_style().apply(name).into(),
+                        params_inputs,
+                    ]),
+                )
+            }
+
             Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
                 struct ImplicitTargetId;
 
@@ -1903,10 +1955,83 @@ impl Print for Vec<DiagMsgPart> {
             DiagMsgPart::Attrs(attrs) => attrs.print(printer),
             DiagMsgPart::Type(ty) => ty.print(printer),
             DiagMsgPart::Const(ct) => ct.print(printer),
+            DiagMsgPart::QPtrUsage(usage) => usage.print(printer),
         }));
         AttrsAndDef {
             attrs: pretty::Fragment::default(),
             def_without_name: msg,
+        }
+    }
+}
+
+impl Print for QPtrUsage {
+    type Output = pretty::Fragment;
+
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        match self {
+            QPtrUsage::Handles(qptr::shapes::Handle::Opaque(ty)) => ty.print(printer),
+            QPtrUsage::Handles(qptr::shapes::Handle::Buffer(_, data_usage)) => {
+                pretty::Fragment::new([
+                    printer
+                        .declarative_keyword_style()
+                        .apply("buffer_data")
+                        .into(),
+                    pretty::join_comma_sep("(", [data_usage.print(printer)], ")"),
+                ])
+            }
+            QPtrUsage::Memory(usage) => usage.print(printer),
+        }
+    }
+}
+
+impl Print for QPtrMemUsage {
+    type Output = pretty::Fragment;
+
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        // FIXME(eddyb) should this be a helper on `Printer`?
+        let num_lit = |x: u32| printer.numeric_literal_style().apply(format!("{x}")).into();
+
+        match &self.kind {
+            QPtrMemUsageKind::Unused => "_".into(),
+            // FIXME(eddyb) should the distinction be noted?
+            &QPtrMemUsageKind::StrictlyTyped(ty) | &QPtrMemUsageKind::DirectAccess(ty) => {
+                ty.print(printer)
+            }
+            QPtrMemUsageKind::OffsetBase(entries) => pretty::join_comma_sep(
+                "{",
+                entries
+                    .iter()
+                    .map(|(&offset, sub_usage)| {
+                        pretty::Fragment::new([
+                            num_lit(offset),
+                            "..".into(),
+                            sub_usage
+                                .max_size
+                                .and_then(|max_size| offset.checked_add(max_size))
+                                .map(num_lit)
+                                .unwrap_or_default(),
+                            " => ".into(),
+                            sub_usage.print(printer),
+                        ])
+                    })
+                    .map(|entry| {
+                        pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), entry])
+                    }),
+                "}",
+            ),
+            QPtrMemUsageKind::DynOffsetBase { element, stride } => pretty::Fragment::new([
+                "(".into(),
+                num_lit(0),
+                "..".into(),
+                self.max_size
+                    .map(|max_size| max_size / stride.get())
+                    .map(num_lit)
+                    .unwrap_or_default(),
+                ") × ".into(),
+                num_lit(stride.get()),
+                " => ".into(),
+                element.print(printer),
+            ]),
         }
     }
 }
@@ -1977,6 +2102,9 @@ impl Print for TypeDef {
                 def
             } else {
                 match *ctor {
+                    // FIXME(eddyb) should this be shortened to `qtr`?
+                    TypeCtor::QPtr => printer.declarative_keyword_style().apply("qptr").into(),
+
                     TypeCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
                         printer.spv_op_style(),
                         opcode,
@@ -2175,6 +2303,7 @@ impl Print for GlobalVarDecl {
         let Self {
             attrs,
             type_of_ptr_to,
+            shape,
             addr_space,
             def,
         } = self;
@@ -2187,6 +2316,109 @@ impl Print for GlobalVarDecl {
             let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
 
             match &type_of_ptr_to_def.ctor {
+                TypeCtor::QPtr if shape.is_some() => match shape.unwrap() {
+                    qptr::shapes::GlobalVarShape::Handles {
+                        handle,
+                        fixed_count,
+                    } => {
+                        let handle = match handle {
+                            qptr::shapes::Handle::Opaque(ty) => ty.print(printer),
+                            qptr::shapes::Handle::Buffer(addr_space, buf) => {
+                                pretty::Fragment::new([
+                                    printer.declarative_keyword_style().apply("buffer").into(),
+                                    // FIXME(eddyb) is using angle brackets like this consistent styling?
+                                    pretty::join_comma_sep("<", [addr_space.print(printer)], ">"),
+                                    pretty::join_comma_sep(
+                                        "(",
+                                        [
+                                            pretty::Fragment::new([
+                                                "size: ".into(),
+                                                pretty::Fragment::new(
+                                                    Some(buf.fixed_base.size)
+                                                        .filter(|&base_size| {
+                                                            base_size > 0
+                                                                || buf.dyn_unit_stride.is_none()
+                                                        })
+                                                        .map(|base_size| {
+                                                            printer
+                                                                .numeric_literal_style()
+                                                                .apply(base_size.to_string())
+                                                                .into()
+                                                        })
+                                                        .into_iter()
+                                                        .chain(buf.dyn_unit_stride.map(|stride| {
+                                                            pretty::Fragment::new([
+                                                                "N × ".into(),
+                                                                printer
+                                                                    .numeric_literal_style()
+                                                                    .apply(stride.to_string()),
+                                                            ])
+                                                        }))
+                                                        .intersperse_with(|| " + ".into()),
+                                                ),
+                                            ]),
+                                            pretty::Fragment::new([
+                                                "align: ".into(),
+                                                printer
+                                                    .numeric_literal_style()
+                                                    .apply(buf.fixed_base.align.to_string()),
+                                            ]),
+                                        ],
+                                        ")",
+                                    ),
+                                ])
+                            }
+                        };
+
+                        let handles = if fixed_count.map_or(0, |c| c.get()) == 1 {
+                            handle
+                        } else {
+                            pretty::Fragment::new([
+                                "[".into(),
+                                fixed_count
+                                    .map(|count| {
+                                        pretty::Fragment::new([
+                                            printer
+                                                .numeric_literal_style()
+                                                .apply(count.to_string()),
+                                            " × ".into(),
+                                        ])
+                                    })
+                                    .unwrap_or_default(),
+                                handle,
+                                "]".into(),
+                            ])
+                        };
+                        pretty::join_space(":", [handles])
+                    }
+                    qptr::shapes::GlobalVarShape::UntypedData(mem_layout) => {
+                        pretty::Fragment::new([
+                            " ".into(),
+                            printer.declarative_keyword_style().apply("layout").into(),
+                            pretty::join_comma_sep(
+                                "(",
+                                [
+                                    pretty::Fragment::new([
+                                        "size: ".into(),
+                                        printer
+                                            .numeric_literal_style()
+                                            .apply(mem_layout.size.to_string()),
+                                    ]),
+                                    pretty::Fragment::new([
+                                        "align: ".into(),
+                                        printer
+                                            .numeric_literal_style()
+                                            .apply(mem_layout.align.to_string()),
+                                    ]),
+                                ],
+                                ")",
+                            ),
+                        ])
+                    }
+                    qptr::shapes::GlobalVarShape::TypedInterface(ty) => {
+                        printer.pretty_type_ascription_suffix(ty)
+                    }
+                },
                 TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypePointer => {
                     match type_of_ptr_to_def.ctor_args[..] {
                         [TypeCtorArg::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
@@ -2202,28 +2434,42 @@ impl Print for GlobalVarDecl {
                 ]),
             }
         };
-        let addr_space = match *addr_space {
-            AddrSpace::SpvStorageClass(sc) => printer.pretty_spv_imm(wk.StorageClass, sc),
+        let addr_space_suffix = match addr_space {
+            AddrSpace::Handles => pretty::Fragment::default(),
+            AddrSpace::SpvStorageClass(_) => {
+                pretty::Fragment::new([" in ".into(), addr_space.print(printer)])
+            }
         };
-        let header = pretty::Fragment::new([" in ".into(), addr_space, type_ascription_suffix]);
+        let header = pretty::Fragment::new([addr_space_suffix, type_ascription_suffix]);
 
-        let body = match def {
-            DeclDef::Imported(import) => {
-                Some(pretty::Fragment::new(["= ".into(), import.print(printer)]))
-            }
+        let maybe_rhs = match def {
+            DeclDef::Imported(import) => Some(import.print(printer)),
             DeclDef::Present(GlobalVarDefBody { initializer }) => {
-                initializer.map(|initializer| {
-                    // FIXME(eddyb) find a better syntax for this.
-                    pretty::Fragment::new(["init=".into(), initializer.print(printer)])
-                })
+                // FIXME(eddyb) `global_varX in AS: T = Y` feels a bit wonky for
+                // the initializer, but it's cleaner than obvious alternatives.
+                initializer.map(|initializer| initializer.print(printer))
             }
         };
+        let body = maybe_rhs.map(|rhs| pretty::Fragment::new(["= ".into(), rhs]));
 
         let def_without_name = pretty::Fragment::new([header, pretty::join_space("", body)]);
 
         AttrsAndDef {
             attrs: attrs.print(printer),
             def_without_name,
+        }
+    }
+}
+
+impl Print for AddrSpace {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        match *self {
+            AddrSpace::Handles => printer.declarative_keyword_style().apply("handles").into(),
+            AddrSpace::SpvStorageClass(sc) => {
+                let wk = &spv::spec::Spec::get().well_known;
+                printer.pretty_spv_imm(wk.StorageClass, sc)
+            }
         }
     }
 }
@@ -2248,7 +2494,7 @@ impl Print for FuncDecl {
                             region: def.body,
                             input_idx: i.try_into().unwrap(),
                         }
-                        .print(printer),
+                        .print_as_def(printer),
                     };
                     param.print(printer).insert_name_before_def(param_name)
                 }),
@@ -2591,26 +2837,171 @@ impl Print for DataInstDef {
 
         let attrs = attrs.print(printer);
 
-        let header = match *kind {
-            DataInstKind::FuncCall(func) => pretty::Fragment::new([
+        let header = match kind {
+            &DataInstKind::FuncCall(func) => pretty::Fragment::new([
                 printer.declarative_keyword_style().apply("call").into(),
                 " ".into(),
                 func.print(printer),
             ]),
-            DataInstKind::SpvInst(spv::Inst { opcode, ref imms }) => {
+
+            DataInstKind::QPtr(op) => {
+                let (qptr_input, extra_inputs) = match op {
+                    // HACK(eddyb) `FuncLocalVar` should probably not even be in `QPtrOp`.
+                    QPtrOp::FuncLocalVar(_) => (None, &inputs[..]),
+                    _ => (Some(inputs[0]), &inputs[1..]),
+                };
+                let (name, extra_inputs): (_, SmallVec<[_; 1]>) = match op {
+                    QPtrOp::FuncLocalVar(mem_layout) => {
+                        assert!(extra_inputs.len() <= 1);
+                        (
+                            "func_local_var",
+                            [
+                                pretty::Fragment::new([
+                                    "size: ".into(),
+                                    printer
+                                        .numeric_literal_style()
+                                        .apply(mem_layout.size.to_string()),
+                                ]),
+                                pretty::Fragment::new([
+                                    "align: ".into(),
+                                    printer
+                                        .numeric_literal_style()
+                                        .apply(mem_layout.align.to_string()),
+                                ]),
+                            ]
+                            .into_iter()
+                            .chain(extra_inputs.get(0).map(|&init| {
+                                pretty::Fragment::new(["init: ".into(), init.print(printer)])
+                            }))
+                            .collect(),
+                        )
+                    }
+
+                    QPtrOp::HandleArrayIndex => {
+                        assert_eq!(extra_inputs.len(), 1);
+                        (
+                            "handle_array_index",
+                            [extra_inputs[0].print(printer)].into_iter().collect(),
+                        )
+                    }
+                    QPtrOp::BufferData => {
+                        assert_eq!(extra_inputs.len(), 0);
+                        ("buffer_data", [].into_iter().collect())
+                    }
+                    &QPtrOp::BufferDynLen {
+                        fixed_base_size,
+                        dyn_unit_stride,
+                    } => {
+                        assert_eq!(extra_inputs.len(), 0);
+
+                        // FIXME(eddyb) this isn't very nice, but without mapping
+                        // to actual integer ops, there's not a lot of options.
+                        (
+                            "buffer_dyn_len",
+                            [
+                                pretty::Fragment::new([
+                                    "fixed_base_size: ".into(),
+                                    printer
+                                        .numeric_literal_style()
+                                        .apply(fixed_base_size.to_string()),
+                                ]),
+                                pretty::Fragment::new([
+                                    "dyn_unit_stride: ".into(),
+                                    printer
+                                        .numeric_literal_style()
+                                        .apply(dyn_unit_stride.to_string()),
+                                ]),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        )
+                    }
+
+                    QPtrOp::Offset(offset) => {
+                        assert_eq!(extra_inputs.len(), 0);
+                        (
+                            "offset",
+                            [printer
+                                .numeric_literal_style()
+                                .apply(format!("{offset}"))
+                                .into()]
+                            .into_iter()
+                            .collect(),
+                        )
+                    }
+                    &QPtrOp::DynOffset {
+                        stride,
+                        index_bounds: _,
+                    } => {
+                        assert_eq!(extra_inputs.len(), 1);
+                        (
+                            "dyn_offset",
+                            [pretty::Fragment::new([
+                                extra_inputs[0].print(printer),
+                                " × ".into(),
+                                printer
+                                    .numeric_literal_style()
+                                    .apply(format!("{stride}"))
+                                    .into(),
+                            ])]
+                            .into_iter()
+                            .collect(),
+                        )
+                    }
+
+                    QPtrOp::Load => {
+                        assert_eq!(extra_inputs.len(), 0);
+                        ("load", [].into_iter().collect())
+                    }
+                    QPtrOp::Store => {
+                        assert_eq!(extra_inputs.len(), 1);
+                        (
+                            "store",
+                            [extra_inputs[0].print(printer)].into_iter().collect(),
+                        )
+                    }
+                };
+
+                // HACK(eddyb) this duplicates and intentionally breaks away from
+                // the style of SPIR-V instructions and how they handle immediates.
+                // FIXME(eddyb) pick a consistent style, this is getting annoying.
+                return AttrsAndDef {
+                    attrs,
+                    def_without_name: pretty::Fragment::new([
+                        printer
+                            .demote_style_for_namespace_prefix(printer.declarative_keyword_style())
+                            .apply("qptr.")
+                            .into(),
+                        printer.declarative_keyword_style().apply(name).into(),
+                        pretty::join_comma_sep(
+                            "(",
+                            qptr_input
+                                .map(|v| v.print(printer))
+                                .into_iter()
+                                .chain(extra_inputs),
+                            ")",
+                        ),
+                        output_type
+                            .map(|ty| printer.pretty_type_ascription_suffix(ty))
+                            .unwrap_or_default(),
+                    ]),
+                };
+            }
+
+            DataInstKind::SpvInst(inst) => {
                 return AttrsAndDef {
                     attrs,
                     def_without_name: printer.pretty_spv_inst(
                         printer.spv_op_style(),
-                        opcode,
-                        imms,
+                        inst.opcode,
+                        &inst.imms,
                         inputs,
                         Print::print,
                         *output_type,
                     ),
                 };
             }
-            DataInstKind::SpvExtInst { ext_set, inst } => {
+            &DataInstKind::SpvExtInst { ext_set, inst } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
                 // FIXME(eddyb) should this be rendered more compactly?
