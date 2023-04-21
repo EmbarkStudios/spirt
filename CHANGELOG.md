@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.2.0] - 2023-04-21
+
 ### Added ⭐
 - [PR#24](https://github.com/EmbarkStudios/spirt/pull/24) added `qptr` ("quasi-pointer") type
   and associated passes to destroy and recreate pointer-related type information
@@ -58,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pretty-printer with (styled and hyperlinked) HTML output.
 
 <!-- next-url -->
-[Unreleased]: https://github.com/EmbarkStudios/spirt/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/EmbarkStudios/spirt/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/EmbarkStudios/spirt/compare/0.1.0...0.2.0
 <!-- HACK(eddyb) `0.0.0` doesn't exist as a "tag before the initial commit", but
      the commit hash referenced here is the newest from `opensource-template`,
      that predates `0.1.0`, i.e. the `opensource-template` parent of the merge
