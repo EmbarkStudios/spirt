@@ -91,6 +91,14 @@ impl<'a> Iterator for FuncAt<'a, EntityListIter<DataInst>> {
     }
 }
 
+impl<'a> DoubleEndedIterator for FuncAt<'a, EntityListIter<DataInst>> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let (prev, rest) = self.position.split_last(self.data_insts)?;
+        self.position = rest;
+        Some(self.at(prev))
+    }
+}
+
 impl<'a> FuncAt<'a, DataInst> {
     pub fn def(self) -> &'a DataInstDef {
         &self.data_insts[self.position]
@@ -144,6 +152,24 @@ impl<'a, P: Copy> FuncAtMut<'a, P> {
             control_nodes: self.control_nodes,
             data_insts: self.data_insts,
             position: new_position,
+        }
+    }
+
+    /// Demote to a `FuncAt`, with the same `position`.
+    //
+    // FIXME(eddyb) maybe find a better name for this?
+    pub fn freeze(self) -> FuncAt<'a, P> {
+        let FuncAtMut {
+            control_regions,
+            control_nodes,
+            data_insts,
+            position,
+        } = self;
+        FuncAt {
+            control_regions,
+            control_nodes,
+            data_insts,
+            position,
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Immutable IR traversal.
 
 use crate::func_at::FuncAt;
+use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
@@ -27,7 +28,6 @@ pub trait Visitor<'a>: Sized {
     // Leaves (noop default behavior).
     fn visit_spv_dialect(&mut self, _dialect: &spv::Dialect) {}
     fn visit_spv_module_debug_info(&mut self, _debug_info: &spv::ModuleDebugInfo) {}
-    fn visit_attr(&mut self, _attr: &'a Attr) {}
     fn visit_import(&mut self, _import: &Import) {}
 
     // Non-leaves (defaulting to calling `.inner_visit_with(self)`).
@@ -42,6 +42,9 @@ pub trait Visitor<'a>: Sized {
     }
     fn visit_attr_set_def(&mut self, attrs_def: &'a AttrSetDef) {
         attrs_def.inner_visit_with(self);
+    }
+    fn visit_attr(&mut self, attr: &'a Attr) {
+        attr.inner_visit_with(self);
     }
     fn visit_type_def(&mut self, ty_def: &'a TypeDef) {
         ty_def.inner_visit_with(self);
@@ -114,12 +117,12 @@ impl_visit! {
     by_ref {
         visit_spv_dialect(spv::Dialect),
         visit_spv_module_debug_info(spv::ModuleDebugInfo),
-        visit_attr(Attr),
         visit_import(Import),
         visit_module(Module),
         visit_module_dialect(ModuleDialect),
         visit_module_debug_info(ModuleDebugInfo),
         visit_attr_set_def(AttrSetDef),
+        visit_attr(Attr),
         visit_type_def(TypeDef),
         visit_const_def(ConstDef),
         visit_global_var_decl(GlobalVarDecl),
@@ -251,12 +254,25 @@ impl InnerVisit for AttrSetDef {
 }
 
 impl InnerVisit for Attr {
-    fn inner_visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match self {
             Attr::Diagnostics(_)
             | Attr::SpvAnnotation(_)
             | Attr::SpvDebugLine { .. }
             | Attr::SpvBitflagsOperand(_) => {}
+
+            Attr::QPtr(attr) => match attr {
+                QPtrAttr::ToSpvPtrInput {
+                    input_idx: _,
+                    pointee,
+                }
+                | QPtrAttr::FromSpvPtrOutput {
+                    addr_space: _,
+                    pointee,
+                } => visitor.visit_type_use(pointee.0),
+
+                QPtrAttr::Usage(usage) => usage.0.inner_visit_with(visitor),
+            },
         }
     }
 }
@@ -271,6 +287,47 @@ impl InnerVisit for Vec<DiagMsgPart> {
                 &DiagMsgPart::Attrs(attrs) => visitor.visit_attr_set_use(attrs),
                 &DiagMsgPart::Type(ty) => visitor.visit_type_use(ty),
                 &DiagMsgPart::Const(ct) => visitor.visit_const_use(ct),
+                DiagMsgPart::QPtrUsage(usage) => usage.inner_visit_with(visitor),
+            }
+        }
+    }
+}
+
+impl InnerVisit for QPtrUsage {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            &QPtrUsage::Handles(qptr::shapes::Handle::Opaque(ty)) => {
+                visitor.visit_type_use(ty);
+            }
+            QPtrUsage::Handles(qptr::shapes::Handle::Buffer(_, data_usage)) => {
+                data_usage.inner_visit_with(visitor);
+            }
+            QPtrUsage::Memory(usage) => usage.inner_visit_with(visitor),
+        }
+    }
+}
+
+impl InnerVisit for QPtrMemUsage {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { max_size: _, kind } = self;
+        kind.inner_visit_with(visitor);
+    }
+}
+
+impl InnerVisit for QPtrMemUsageKind {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            Self::Unused => {}
+            &Self::StrictlyTyped(ty) | &Self::DirectAccess(ty) => {
+                visitor.visit_type_use(ty);
+            }
+            Self::OffsetBase(entries) => {
+                for sub_usage in entries.values() {
+                    sub_usage.inner_visit_with(visitor);
+                }
+            }
+            Self::DynOffsetBase { element, stride: _ } => {
+                element.inner_visit_with(visitor);
             }
         }
     }
@@ -286,7 +343,7 @@ impl InnerVisit for TypeDef {
 
         visitor.visit_attr_set_use(*attrs);
         match ctor {
-            TypeCtor::SpvInst(_) | TypeCtor::SpvStringLiteralForExtInst => {}
+            TypeCtor::QPtr | TypeCtor::SpvInst(_) | TypeCtor::SpvStringLiteralForExtInst => {}
         }
         for &arg in ctor_args {
             match arg {
@@ -332,14 +389,22 @@ impl InnerVisit for GlobalVarDecl {
         let Self {
             attrs,
             type_of_ptr_to,
+            shape,
             addr_space,
             def,
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*type_of_ptr_to);
+        if let Some(shape) = shape {
+            match shape {
+                qptr::shapes::GlobalVarShape::TypedInterface(ty) => visitor.visit_type_use(*ty),
+                qptr::shapes::GlobalVarShape::Handles { .. }
+                | qptr::shapes::GlobalVarShape::UntypedData(_) => {}
+            }
+        }
         match addr_space {
-            AddrSpace::SpvStorageClass(_) => {}
+            AddrSpace::Handles | AddrSpace::SpvStorageClass(_) => {}
         }
         def.inner_visit_with(visitor);
     }
@@ -441,7 +506,7 @@ impl<'a> FuncAt<'a, EntityListIter<ControlNode>> {
 // FIXME(eddyb) this can't implement `InnerVisit` because of the `&'a self`
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ControlNode>`.
 impl<'a> FuncAt<'a, ControlNode> {
-    fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
+    pub fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
         let ControlNodeDef { kind, outputs } = self.def();
 
         match kind {
@@ -497,8 +562,18 @@ impl InnerVisit for DataInstDef {
         } = self;
 
         visitor.visit_attr_set_use(*attrs);
-        match *kind {
-            DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
+        match kind {
+            &DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
+            DataInstKind::QPtr(op) => match *op {
+                QPtrOp::FuncLocalVar(_)
+                | QPtrOp::HandleArrayIndex
+                | QPtrOp::BufferData
+                | QPtrOp::BufferDynLen { .. }
+                | QPtrOp::Offset(_)
+                | QPtrOp::DynOffset { .. }
+                | QPtrOp::Load
+                | QPtrOp::Store => {}
+            },
             DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = *output_type {

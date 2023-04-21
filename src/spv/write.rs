@@ -87,7 +87,7 @@ impl OperandEmitter<'_> {
 
         let mut get_enum_word = || match self.imms.next() {
             Some(spv::Imm::Short(found_kind, word)) => {
-                assert!(kind == found_kind);
+                assert_eq!(kind, found_kind);
                 Ok(word)
             }
             Some(spv::Imm::LongStart(..) | spv::Imm::LongCont(..)) => unreachable!(),
@@ -123,17 +123,17 @@ impl OperandEmitter<'_> {
             spec::OperandKindDef::Literal { .. } => {
                 match self.imms.next().ok_or(Error::NotEnoughImms)? {
                     spv::Imm::Short(found_kind, word) => {
-                        assert!(kind == found_kind);
+                        assert_eq!(kind, found_kind);
                         self.out.push(word);
                     }
                     spv::Imm::LongStart(found_kind, word) => {
-                        assert!(kind == found_kind);
+                        assert_eq!(kind, found_kind);
                         self.out.push(word);
                         while let Some(spv::Imm::LongCont(cont_kind, word)) =
                             self.imms.clone().next()
                         {
                             self.imms.next();
-                            assert!(kind == cont_kind);
+                            assert_eq!(kind, cont_kind);
                             self.out.push(word);
                         }
                     }

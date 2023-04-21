@@ -114,7 +114,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         words.push(first_word);
         while let Some(&spv::Imm::LongCont(cont_kind, word)) = self.imms.peek() {
             self.imms.next();
-            assert!(kind == cont_kind);
+            assert_eq!(kind, cont_kind);
             words.push(word);
         }
 
@@ -169,7 +169,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
         let mut maybe_get_enum_word = || match self.imms.next() {
             Some(spv::Imm::Short(found_kind, word)) => {
-                assert!(kind == found_kind);
+                assert_eq!(kind, found_kind);
                 Some(word)
             }
             Some(spv::Imm::LongStart(..) | spv::Imm::LongCont(..)) => unreachable!(),
@@ -235,7 +235,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                     Some(
                         spv::Imm::Short(found_kind, word) | spv::Imm::LongStart(found_kind, word),
                     ) => {
-                        assert!(kind == found_kind);
+                        assert_eq!(kind, found_kind);
                         self.literal(kind, word);
                     }
                     Some(spv::Imm::LongCont(..)) => unreachable!(),

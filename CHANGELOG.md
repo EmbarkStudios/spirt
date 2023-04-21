@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Added ⭐
+- [PR#24](https://github.com/EmbarkStudios/spirt/pull/24) added `qptr` ("quasi-pointer") type
+  and associated passes to destroy and recreate pointer-related type information
+  (see [PR#24](https://github.com/EmbarkStudios/spirt/pull/24) for a much more detailed overview)
 - [PR#22](https://github.com/EmbarkStudios/spirt/pull/22) added `Diag` and `Attr::Diagnostics`,
   for embedding diagnostics (errors or warnings) in SPIR-T itself
 - [PR#18](https://github.com/EmbarkStudios/spirt/pull/18) added anchor-based alignment

@@ -221,7 +221,7 @@ impl Module {
                             &[spv::Imm::Short(l_kind, line), spv::Imm::Short(c_kind, col)],
                             &[file_path_id],
                         ) => {
-                            assert!([l_kind, c_kind] == [wk.LiteralInteger; 2]);
+                            assert_eq!([l_kind, c_kind], [wk.LiteralInteger; 2]);
                             let file_path = match id_defs.get(&file_path_id) {
                                 Some(&IdDef::SpvDebugString(s)) => s,
                                 _ => {
@@ -307,7 +307,7 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let cap = match (&inst.imms[..], &inst.ids[..]) {
                     (&[spv::Imm::Short(kind, cap)], &[]) => {
-                        assert!(kind == wk.Capability);
+                        assert_eq!(kind, wk.Capability);
                         cap
                     }
                     _ => unreachable!(),
@@ -349,7 +349,7 @@ impl Module {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (addressing_model, memory_model) = match (&inst.imms[..], &inst.ids[..]) {
                     (&[spv::Imm::Short(am_kind, am), spv::Imm::Short(mm_kind, mm)], &[]) => {
-                        assert!(am_kind == wk.AddressingModel && mm_kind == wk.MemoryModel);
+                        assert_eq!([am_kind, mm_kind], [wk.AddressingModel, wk.MemoryModel]);
                         (am, mm)
                     }
                     _ => unreachable!(),
@@ -387,7 +387,7 @@ impl Module {
                         spv::Imm::Short(v_kind, version),
                         ..,
                     ] => {
-                        assert!(l_kind == wk.SourceLanguage && v_kind == wk.LiteralInteger);
+                        assert_eq!([l_kind, v_kind], [wk.SourceLanguage, wk.LiteralInteger]);
                         (lang, version)
                     }
                     _ => unreachable!(),
@@ -649,7 +649,7 @@ impl Module {
 
                 let storage_class = match inst.imms[..] {
                     [spv::Imm::Short(kind, storage_class)] => {
-                        assert!(kind == wk.StorageClass);
+                        assert_eq!(kind, wk.StorageClass);
                         storage_class
                     }
                     _ => unreachable!(),
@@ -691,6 +691,7 @@ impl Module {
                     GlobalVarDecl {
                         attrs: mem::take(&mut attrs),
                         type_of_ptr_to: type_of_ptr_to_global_var,
+                        shape: None,
                         addr_space: AddrSpace::SpvStorageClass(storage_class),
                         def,
                     },
@@ -1349,7 +1350,7 @@ impl Module {
 
                         let inst = match imms[..] {
                             [spv::Imm::Short(kind, inst)] => {
-                                assert!(kind == wk.LiteralExtInstInteger);
+                                assert_eq!(kind, wk.LiteralExtInstInteger);
                                 inst
                             }
                             _ => unreachable!(),
