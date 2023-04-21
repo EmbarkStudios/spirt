@@ -8,7 +8,7 @@ use crate::qptr::{shapes, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtr
 use crate::transform::{InnerInPlaceTransform, InnerTransform, Transformed, Transformer};
 use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, ControlNode,
-    ControlNodeKind, DataInst, DataInstDef, DataInstKind, DeclDef, Diag, EntityDefs,
+    ControlNodeKind, DataInst, DataInstDef, DataInstKind, DeclDef, Diag, DiagLevel, EntityDefs,
     EntityOrientedDenseMap, Func, FuncDecl, FxIndexMap, GlobalVar, GlobalVarDecl, Module, Type,
     TypeCtor, TypeCtorArg, TypeDef, Value,
 };
@@ -66,6 +66,8 @@ impl<'a> LiftToSpvPtrs<'a> {
 
                 deferred_ptr_noops: Default::default(),
                 data_inst_use_counts: Default::default(),
+
+                func_has_qptr_analysis_bug_diags: false,
             }
             .in_place_transform_func_decl(&mut module.funcs[func]);
         }
@@ -408,6 +410,9 @@ struct LiftToSpvPtrInstsInFunc<'a> {
 
     // FIXME(eddyb) consider removing this and just do a full second traversal.
     data_inst_use_counts: EntityOrientedDenseMap<DataInst, NonZeroU32>,
+
+    // HACK(eddyb) this is used to avoid noise when `qptr::analyze` failed.
+    func_has_qptr_analysis_bug_diags: bool,
 }
 
 struct DeferredPtrNoop {
@@ -1156,7 +1161,30 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
                         self.add_value_uses(&data_inst_def.inputs);
                     }
                     Err(LiftError(e)) => {
-                        func_at_inst.def().attrs.push_diag(&self.lifter.cx, e);
+                        let data_inst_def = func_at_inst.def();
+
+                        // HACK(eddyb) do not add redundant errors to `qptr::analyze` bugs.
+                        self.func_has_qptr_analysis_bug_diags = self
+                            .func_has_qptr_analysis_bug_diags
+                            || self.lifter.cx[data_inst_def.attrs]
+                                .attrs
+                                .iter()
+                                .any(|attr| match attr {
+                                    Attr::Diagnostics(diags) => {
+                                        diags.0.iter().any(|diag| match diag.level {
+                                            DiagLevel::Bug(loc) => {
+                                                loc.file().ends_with("qptr/analyze.rs")
+                                                    || loc.file().ends_with("qptr\\analyze.rs")
+                                            }
+                                            _ => false,
+                                        })
+                                    }
+                                    _ => false,
+                                });
+
+                        if !self.func_has_qptr_analysis_bug_diags {
+                            data_inst_def.attrs.push_diag(&self.lifter.cx, e);
+                        }
                     }
                 }
             }
