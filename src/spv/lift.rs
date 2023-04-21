@@ -1778,6 +1778,9 @@ impl Module {
                     })?;
 
                     while !contents_rest.is_empty() {
+                        // FIXME(eddyb) test with UTF-8! this `split_at` should
+                        // actually take *less* than the full possible size, to
+                        // avoid cutting a UTF-8 sequence.
                         let (cont_chunk, rest) = contents_rest
                             .split_at(contents_rest.len().min(MAX_OP_SOURCE_CONT_CONTENTS_LEN));
                         contents_rest = rest;
