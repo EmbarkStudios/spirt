@@ -1799,7 +1799,7 @@ impl Print for Attr {
                             let bug_location_prefix = match level {
                                 DiagLevel::Bug(location) => {
                                     let location = location.to_string();
-                                    let location = match location.split_once("/src/") {
+                                    let location = match location.rsplit_once("/src/") {
                                         Some((_path_prefix, intra_src)) => intra_src,
                                         None => &location,
                                     };
