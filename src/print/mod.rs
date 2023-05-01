@@ -1825,27 +1825,31 @@ impl Print for Attr {
                             // HACK(eddyb) this would ideally use line comments,
                             // but adding the line prefix properly to everything
                             // is a bit of a pain without special `pretty` support.
-                            pretty::Node::InlineOrIndentedBlock(vec![pretty::Fragment::new([
-                                comment_style.clone().apply("/* ").into(),
-                                pretty::Styles {
-                                    thickness: Some(3),
+                            pretty::Fragment::new([
+                                comment_style.clone().apply("/*"),
+                                pretty::Node::BreakingOnlySpace,
+                                pretty::Node::InlineOrIndentedBlock(vec![pretty::Fragment::new([
+                                    pretty::Styles {
+                                        thickness: Some(3),
 
-                                    // HACK(eddyb) this allows larger "icons"
-                                    // without adding gaps via `line-height`.
-                                    subscript: true,
-                                    size: Some(2),
+                                        // HACK(eddyb) this allows larger "icons"
+                                        // without adding gaps via `line-height`.
+                                        subscript: true,
+                                        size: Some(2),
 
-                                    ..pretty::Styles::color(icon_color)
-                                }
-                                .apply(icon)
-                                .into(),
-                                " ".into(),
-                                bug_location_prefix,
-                                printed_message,
-                                comment_style.apply(" */").into(),
-                            ])])
+                                        ..pretty::Styles::color(icon_color)
+                                    }
+                                    .apply(icon)
+                                    .into(),
+                                    " ".into(),
+                                    bug_location_prefix,
+                                    printed_message,
+                                ])]),
+                                pretty::Node::BreakingOnlySpace,
+                                comment_style.apply("*/"),
+                            ])
                         })
-                        .intersperse(pretty::Node::ForceLineSeparation),
+                        .intersperse(pretty::Node::ForceLineSeparation.into()),
                 ),
             ),
 
