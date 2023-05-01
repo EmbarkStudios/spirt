@@ -88,7 +88,7 @@ pub enum Handle<BL = MaybeDynMemLayout> {
 /// Only `align` is *required*, that is `size % align == 0` must be always enforced.
 //
 // FIXME(eddyb) consider supporting specialization-constant-length arrays.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MemLayout {
     // FIXME(eddyb) use proper newtypes (and log2 for align!).
     pub align: u32,

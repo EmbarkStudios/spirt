@@ -1,8 +1,8 @@
 use crate::transform::{InnerTransform, Transformed, Transformer};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AttrSet, Const, Context, DeclDef, ExportKey, Exportee, Func, FxIndexSet, GlobalVar, Import,
-    Module, Type,
+    AttrSet, Const, Context, DataInstForm, DeclDef, ExportKey, Exportee, Func, FxIndexSet,
+    GlobalVar, Import, Module, Type,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
@@ -33,6 +33,7 @@ pub fn minimize_exports(module: &mut Module, is_root: impl Fn(&ExportKey) -> boo
 
         seen_types: FxHashSet::default(),
         seen_consts: FxHashSet::default(),
+        seen_data_inst_forms: FxHashSet::default(),
         seen_global_vars: FxHashSet::default(),
         seen_funcs: FxHashSet::default(),
     };
@@ -60,13 +61,16 @@ struct LiveExportCollector<'a> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
     seen_types: FxHashSet<Type>,
     seen_consts: FxHashSet<Const>,
+    seen_data_inst_forms: FxHashSet<DataInstForm>,
     seen_global_vars: FxHashSet<GlobalVar>,
     seen_funcs: FxHashSet<Func>,
 }
 
 impl Visitor<'_> for LiveExportCollector<'_> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
-    fn visit_attr_set_use(&mut self, _attrs: AttrSet) {}
+    fn visit_attr_set_use(&mut self, _attrs: AttrSet) {
+        // FIXME(eddyb) if `AttrSet`s are ignored, why not `Type`s too?
+    }
     fn visit_type_use(&mut self, ty: Type) {
         if self.seen_types.insert(ty) {
             self.visit_type_def(&self.cx[ty]);
@@ -75,6 +79,11 @@ impl Visitor<'_> for LiveExportCollector<'_> {
     fn visit_const_use(&mut self, ct: Const) {
         if self.seen_consts.insert(ct) {
             self.visit_const_def(&self.cx[ct]);
+        }
+    }
+    fn visit_data_inst_form_use(&mut self, data_inst_form: DataInstForm) {
+        if self.seen_data_inst_forms.insert(data_inst_form) {
+            self.visit_data_inst_form_def(&self.cx[data_inst_form]);
         }
     }
 
@@ -119,6 +128,7 @@ pub fn resolve_imports(module: &mut Module) {
 
             seen_types: FxHashSet::default(),
             seen_consts: FxHashSet::default(),
+            seen_data_inst_forms: FxHashSet::default(),
             seen_global_vars: FxHashSet::default(),
             seen_funcs: FxHashSet::default(),
         };
@@ -134,6 +144,7 @@ pub fn resolve_imports(module: &mut Module) {
 
         transformed_types: FxHashMap::default(),
         transformed_consts: FxHashMap::default(),
+        transformed_data_inst_forms: FxHashMap::default(),
         transformed_global_vars: FxHashMap::default(),
         global_var_queue: VecDeque::new(),
         transformed_funcs: FxHashMap::default(),
@@ -170,13 +181,16 @@ struct ImportResolutionCollector<'a> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
     seen_types: FxHashSet<Type>,
     seen_consts: FxHashSet<Const>,
+    seen_data_inst_forms: FxHashSet<DataInstForm>,
     seen_global_vars: FxHashSet<GlobalVar>,
     seen_funcs: FxHashSet<Func>,
 }
 
 impl Visitor<'_> for ImportResolutionCollector<'_> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
-    fn visit_attr_set_use(&mut self, _attrs: AttrSet) {}
+    fn visit_attr_set_use(&mut self, _attrs: AttrSet) {
+        // FIXME(eddyb) if `AttrSet`s are ignored, why not `Type`s too?
+    }
     fn visit_type_use(&mut self, ty: Type) {
         if self.seen_types.insert(ty) {
             self.visit_type_def(&self.cx[ty]);
@@ -185,6 +199,11 @@ impl Visitor<'_> for ImportResolutionCollector<'_> {
     fn visit_const_use(&mut self, ct: Const) {
         if self.seen_consts.insert(ct) {
             self.visit_const_def(&self.cx[ct]);
+        }
+    }
+    fn visit_data_inst_form_use(&mut self, data_inst_form: DataInstForm) {
+        if self.seen_data_inst_forms.insert(data_inst_form) {
+            self.visit_data_inst_form_def(&self.cx[data_inst_form]);
         }
     }
 
@@ -233,6 +252,7 @@ struct ImportResolver<'a> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
     transformed_types: FxHashMap<Type, Transformed<Type>>,
     transformed_consts: FxHashMap<Const, Transformed<Const>>,
+    transformed_data_inst_forms: FxHashMap<DataInstForm, Transformed<DataInstForm>>,
     transformed_global_vars: FxHashMap<GlobalVar, Transformed<GlobalVar>>,
     global_var_queue: VecDeque<GlobalVar>,
     transformed_funcs: FxHashMap<Func, Transformed<Func>>,
@@ -259,6 +279,20 @@ impl Transformer for ImportResolver<'_> {
             .transform_const_def(&self.cx[ct])
             .map(|ct_def| self.cx.intern(ct_def));
         self.transformed_consts.insert(ct, transformed);
+        transformed
+    }
+    fn transform_data_inst_form_use(
+        &mut self,
+        data_inst_form: DataInstForm,
+    ) -> Transformed<DataInstForm> {
+        if let Some(&cached) = self.transformed_data_inst_forms.get(&data_inst_form) {
+            return cached;
+        }
+        let transformed = self
+            .transform_data_inst_form_def(&self.cx[data_inst_form])
+            .map(|data_inst_form_def| self.cx.intern(data_inst_form_def));
+        self.transformed_data_inst_forms
+            .insert(data_inst_form, transformed);
         transformed
     }
 

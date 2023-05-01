@@ -8,8 +8,8 @@ use crate::func_at::FuncAt;
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
     AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, Context, ControlNode, ControlNodeKind,
-    DataInst, DataInstKind, DeclDef, Diag, EntityList, ExportKey, Exportee, Func, FxIndexMap,
-    GlobalVar, Module, OrdAssertEq, Type, TypeCtor, Value,
+    DataInst, DataInstForm, DataInstKind, DeclDef, Diag, EntityList, ExportKey, Exportee, Func,
+    FxIndexMap, GlobalVar, Module, OrdAssertEq, Type, TypeCtor, Value,
 };
 use itertools::Either;
 use rustc_hash::FxHashMap;
@@ -908,6 +908,7 @@ impl<'a> InferUsage<'a> {
             for func_at_inst in func_def_body.at(insts).into_iter().rev() {
                 let data_inst = func_at_inst.position;
                 let data_inst_def = func_at_inst.def();
+                let data_inst_form_def = &cx[data_inst_def.form];
                 let output_usage = data_inst_output_usages.remove(&data_inst).flatten();
 
                 let mut generate_usage = |this: &mut Self, ptr: Value, new_usage| {
@@ -947,7 +948,7 @@ impl<'a> InferUsage<'a> {
                         None => new_usage,
                     });
                 };
-                match &data_inst_def.kind {
+                match &data_inst_form_def.kind {
                     &DataInstKind::FuncCall(callee) => {
                         match self.infer_usage_in_func(module, callee) {
                             FuncInferUsageState::Complete(callee_results) => {
@@ -970,7 +971,7 @@ impl<'a> InferUsage<'a> {
                                 ));
                             }
                         };
-                        if data_inst_def.output_type.map_or(false, is_qptr) {
+                        if data_inst_form_def.output_type.map_or(false, is_qptr) {
                             if let Some(usage) = output_usage {
                                 usage_or_err_attrs_to_attach
                                     .push((Value::DataInstOutput(data_inst), usage));
@@ -1156,7 +1157,7 @@ impl<'a> InferUsage<'a> {
                     }
                     DataInstKind::QPtr(op @ (QPtrOp::Load | QPtrOp::Store)) => {
                         let (op_name, access_type) = match op {
-                            QPtrOp::Load => ("Load", data_inst_def.output_type.unwrap()),
+                            QPtrOp::Load => ("Load", data_inst_form_def.output_type.unwrap()),
                             QPtrOp::Store => (
                                 "Store",
                                 func_at_inst.at(data_inst_def.inputs[1]).type_of(&cx),
@@ -1302,6 +1303,7 @@ impl Visitor<'_> for CollectAllDataInsts {
     fn visit_attr_set_use(&mut self, _: AttrSet) {}
     fn visit_type_use(&mut self, _: Type) {}
     fn visit_const_use(&mut self, _: Const) {}
+    fn visit_data_inst_form_use(&mut self, _: DataInstForm) {}
     fn visit_global_var_use(&mut self, _: GlobalVar) {}
     fn visit_func_use(&mut self, _: Func) {}
 
