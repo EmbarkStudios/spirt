@@ -769,13 +769,13 @@ impl Spec {
 
                     let next_seq = match o.quantifier {
                         _ if single == Some(id_result_type) => {
-                            assert!(matches!(o.quantifier, None));
+                            assert!(o.quantifier.is_none());
                             assert!(!def.has_result_type_id);
                             def.has_result_type_id = true;
                             Seq::IdResultType
                         }
                         _ if single == Some(id_result) => {
-                            assert!(matches!(o.quantifier, None));
+                            assert!(o.quantifier.is_none());
                             assert!(!def.has_result_id);
                             def.has_result_id = true;
                             Seq::IdResult
