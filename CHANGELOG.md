@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed 🛠
+- [PR#30](https://github.com/EmbarkStudios/spirt/pull/30) replaced the old `spv-lower-dump`
+  example (which only dumped plaintext, not HTML) with a more useful `spv-lower-print` one
+
+### Fixed 🩹
+- [PR#27](https://github.com/EmbarkStudios/spirt/pull/27) fixed some pretty-printing issues
+  in the initial `Attr::Diagnostics` implementation (`BUG` paths and `/* ... */` indentation)
+
 ## [0.2.0] - 2023-04-21
 
 ### Added ⭐
