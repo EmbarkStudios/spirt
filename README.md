@@ -134,8 +134,8 @@ fn main() -> @location(0) i32 {
 <!-- BEGIN tests/data/for-loop.wgsl.spvasm.structured.spirt -->
 ```cxx
 #{
-  spv.OpDecorate<spv.Decoration.Flat>,
-  spv.OpDecorate<spv.Decoration.Location(0)>,
+  spv.OpDecorate(spv.Decoration.Flat),
+  spv.OpDecorate(spv.Decoration.Location(0)),
 }
 global_var0 in spv.StorageClass.Output: s32
 
