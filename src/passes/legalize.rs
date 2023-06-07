@@ -1,5 +1,7 @@
 use crate::visit::{InnerVisit, Visitor};
-use crate::{cfg, AttrSet, Const, Context, DeclDef, Func, FxIndexSet, GlobalVar, Module, Type};
+use crate::{
+    cfg, AttrSet, Const, Context, DataInstForm, DeclDef, Func, FxIndexSet, GlobalVar, Module, Type,
+};
 
 /// Apply the [`cfg::Structurizer`] algorithm to all function definitions in `module`.
 pub fn structurize_func_cfgs(module: &mut Module) {
@@ -12,6 +14,7 @@ pub fn structurize_func_cfgs(module: &mut Module) {
 
         seen_types: FxIndexSet::default(),
         seen_consts: FxIndexSet::default(),
+        seen_data_inst_forms: FxIndexSet::default(),
         seen_global_vars: FxIndexSet::default(),
         seen_funcs: FxIndexSet::default(),
     };
@@ -34,13 +37,16 @@ struct ReachableUseCollector<'a> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
     seen_types: FxIndexSet<Type>,
     seen_consts: FxIndexSet<Const>,
+    seen_data_inst_forms: FxIndexSet<DataInstForm>,
     seen_global_vars: FxIndexSet<GlobalVar>,
     seen_funcs: FxIndexSet<Func>,
 }
 
 impl Visitor<'_> for ReachableUseCollector<'_> {
     // FIXME(eddyb) build some automation to avoid ever repeating these.
-    fn visit_attr_set_use(&mut self, _attrs: AttrSet) {}
+    fn visit_attr_set_use(&mut self, _attrs: AttrSet) {
+        // FIXME(eddyb) if `AttrSet`s are ignored, why not `Type`s too?
+    }
     fn visit_type_use(&mut self, ty: Type) {
         if self.seen_types.insert(ty) {
             self.visit_type_def(&self.cx[ty]);
@@ -49,6 +55,11 @@ impl Visitor<'_> for ReachableUseCollector<'_> {
     fn visit_const_use(&mut self, ct: Const) {
         if self.seen_consts.insert(ct) {
             self.visit_const_def(&self.cx[ct]);
+        }
+    }
+    fn visit_data_inst_form_use(&mut self, data_inst_form: DataInstForm) {
+        if self.seen_data_inst_forms.insert(data_inst_form) {
+            self.visit_data_inst_form_def(&self.cx[data_inst_form]);
         }
     }
 

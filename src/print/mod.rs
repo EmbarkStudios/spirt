@@ -26,10 +26,11 @@ use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
-    ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstKind, DeclDef, Diag,
-    DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncParam,
-    FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef,
+    DataInstKind, DeclDef, Diag, DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func,
+    FuncDecl, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
+    ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeCtor, TypeCtorArg,
+    TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -384,6 +385,12 @@ impl<'a> Visitor<'a> for Plan<'a> {
     }
     fn visit_const_use(&mut self, ct: Const) {
         self.use_interned(CxInterned::Const(ct));
+    }
+    fn visit_data_inst_form_use(&mut self, data_inst_form: DataInstForm) {
+        // NOTE(eddyb) this contains no deduplication because each `DataInstDef`
+        // will be pretty-printed separately, so everything in its `form` also
+        // needs to get use counts incremented separately per-`DataInstDef`.
+        self.visit_data_inst_form_def(&self.cx[data_inst_form]);
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
@@ -785,7 +792,7 @@ impl<'a> Printer<'a> {
                         if let ControlNodeKind::Block { insts } = *kind {
                             for func_at_inst in func_def_body.at(insts) {
                                 define(Use::AlignmentAnchorForDataInst(func_at_inst.position));
-                                if func_at_inst.def().output_type.is_some() {
+                                if cx[func_at_inst.def().form].output_type.is_some() {
                                     define(Use::DataInstOutput(func_at_inst.position));
                                 }
                             }
@@ -808,6 +815,7 @@ impl<'a> Printer<'a> {
                     fn visit_attr_set_use(&mut self, _: AttrSet) {}
                     fn visit_type_use(&mut self, _: Type) {}
                     fn visit_const_use(&mut self, _: Const) {}
+                    fn visit_data_inst_form_use(&mut self, _: DataInstForm) {}
                     fn visit_global_var_use(&mut self, _: GlobalVar) {}
                     fn visit_func_use(&mut self, _: Func) {}
 
@@ -2687,7 +2695,7 @@ impl Print for FuncAt<'_, ControlNode> {
                                 data_inst_attrs_and_def.def_without_name,
                             ]);
                             data_inst_attrs_and_def.insert_name_before_def(
-                                if data_inst_def.output_type.is_none() {
+                                if printer.cx[data_inst_def.form].output_type.is_none() {
                                     pretty::Fragment::default()
                                 } else {
                                     pretty::Fragment::new([
@@ -2834,12 +2842,13 @@ impl Print for DataInstDef {
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let Self {
             attrs,
-            kind,
-            output_type,
+            form,
             inputs,
         } = self;
 
         let attrs = attrs.print(printer);
+
+        let DataInstFormDef { kind, output_type } = &printer.cx[*form];
 
         let header = match kind {
             &DataInstKind::FuncCall(func) => pretty::Fragment::new([

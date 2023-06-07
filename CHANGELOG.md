@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#28](https://github.com/EmbarkStudios/spirt/pull/28) moved two `DataInstDef`
+  fields (`kind` and `output_type`) to `DataInstForm`, a new interned type
 - [PR#30](https://github.com/EmbarkStudios/spirt/pull/30) replaced the old `spv-lower-dump`
   example (which only dumped plaintext, not HTML) with a more useful `spv-lower-print` one
 

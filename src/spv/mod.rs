@@ -58,6 +58,8 @@ pub struct Inst {
     // FIXME(eddyb) change the inline size of this to fit most instructions.
     // FIXME(eddyb) it might be worth investigating the performance implications
     // of interning "long immediates", compared to the flattened representation.
+    // NOTE(eddyb) interning these separately is likely unnecessary in many cases,
+    // now that `DataInstForm`s are interned, and `Const`s etc. were already.
     pub imms: SmallVec<[Imm; 2]>,
 }
 

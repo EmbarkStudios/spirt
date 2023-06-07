@@ -5,9 +5,9 @@ use crate::spv::{self, spec};
 use crate::{
     cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeDef,
     ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
-    DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func, FuncDecl,
-    FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import, InternedStr,
-    Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    DataInstFormDef, DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func,
+    FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
+    InternedStr, Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -866,6 +866,18 @@ impl Module {
             return Err(invalid("OpFunction without matching OpFunctionEnd"));
         }
 
+        // HACK(eddyb) `OpNop` is useful for defining `DataInst`s before they're
+        // actually lowered (to be able to refer to their outputs `Value`s).
+        let mut cached_op_nop_form = None;
+        let mut get_op_nop_form = || {
+            *cached_op_nop_form.get_or_insert_with(|| {
+                cx.intern(DataInstFormDef {
+                    kind: DataInstKind::SpvInst(wk.OpNop.into()),
+                    output_type: None,
+                })
+            })
+        };
+
         // Process function bodies, having seen the whole module.
         for func_body in pending_func_bodies {
             let FuncBody {
@@ -995,8 +1007,8 @@ impl Module {
                                     &cx,
                                     DataInstDef {
                                         attrs: AttrSet::default(),
-                                        kind: DataInstKind::SpvInst(wk.OpNop.into()),
-                                        output_type: None,
+                                        // FIXME(eddyb) cache this form locally.
+                                        form: get_op_nop_form(),
                                         inputs: [].into_iter().collect(),
                                     }
                                     .into(),
@@ -1375,16 +1387,19 @@ impl Module {
 
                     let data_inst_def = DataInstDef {
                         attrs,
-                        kind,
-                        output_type: result_id
-                            .map(|_| {
-                                result_type.ok_or_else(|| {
-                                    invalid(
-                                        "expected value-producing instruction, with a result type",
-                                    )
+                        form: cx.intern(DataInstFormDef {
+                            kind,
+                            output_type: result_id
+                                .map(|_| {
+                                    result_type.ok_or_else(|| {
+                                        invalid(
+                                            "expected value-producing instruction, \
+                                             with a result type",
+                                        )
+                                    })
                                 })
-                            })
-                            .transpose()?,
+                                .transpose()?,
+                        }),
                         inputs: ids
                             .iter()
                             .map(|&id| {

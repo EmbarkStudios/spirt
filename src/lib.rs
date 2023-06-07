@@ -870,15 +870,31 @@ pub use context::DataInst;
 pub struct DataInstDef {
     pub attrs: AttrSet,
 
-    pub kind: DataInstKind,
-
-    pub output_type: Option<Type>,
+    pub form: DataInstForm,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
     pub inputs: SmallVec<[Value; 2]>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+/// Interned handle for a [`DataInstFormDef`](crate::DataInstFormDef)
+/// (a "form", or "template", for [`DataInstDef`](crate::DataInstDef)s).
+pub use context::DataInstForm;
+
+/// "Form" (or "template") definition for [`DataInstFormDef`]s, which includes
+/// most of their common *static* information (notably excluding `attrs`, as
+/// they vary more often due to handling diagnostics, debuginfo, refinement etc.).
+//
+// FIXME(eddyb) now that this is interned, try to find all the code that was
+// working around needing to borrow `DataInstKind`, just because it was owned
+// by a `FuncDefBody` (instead of interned in the `Context`).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct DataInstFormDef {
+    pub kind: DataInstKind,
+
+    pub output_type: Option<Type>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum DataInstKind {
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.

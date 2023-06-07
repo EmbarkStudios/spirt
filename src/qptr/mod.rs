@@ -149,7 +149,7 @@ pub enum QPtrMemUsageKind {
 }
 
 /// `QPtr`-specific operations ([`DataInstKind::QPtr`]).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum QPtrOp {
     // HACK(eddyb) `OpVariable` replacement, which itself should not be kept as
     // a `SpvInst` - once fn-local variables are lowered, this should go there.
