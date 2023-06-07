@@ -501,7 +501,16 @@ enum ApproxLayout {
     ///
     /// `worst_width` can exceed the `inline` field of [`MaxWidths`], in which
     /// case the choice of inline vs block is instead made by a surrounding node.
-    Inline { worst_width: Columns },
+    Inline {
+        worst_width: Columns,
+
+        /// How much of `worst_width` comes from `Node::IfBlockLayout` - that is,
+        /// `worst_width` still includes `Node::IfBlockLayout`, so conservative
+        /// decisions will still be made, but `excess_width_from_only_if_block`
+        /// can be used to reduce `worst_width` when block layout is no longer
+        /// a possibility (i.e. by the enclosing `Node::InlineOrIndentedBlock`).
+        excess_width_from_only_if_block: Columns,
+    },
 
     /// Needs to occupy multiple lines, but may also have the equivalent of
     /// an `Inline` before (`pre_`) and after (`post_`) the multi-line block.
@@ -516,8 +525,18 @@ enum ApproxLayout {
 impl ApproxLayout {
     fn append(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Inline { worst_width: a }, Self::Inline { worst_width: b }) => Self::Inline {
+            (
+                Self::Inline {
+                    worst_width: a,
+                    excess_width_from_only_if_block: a_excess_foib,
+                },
+                Self::Inline {
+                    worst_width: b,
+                    excess_width_from_only_if_block: b_excess_foib,
+                },
+            ) => Self::Inline {
                 worst_width: a.saturating_add(b),
+                excess_width_from_only_if_block: a_excess_foib.saturating_add(b_excess_foib),
             },
             (
                 Self::BlockOrMixed {
@@ -537,13 +556,17 @@ impl ApproxLayout {
                 },
                 Self::Inline {
                     worst_width: post_b,
+                    excess_width_from_only_if_block: _,
                 },
             ) => Self::BlockOrMixed {
                 pre_worst_width,
                 post_worst_width: post_a.saturating_add(post_b),
             },
             (
-                Self::Inline { worst_width: pre_a },
+                Self::Inline {
+                    worst_width: pre_a,
+                    excess_width_from_only_if_block: _,
+                },
                 Self::BlockOrMixed {
                     pre_worst_width: pre_b,
                     post_worst_width,
@@ -590,6 +613,7 @@ impl Node {
             } else {
                 ApproxLayout::Inline {
                     worst_width: Columns::maybe_styled_text_width(text, style),
+                    excess_width_from_only_if_block: Columns::ZERO,
                 }
             }
         };
@@ -608,6 +632,7 @@ impl Node {
 
             Self::BreakingOnlySpace => ApproxLayout::Inline {
                 worst_width: Columns::text_width(" "),
+                excess_width_from_only_if_block: Columns::ZERO,
             },
             Self::ForceLineSeparation => ApproxLayout::BlockOrMixed {
                 pre_worst_width: Columns::ZERO,
@@ -620,15 +645,22 @@ impl Node {
                 // comma added by `join_comma_sep`.
                 let text_layout = Self::Text(text.into()).approx_rigid_layout();
                 let worst_width = match text_layout {
-                    ApproxLayout::Inline { worst_width } => worst_width,
+                    ApproxLayout::Inline {
+                        worst_width,
+                        excess_width_from_only_if_block: _,
+                    } => worst_width,
                     ApproxLayout::BlockOrMixed { .. } => Columns::ZERO,
                 };
-                ApproxLayout::Inline { worst_width }
+                ApproxLayout::Inline {
+                    worst_width,
+                    excess_width_from_only_if_block: worst_width,
+                }
             }
 
             // Layout computed only in `approx_flex_layout`.
             Self::InlineOrIndentedBlock(_) => ApproxLayout::Inline {
                 worst_width: Columns::ZERO,
+                excess_width_from_only_if_block: Columns::ZERO,
             },
         }
     }
@@ -676,6 +708,7 @@ impl Node {
 
                 let mut layout = ApproxLayout::Inline {
                     worst_width: Columns::ZERO,
+                    excess_width_from_only_if_block: Columns::ZERO,
                 };
                 for fragment in &mut fragments[..] {
                     // Offer the same `inner_max_widths` to each `fragment`.
@@ -685,18 +718,33 @@ impl Node {
                     layout = layout.append(fragment.approx_layout(inner_max_widths));
                 }
 
-                layout = match layout {
-                    ApproxLayout::Inline { worst_width } if worst_width <= max_widths.inline => {
-                        layout
-                    }
+                // *If* we pick the inline layout, it will not end up using *any*
+                // `Node::OnlyIfBlock`s, so `excess_width_from_only_if_block` can
+                // be safely subtracted from the "candidate" inline `worst_width`.
+                let candidate_inline_worst_width = match layout {
+                    ApproxLayout::Inline {
+                        worst_width,
+                        excess_width_from_only_if_block,
+                    } => Some(worst_width.saturating_sub(excess_width_from_only_if_block)),
 
+                    ApproxLayout::BlockOrMixed { .. } => None,
+                };
+
+                let inline_layout = candidate_inline_worst_width
+                    .filter(|&worst_width| worst_width <= max_widths.inline)
+                    .map(|worst_width| ApproxLayout::Inline {
+                        worst_width,
+                        excess_width_from_only_if_block: Columns::ZERO,
+                    });
+
+                layout = inline_layout.unwrap_or(
                     // Even if `layout` is already `ApproxLayout::BlockOrMixed`,
                     // always reset it to a plain block, with no pre/post widths.
-                    _ => ApproxLayout::BlockOrMixed {
+                    ApproxLayout::BlockOrMixed {
                         pre_worst_width: Columns::ZERO,
                         post_worst_width: Columns::ZERO,
                     },
-                };
+                );
 
                 match layout {
                     ApproxLayout::Inline { .. } => {
@@ -718,6 +766,7 @@ impl Node {
             | Self::ForceLineSeparation
             | Self::IfBlockLayout(_) => ApproxLayout::Inline {
                 worst_width: Columns::ZERO,
+                excess_width_from_only_if_block: Columns::ZERO,
             },
         }
     }
@@ -729,13 +778,15 @@ impl Fragment {
     fn approx_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
         let mut layout = ApproxLayout::Inline {
             worst_width: Columns::ZERO,
+            excess_width_from_only_if_block: Columns::ZERO,
         };
 
         let child_max_widths = |layout| MaxWidths {
             inline: match layout {
-                ApproxLayout::Inline { worst_width } => {
-                    max_widths.inline.saturating_sub(worst_width)
-                }
+                ApproxLayout::Inline {
+                    worst_width,
+                    excess_width_from_only_if_block: _,
+                } => max_widths.inline.saturating_sub(worst_width),
                 ApproxLayout::BlockOrMixed {
                     post_worst_width, ..
                 } => max_widths.block.saturating_sub(post_worst_width),
@@ -760,6 +811,7 @@ impl Fragment {
                     // process "recent" flexible nodes in between the halves.
                     layout = layout.append(ApproxLayout::Inline {
                         worst_width: pre_worst_width,
+                        excess_width_from_only_if_block: Columns::ZERO,
                     });
                     // FIXME(eddyb) what happens if the same node has both
                     // rigid and flexible `ApproxLayout`s?
