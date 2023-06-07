@@ -982,47 +982,43 @@ impl<'a> Printer<'a> {
         ])
     }
 
+    /// Pretty-print a `spv::print::TokensForOperand` (common helper used below).
+    fn pretty_spv_print_tokens_for_operand(
+        &self,
+        operand: spv::print::TokensForOperand<Option<pretty::Fragment>>,
+    ) -> pretty::Fragment {
+        pretty::Fragment::new(operand.tokens.into_iter().map(|token| match token {
+            spv::print::Token::Error(s) => self.error_style().apply(s).into(),
+            spv::print::Token::Punctuation(s) => s.into(),
+            spv::print::Token::OperandKindNamespacePrefix(s) => {
+                pretty::Fragment::new([
+                    // HACK(eddyb) double-demote to end up with `spv.A.B`,
+                    // with increasing size from `spv.` to `A.` to `B`.
+                    self.demote_style_for_namespace_prefix(
+                        self.demote_style_for_namespace_prefix(self.spv_base_style()),
+                    )
+                    .apply("spv."),
+                    // FIXME(eddyb) avoid the cost of allocating here.
+                    self.demote_style_for_namespace_prefix(self.declarative_keyword_style())
+                        .apply(format!("{s}.")),
+                ])
+            }
+            spv::print::Token::EnumerandName(s) => self.spv_enumerand_name_style().apply(s).into(),
+            spv::print::Token::NumericLiteral(s) => self.numeric_literal_style().apply(s).into(),
+            spv::print::Token::StringLiteral(s) => self.string_literal_style().apply(s).into(),
+            spv::print::Token::Id(id) => {
+                id.unwrap_or_else(|| self.comment_style().apply("/* implicit ID */").into())
+            }
+        }))
+    }
+
     /// Pretty-print a single SPIR-V operand from only immediates, potentially
     /// composed of an enumerand with parameters (which consumes more immediates).
     fn pretty_spv_operand_from_imms(
         &self,
         imms: impl IntoIterator<Item = spv::Imm>,
     ) -> pretty::Fragment {
-        // FIXME(eddyb) deduplicate the `Token` match with `pretty_spv_inst`.
-        pretty::Fragment::new(
-            spv::print::operand_from_imms(imms)
-                .tokens
-                .into_iter()
-                .map(|token| match token {
-                    spv::print::Token::Error(s) => self.error_style().apply(s).into(),
-                    spv::print::Token::Punctuation(s) => s.into(),
-                    spv::print::Token::OperandKindNamespacePrefix(s) => {
-                        pretty::Fragment::new([
-                            // HACK(eddyb) double-demote to end up with `spv.A.B`,
-                            // with increasing size from `spv.` to `A.` to `B`.
-                            self.demote_style_for_namespace_prefix(
-                                self.demote_style_for_namespace_prefix(self.spv_base_style()),
-                            )
-                            .apply("spv."),
-                            // FIXME(eddyb) avoid the cost of allocating here.
-                            self.demote_style_for_namespace_prefix(
-                                self.declarative_keyword_style(),
-                            )
-                            .apply(format!("{s}.")),
-                        ])
-                    }
-                    spv::print::Token::EnumerandName(s) => {
-                        self.spv_enumerand_name_style().apply(s).into()
-                    }
-                    spv::print::Token::NumericLiteral(s) => {
-                        self.numeric_literal_style().apply(s).into()
-                    }
-                    spv::print::Token::StringLiteral(s) => {
-                        self.string_literal_style().apply(s).into()
-                    }
-                    spv::print::Token::Id(_) => unreachable!(),
-                }),
-        )
+        self.pretty_spv_print_tokens_for_operand(spv::print::operand_from_imms(imms))
     }
 
     /// Pretty-print a single SPIR-V (short) immediate (e.g. an enumerand).
@@ -1030,15 +1026,13 @@ impl<'a> Printer<'a> {
         self.pretty_spv_operand_from_imms([spv::Imm::Short(kind, word)])
     }
 
-    /// Pretty-print an arbitrary SPIR-V `opcode` with `imms` and `ids` as its
-    /// SPIR-V operands (with each `ID` in `ids` passed through `print_id`),
-    /// and optionally with a ` : ...` type ascription at the end (`result_type`).
+    /// Pretty-print an arbitrary SPIR-V `opcode` with its SPIR-V operands being
+    /// given by `imms` (non-IDs) and `printed_ids` (IDs, printed by the caller).
     ///
-    /// `print_id` can return `None` to indicate an ID operand is implicit in
-    /// SPIR-T, and should not be printed (e.g. decorations' target IDs).
-    /// But if `print_id` doesn't need to return `Option<_>` (for `None`), its
-    /// return type can skip the `Option` entirely (which allows passing in the
-    /// [`Print::print`] method, instead of a closure, as `print_id`).
+    /// `printed_ids` elements can be `None` to indicate an ID operand is implicit
+    /// in SPIR-T, and should not be printed (e.g. decorations' target IDs).
+    /// But if `printed_ids` doesn't need to have `None` elements, it can skip
+    /// the `Option` entirely (i.e. have `pretty::Fragment` elements directly).
     ///
     /// Immediate and `ID` operands are interleaved (in the order mandated by
     /// the SPIR-V standard) and together wrapped in parentheses, e.g.:
@@ -1046,71 +1040,31 @@ impl<'a> Printer<'a> {
     ///
     /// This should be used everywhere a SPIR-V instruction needs to be printed,
     /// to ensure consistency across all such situations.
-    fn pretty_spv_inst<ID: Copy, OPF: Into<Option<pretty::Fragment>>>(
+    fn pretty_spv_inst<OPF: Into<Option<pretty::Fragment>>>(
         &self,
         spv_inst_name_style: pretty::Styles,
         opcode: spv::spec::Opcode,
         imms: &[spv::Imm],
-        ids: impl IntoIterator<Item = ID>,
-        print_id: impl Fn(ID, &Self) -> OPF,
-        result_type: Option<Type>,
+        printed_ids: impl IntoIterator<Item = OPF>,
     ) -> pretty::Fragment {
-        let mut operands = spv::print::inst_operands(opcode, imms.iter().copied(), ids)
-            .filter_map(|operand| {
-                if let [spv::print::Token::Id(id)] = operand.tokens[..] {
-                    print_id(id, self).into()
-                } else {
-                    // FIXME(eddyb) deduplicate the `Token` match with `pretty_spv_operand_from_imms`.
-                    Some(pretty::Fragment::new(operand.tokens.into_iter().map(
-                        |token| match token {
-                            spv::print::Token::Error(s) => self.error_style().apply(s).into(),
-                            spv::print::Token::Punctuation(s) => s.into(),
-                            spv::print::Token::OperandKindNamespacePrefix(s) => {
-                                pretty::Fragment::new([
-                                    // HACK(eddyb) double-demote to end up with `spv.A.B`,
-                                    // with increasing size from `spv.` to `A.` to `B`.
-                                    self.demote_style_for_namespace_prefix(
-                                        self.demote_style_for_namespace_prefix(
-                                            self.spv_base_style(),
-                                        ),
-                                    )
-                                    .apply("spv."),
-                                    // FIXME(eddyb) avoid the cost of allocating here.
-                                    self.demote_style_for_namespace_prefix(
-                                        self.declarative_keyword_style(),
-                                    )
-                                    .apply(format!("{s}.")),
-                                ])
-                            }
-                            spv::print::Token::EnumerandName(s) => {
-                                self.spv_enumerand_name_style().apply(s).into()
-                            }
-                            spv::print::Token::NumericLiteral(s) => {
-                                self.numeric_literal_style().apply(s).into()
-                            }
-                            spv::print::Token::StringLiteral(s) => {
-                                self.string_literal_style().apply(s).into()
-                            }
-                            spv::print::Token::Id(id) => {
-                                print_id(id, self).into().unwrap_or_else(|| {
-                                    self.comment_style().apply("/* implicit ID */").into()
-                                })
-                            }
-                        },
-                    )))
-                }
-            })
-            .peekable();
+        let mut operands = spv::print::inst_operands(
+            opcode,
+            imms.iter().copied(),
+            printed_ids.into_iter().map(|printed_id| printed_id.into()),
+        )
+        .filter_map(|operand| {
+            if let [spv::print::Token::Id(None)] = operand.tokens[..] {
+                None
+            } else {
+                Some(self.pretty_spv_print_tokens_for_operand(operand))
+            }
+        })
+        .peekable();
 
         let mut out = self.pretty_spv_opcode(spv_inst_name_style, opcode);
 
         if operands.peek().is_some() {
             out = pretty::Fragment::new([out, pretty::join_comma_sep("(", operands, ")")]);
-        }
-
-        // FIXME(eddyb) consider moving this to the callers.
-        if let Some(ty) = result_type {
-            out = pretty::Fragment::new([out, self.pretty_type_ascription_suffix(ty)]);
         }
 
         out
@@ -1675,16 +1629,7 @@ impl Print for ExportKey {
             } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
-                struct ImplicitTargetId;
-
-                printer.pretty_spv_inst(
-                    printer.spv_op_style(),
-                    wk.OpEntryPoint,
-                    imms,
-                    &[ImplicitTargetId],
-                    |ImplicitTargetId, _| None,
-                    None,
-                )
+                printer.pretty_spv_inst(printer.spv_op_style(), wk.OpEntryPoint, imms, [None])
             }
         }
     }
@@ -1942,21 +1887,10 @@ impl Print for Attr {
                 )
             }
 
-            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
-                struct ImplicitTargetId;
-
-                (
-                    AttrStyle::NonComment,
-                    printer.pretty_spv_inst(
-                        printer.attr_style(),
-                        *opcode,
-                        imms,
-                        &[ImplicitTargetId],
-                        |ImplicitTargetId, _| None,
-                        None,
-                    ),
-                )
-            }
+            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => (
+                AttrStyle::NonComment,
+                printer.pretty_spv_inst(printer.attr_style(), *opcode, imms, [None]),
+            ),
             &Attr::SpvDebugLine {
                 file_path,
                 line,
@@ -2155,12 +2089,10 @@ impl Print for TypeDef {
                         printer.spv_op_style(),
                         opcode,
                         imms,
-                        ctor_args,
-                        |&arg, printer| match arg {
+                        ctor_args.iter().map(|&arg| match arg {
                             TypeCtorArg::Type(ty) => ty.print(printer),
                             TypeCtorArg::Const(ct) => ct.print(printer),
-                        },
-                        None,
+                        }),
                     ),
                     TypeCtor::SpvStringLiteralForExtInst => pretty::Fragment::new([
                         printer.error_style().apply("type_of").into(),
@@ -2306,14 +2238,15 @@ impl Print for ConstDef {
                 ConstCtor::PtrToGlobalVar(gv) => {
                     pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
-                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                    printer.spv_op_style(),
-                    opcode,
-                    imms,
-                    ctor_args,
-                    Print::print,
-                    Some(*ty),
-                ),
+                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => pretty::Fragment::new([
+                    printer.pretty_spv_inst(
+                        printer.spv_op_style(),
+                        opcode,
+                        imms,
+                        ctor_args.iter().map(|arg| arg.print(printer)),
+                    ),
+                    printer.pretty_type_ascription_suffix(*ty),
+                ]),
                 ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
                     printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
                     "(".into(),
@@ -3026,17 +2959,12 @@ impl Print for DataInstDef {
                 ])
             }
 
-            DataInstKind::SpvInst(inst) => {
-                // FIMXE(eddyb) maybe remove `result_type` from `pretty_spv_inst`?
-                printer.pretty_spv_inst(
-                    printer.spv_op_style(),
-                    inst.opcode,
-                    &inst.imms,
-                    inputs,
-                    Print::print,
-                    None,
-                )
-            }
+            DataInstKind::SpvInst(inst) => printer.pretty_spv_inst(
+                printer.spv_op_style(),
+                inst.opcode,
+                &inst.imms,
+                inputs.iter().map(|v| v.print(printer)),
+            ),
             &DataInstKind::SpvExtInst { ext_set, inst } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
@@ -3069,8 +2997,6 @@ impl Print for DataInstDef {
             }
         };
 
-        // FIXME(eddyb) deduplicate the "parens + optional type ascription"
-        // logic with `pretty_spv_inst`.
         let def_without_name = pretty::Fragment::new([
             def_without_type,
             output_type
@@ -3137,7 +3063,12 @@ impl Print for cfg::ControlInst {
             })) => {
                 // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
                 assert!(targets.len() == 0);
-                printer.pretty_spv_inst(kw_style, *opcode, imms, inputs, Print::print, None)
+                printer.pretty_spv_inst(
+                    kw_style,
+                    *opcode,
+                    imms,
+                    inputs.iter().map(|v| v.print(printer)),
+                )
             }
 
             cfg::ControlInstKind::Branch => {
@@ -3182,22 +3113,13 @@ impl SelectionKind {
                 ])
             }
             SelectionKind::SpvInst(spv::Inst { opcode, ref imms }) => {
-                #[derive(Copy, Clone)]
-                struct TargetLabelId;
-
                 let header = printer.pretty_spv_inst(
                     kw_style.clone(),
                     opcode,
                     imms,
-                    [scrutinee]
+                    [Some(scrutinee.print(printer))]
                         .into_iter()
-                        .map(Ok)
-                        .chain((0..cases.len()).map(|_| Err(TargetLabelId))),
-                    |id, printer| match id {
-                        Ok(v) => Some(v.print(printer)),
-                        Err(TargetLabelId) => None,
-                    },
-                    None,
+                        .chain((0..cases.len()).map(|_| None)),
                 );
 
                 pretty::Fragment::new([

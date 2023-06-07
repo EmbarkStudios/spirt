@@ -258,8 +258,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
 /// Print a single SPIR-V operand from only immediates, potentially composed of
 /// an enumerand with parameters (which consumes more immediates).
-// FIXME(eddyb) the return type should likely be `TokensForOperand<!>`.
-pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForOperand<String> {
+pub fn operand_from_imms<T>(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForOperand<T> {
     let mut printer = OperandPrinter {
         imms: imms.into_iter().peekable(),
         ids: iter::empty().peekable(),
