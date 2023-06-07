@@ -121,9 +121,10 @@ impl Versions<pretty::FragmentPostLayout> {
     }
     SCOPE>tbody>tr>td {
         vertical-align: top;
-        max-width: MAX_LINE_WIDTHch;
     }
     SCOPE>tbody>tr>td>pre {
+        max-width: MAX_LINE_WIDTHch;
+
         overflow-x: auto;
 
         /* HACK(eddyb) this shouldn't be needed but `visible` will turn into
