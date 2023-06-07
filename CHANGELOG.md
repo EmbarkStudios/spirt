@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#35](https://github.com/EmbarkStudios/spirt/pull/35) abandoned the custom
+  `#{A, B, C}` "attribute set" style in favor of Rust-like `#[A]` `#[B]` `#[C]`
+  (and always printing them inline, without any `attrs123` shorthands)
 - [PR#33](https://github.com/EmbarkStudios/spirt/pull/33) replaced the `spv.OpFoo<imms>(IDs)`
   style of pretty-printing with `spv.OpFoo(A: imm, B: ID, C: imm, ...)` (unified parenthesized
   list of operands, with deemphasized operand names in `foo:` "named arguments" style)
