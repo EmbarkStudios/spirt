@@ -96,6 +96,16 @@ impl Styles {
     pub fn apply(self, text: impl Into<Cow<'static, str>>) -> Node {
         Node::StyledText(Box::new((self, text.into())))
     }
+
+    // HACK(eddyb) this allows us to control `<sub>`/`<sup>` `font-size` exactly,
+    // and use the same information for both layout and the CSS we emit.
+    fn effective_size(&self) -> Option<i8> {
+        self.size.or(if self.subscript || self.superscript {
+            Some(-2)
+        } else {
+            None
+        })
+    }
 }
 
 /// Color palettes built-in for convenience (colors are RGB, as `[u8; 3]`).
@@ -149,6 +159,11 @@ impl Fragment {
     /// Perform layout on the [`Fragment`], limiting lines to `max_line_width`
     /// columns where possible.
     pub fn layout_with_max_line_width(mut self, max_line_width: usize) -> FragmentPostLayout {
+        // FIXME(eddyb) maybe make this a method on `Columns`?
+        let max_line_width = Columns {
+            char_width_tenths: max_line_width.try_into().unwrap_or(u16::MAX) * 10,
+        };
+
         self.approx_layout(MaxWidths {
             inline: max_line_width,
             block: max_line_width,
@@ -321,7 +336,7 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                 let mut special_tags = [
                     ("a", styles.anchor.is_some()),
                     ("sub", styles.subscript),
-                    ("super", styles.superscript),
+                    ("sup", styles.superscript),
                 ]
                 .into_iter()
                 .filter(|&(_, cond)| cond)
@@ -352,9 +367,9 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                         color,
                         color_opacity,
                         thickness,
-                        size,
-                        subscript: _,
-                        superscript: _,
+                        size: _,
+                        subscript,
+                        superscript,
                         desaturate_and_dim_for_unchanged_multiversion_line,
                     } = *styles;
 
@@ -377,8 +392,12 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                         write!(css_style, "font-weight:{};", 500 + (thickness as i32) * 100)
                             .unwrap();
                     }
-                    if let Some(size) = size {
+                    if let Some(size) = styles.effective_size() {
                         write!(css_style, "font-size:{}em;", 1.0 + (size as f64) * 0.1).unwrap();
+                        if !(subscript || superscript) {
+                            // HACK(eddyb) without this, small text is placed too low.
+                            write!(css_style, "vertical-align:middle;").unwrap();
+                        }
                     }
                     if desaturate_and_dim_for_unchanged_multiversion_line {
                         write!(css_style, "filter:saturate(0.3)opacity(0.5);").unwrap();
@@ -419,6 +438,62 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
 
 // Rendering implementation details (including approximate layout).
 
+/// Fractional number of columns, used here to account for `Node::StyledText`
+/// being used to intentionally reduce the size of many "helper" pieces of text,
+/// at least for the HTML output (while this may lead to a less consistently
+/// formatted plaintext output, making good use of width is far more important
+/// for the HTML output, especially when used with `multiversion` tables).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Columns {
+    /// As our `font-size` control granularity is in multiples of `0.1em`,
+    /// the overall width of a line should end up a multiple of `0.1ch`,
+    /// i.e. we're counting tenths of a column's width at the default font size.
+    char_width_tenths: u16,
+}
+
+impl Columns {
+    const ZERO: Self = Self {
+        char_width_tenths: 0,
+    };
+
+    fn text_width(text: &str) -> Self {
+        Self::maybe_styled_text_width(text, None)
+    }
+
+    fn maybe_styled_text_width(text: &str, style: Option<&Styles>) -> Self {
+        assert!(!text.contains('\n'));
+
+        let font_size =
+            u16::try_from(10 + style.and_then(|style| style.effective_size()).unwrap_or(0))
+                .unwrap_or(0);
+
+        // FIXME(eddyb) use `unicode-width` crate for accurate column count.
+        Self {
+            char_width_tenths: text
+                .len()
+                .try_into()
+                .unwrap_or(u16::MAX)
+                .saturating_mul(font_size),
+        }
+    }
+
+    fn saturating_add(self, other: Self) -> Self {
+        Self {
+            char_width_tenths: self
+                .char_width_tenths
+                .saturating_add(other.char_width_tenths),
+        }
+    }
+
+    fn saturating_sub(self, other: Self) -> Self {
+        Self {
+            char_width_tenths: self
+                .char_width_tenths
+                .saturating_sub(other.char_width_tenths),
+        }
+    }
+}
+
 /// The approximate shape of a [`Node`], regarding its 2D placement.
 #[derive(Copy, Clone)]
 enum ApproxLayout {
@@ -426,15 +501,15 @@ enum ApproxLayout {
     ///
     /// `worst_width` can exceed the `inline` field of [`MaxWidths`], in which
     /// case the choice of inline vs block is instead made by a surrounding node.
-    Inline { worst_width: usize },
+    Inline { worst_width: Columns },
 
     /// Needs to occupy multiple lines, but may also have the equivalent of
     /// an `Inline` before (`pre_`) and after (`post_`) the multi-line block.
     //
     // FIXME(eddyb) maybe turn `ApproxLayout` into a `struct` instead?
     BlockOrMixed {
-        pre_worst_width: usize,
-        post_worst_width: usize,
+        pre_worst_width: Columns,
+        post_worst_width: Columns,
     },
 }
 
@@ -489,8 +564,8 @@ impl ApproxLayout {
 /// cases, and those choices will be made inside-out based on actual widths.
 #[derive(Copy, Clone)]
 struct MaxWidths {
-    inline: usize,
-    block: usize,
+    inline: Columns,
+    block: Columns,
 }
 
 // FIXME(eddyb) make this configurable.
@@ -504,40 +579,39 @@ impl Node {
     fn approx_rigid_layout(&self) -> ApproxLayout {
         // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
         // to destructure through the `Box<(_, Cow<str>)>`.
-        let text_approx_rigid_layout = |text: &str| {
+        let text_approx_rigid_layout = |text: &str, style| {
             if let Some((pre, non_pre)) = text.split_once('\n') {
                 let (_, post) = non_pre.rsplit_once('\n').unwrap_or(("", non_pre));
 
-                // FIXME(eddyb) use `unicode-width` crate for accurate column count.
-                let pre_width = pre.len();
-                let post_width = post.len();
-
                 ApproxLayout::BlockOrMixed {
-                    pre_worst_width: pre_width,
-                    post_worst_width: post_width,
+                    pre_worst_width: Columns::maybe_styled_text_width(pre, style),
+                    post_worst_width: Columns::maybe_styled_text_width(post, style),
                 }
             } else {
-                // FIXME(eddyb) use `unicode-width` crate for accurate column count.
-                let width = text.len();
-
-                ApproxLayout::Inline { worst_width: width }
+                ApproxLayout::Inline {
+                    worst_width: Columns::maybe_styled_text_width(text, style),
+                }
             }
         };
 
         #[allow(clippy::match_same_arms)]
         match self {
-            Self::Text(text) => text_approx_rigid_layout(text),
-            Self::StyledText(styles_and_text) => text_approx_rigid_layout(&styles_and_text.1),
+            Self::Text(text) => text_approx_rigid_layout(text, None),
+            Self::StyledText(styles_and_text) => {
+                text_approx_rigid_layout(&styles_and_text.1, Some(&styles_and_text.0))
+            }
 
             Self::IndentedBlock(_) => ApproxLayout::BlockOrMixed {
-                pre_worst_width: 0,
-                post_worst_width: 0,
+                pre_worst_width: Columns::ZERO,
+                post_worst_width: Columns::ZERO,
             },
 
-            Self::BreakingOnlySpace => ApproxLayout::Inline { worst_width: 1 },
+            Self::BreakingOnlySpace => ApproxLayout::Inline {
+                worst_width: Columns::text_width(" "),
+            },
             Self::ForceLineSeparation => ApproxLayout::BlockOrMixed {
-                pre_worst_width: 0,
-                post_worst_width: 0,
+                pre_worst_width: Columns::ZERO,
+                post_worst_width: Columns::ZERO,
             },
             &Self::IfBlockLayout(text) => {
                 // Keep the inline `worst_width`, just in case this node is
@@ -547,13 +621,15 @@ impl Node {
                 let text_layout = Self::Text(text.into()).approx_rigid_layout();
                 let worst_width = match text_layout {
                     ApproxLayout::Inline { worst_width } => worst_width,
-                    ApproxLayout::BlockOrMixed { .. } => 0,
+                    ApproxLayout::BlockOrMixed { .. } => Columns::ZERO,
                 };
                 ApproxLayout::Inline { worst_width }
             }
 
             // Layout computed only in `approx_flex_layout`.
-            Self::InlineOrIndentedBlock(_) => ApproxLayout::Inline { worst_width: 0 },
+            Self::InlineOrIndentedBlock(_) => ApproxLayout::Inline {
+                worst_width: Columns::ZERO,
+            },
         }
     }
 
@@ -566,7 +642,8 @@ impl Node {
         match self {
             Self::IndentedBlock(fragments) => {
                 // Apply one more level of indentation to the block layout.
-                let indented_block_max_width = max_widths.block.saturating_sub(INDENT.len());
+                let indented_block_max_width =
+                    max_widths.block.saturating_sub(Columns::text_width(INDENT));
 
                 // Recurse on `fragments`, so they can compute their own layouts.
                 for fragment in &mut fragments[..] {
@@ -577,14 +654,15 @@ impl Node {
                 }
 
                 ApproxLayout::BlockOrMixed {
-                    pre_worst_width: 0,
-                    post_worst_width: 0,
+                    pre_worst_width: Columns::ZERO,
+                    post_worst_width: Columns::ZERO,
                 }
             }
 
             Self::InlineOrIndentedBlock(fragments) => {
                 // Apply one more level of indentation to the block layout.
-                let indented_block_max_width = max_widths.block.saturating_sub(INDENT.len());
+                let indented_block_max_width =
+                    max_widths.block.saturating_sub(Columns::text_width(INDENT));
 
                 // Maximize the inline width available to `fragments`, usually
                 // increasing it to the maximum allowed by the block layout.
@@ -596,7 +674,9 @@ impl Node {
                     block: indented_block_max_width,
                 };
 
-                let mut layout = ApproxLayout::Inline { worst_width: 0 };
+                let mut layout = ApproxLayout::Inline {
+                    worst_width: Columns::ZERO,
+                };
                 for fragment in &mut fragments[..] {
                     // Offer the same `inner_max_widths` to each `fragment`.
                     // Worst case, they all remain inline and block layout is
@@ -613,8 +693,8 @@ impl Node {
                     // Even if `layout` is already `ApproxLayout::BlockOrMixed`,
                     // always reset it to a plain block, with no pre/post widths.
                     _ => ApproxLayout::BlockOrMixed {
-                        pre_worst_width: 0,
-                        post_worst_width: 0,
+                        pre_worst_width: Columns::ZERO,
+                        post_worst_width: Columns::ZERO,
                     },
                 };
 
@@ -636,7 +716,9 @@ impl Node {
             | Self::StyledText(_)
             | Self::BreakingOnlySpace
             | Self::ForceLineSeparation
-            | Self::IfBlockLayout(_) => ApproxLayout::Inline { worst_width: 0 },
+            | Self::IfBlockLayout(_) => ApproxLayout::Inline {
+                worst_width: Columns::ZERO,
+            },
         }
     }
 }
@@ -645,7 +727,9 @@ impl Fragment {
     /// Determine the [`ApproxLayout`] of this [`Fragment`], potentially making
     /// adjustments in order to fit within `max_widths`.
     fn approx_layout(&mut self, max_widths: MaxWidths) -> ApproxLayout {
-        let mut layout = ApproxLayout::Inline { worst_width: 0 };
+        let mut layout = ApproxLayout::Inline {
+            worst_width: Columns::ZERO,
+        };
 
         let child_max_widths = |layout| MaxWidths {
             inline: match layout {
@@ -686,7 +770,7 @@ impl Fragment {
                         next_flex_idx += 1;
                     }
                     layout = layout.append(ApproxLayout::BlockOrMixed {
-                        pre_worst_width: 0,
+                        pre_worst_width: Columns::ZERO,
                         post_worst_width,
                     });
                 }
