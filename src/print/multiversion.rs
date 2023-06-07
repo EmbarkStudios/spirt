@@ -123,6 +123,17 @@ impl Versions<pretty::FragmentPostLayout> {
         vertical-align: top;
         max-width: MAX_LINE_WIDTHch;
     }
+    SCOPE>tbody>tr>td>pre {
+        overflow-x: auto;
+
+        /* HACK(eddyb) this shouldn't be needed but `visible` will turn into
+           `auto` because `overflow-x` is `auto` (for cursed browser reasons),
+           and some table cells are always assumed to need vertical scroll,
+           e.g. because they have `<sub>` elements on the last line (which don't
+           contribute to the surrounding bounding box, due to `line-height: 0`)
+         */
+        overflow-y: hidden;
+    }
 </style>
         "
                     .replace("SCOPE", &format!("table.{TABLE_CLASS_NAME}"))
