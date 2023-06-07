@@ -135,7 +135,7 @@ fn main() -> @location(0) i32 {
 ```cxx
 #{
   spv.OpDecorate(spv.Decoration.Flat),
-  spv.OpDecorate(spv.Decoration.Location(0)),
+  spv.OpDecorate(spv.Decoration.Location(Location: 0)),
 }
 global_var0 in spv.StorageClass.Output: s32
 
@@ -147,7 +147,7 @@ func0() -> spv.OpTypeVoid {
       v7 = spv.OpIAdd(v1, 1s32): s32
       (true, v6, v7)
     } else {
-      spv.OpStore(&global_var0, v0)
+      spv.OpStore(Pointer: &global_var0, Object: v0)
       (false, spv.OpUndef: s32, spv.OpUndef: s32)
     }
     (v4, v5) -> (v0, v1)

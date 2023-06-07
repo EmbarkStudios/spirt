@@ -1,5 +1,6 @@
 //! SPIR-V specification parsing/indexing.
 
+use crate::FxIndexSet;
 use arrayvec::ArrayVec;
 use lazy_static::lazy_static;
 use rustc_hash::FxHashMap;
@@ -18,6 +19,10 @@ pub struct Spec {
     pub instructions: indexed::NamedIdxMap<Opcode, InstructionDef, indexed::KhrSegmented>,
 
     pub operand_kinds: indexed::NamedIdxMap<OperandKind, OperandKindDef, indexed::Flat>,
+
+    // HACK(eddyb) ad-hoc interning, to reduce the cost of tracking operand names
+    // down to a single extra byte per operand (see `PackedOperandNameAndKind`).
+    operand_names: FxIndexSet<&'static str>,
 }
 
 macro_rules! def_well_known {
@@ -228,8 +233,8 @@ pub struct InstructionDef {
     pub has_result_type_id: bool,
     pub has_result_id: bool,
 
-    pub req_operands: ArrayVec<OperandKind, 16>,
-    pub opt_operands: ArrayVec<OperandKind, 2>,
+    pub req_operands: ArrayVec<PackedOperandNameAndKind, 14>,
+    pub opt_operands: ArrayVec<PackedOperandNameAndKind, 2>,
     pub rest_operands: Option<RestOperandsUnit>,
 }
 
@@ -261,15 +266,23 @@ impl InstructionDef {
     /// or that an operand's absence signals the end of operands (`Optional`),
     /// which is also the exit signal for the "rest operands" infinite iterators.
     pub fn all_operands(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
+        self.all_operands_with_names()
+            .map(|(mode, name_and_kind)| (mode, name_and_kind.kind()))
+    }
+
+    /// Like `all_operands`, but providing access to the operand names as well.
+    pub fn all_operands_with_names(
+        &self,
+    ) -> impl Iterator<Item = (OperandMode, PackedOperandNameAndKind)> + '_ {
         self.req_operands
             .iter()
             .copied()
-            .map(|kind| (OperandMode::Required, kind))
+            .map(|name_and_kind| (OperandMode::Required, name_and_kind))
             .chain(
                 self.opt_operands
                     .iter()
                     .copied()
-                    .map(|kind| (OperandMode::Optional, kind)),
+                    .map(|name_and_kind| (OperandMode::Optional, name_and_kind)),
             )
             .chain(self.rest_operands.iter().flat_map(|rest_unit| {
                 // If the rest operands come in pairs, only the first operand in
@@ -279,10 +292,18 @@ impl InstructionDef {
                     RestOperandsUnit::One(kind) => (kind, None),
                     RestOperandsUnit::Two([a_kind, b_kind]) => (a_kind, Some(b_kind)),
                 };
-                iter::repeat_with(move || {
-                    iter::once((OperandMode::Optional, opt_a))
-                        .chain(req_b.map(|kind| (OperandMode::Required, kind)))
-                })
+                iter::repeat(
+                    iter::once((
+                        OperandMode::Optional,
+                        PackedOperandNameAndKind::unnamed(opt_a),
+                    ))
+                    .chain(req_b.map(|kind| {
+                        (
+                            OperandMode::Required,
+                            PackedOperandNameAndKind::unnamed(kind),
+                        )
+                    })),
+                )
                 .flatten()
             }))
     }
@@ -320,6 +341,55 @@ impl OperandKind {
     #[inline]
     pub fn def(self) -> &'static OperandKindDef {
         self.name_and_def().1
+    }
+}
+
+// HACK(eddyb) only needed because there are more than 256 unique operand names,
+// but less than 64 `OperandKind`s, so we can split 16 kind:name bits as 6:10.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackedOperandNameAndKind(u16);
+
+impl fmt::Debug for PackedOperandNameAndKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.name_and_kind().fmt(f)
+    }
+}
+
+impl PackedOperandNameAndKind {
+    /// `operand_names[EMPTY_NAME_IDX]` must be reserved to contain `""`.
+    const EMPTY_NAME_IDX: usize = 0;
+
+    #[inline]
+    fn unnamed(kind: OperandKind) -> Self {
+        Self::pack(Self::EMPTY_NAME_IDX, kind)
+    }
+
+    #[inline]
+    fn pack(name_idx: usize, kind: OperandKind) -> Self {
+        let packed = Self(((name_idx as u16) << 6) | (kind.0 as u16));
+        assert_eq!(packed.unpack(), (name_idx, kind));
+        packed
+    }
+
+    #[inline]
+    fn unpack(self) -> (usize, OperandKind) {
+        (
+            (self.0 >> 6) as usize,
+            OperandKind((self.0 & ((1 << 6) - 1)) as u8),
+        )
+    }
+
+    /// Unpack this `PackedOperandNameAndKind` into just its `OperandKind`.
+    #[inline]
+    pub fn kind(self) -> OperandKind {
+        self.unpack().1
+    }
+
+    /// Unpack this `PackedOperandNameAndKind` into a name and `OperandKind`.
+    #[inline]
+    pub fn name_and_kind(self) -> (&'static str, OperandKind) {
+        let (name_idx, kind) = self.unpack();
+        (Spec::get().operand_names.get_index(name_idx).unwrap(), kind)
     }
 }
 
@@ -384,7 +454,7 @@ impl indexed::FlatIdx for BitIdx {
 
 #[derive(PartialEq, Eq)]
 pub struct Enumerant {
-    pub req_params: ArrayVec<OperandKind, 4>,
+    pub req_params: ArrayVec<PackedOperandNameAndKind, 3>,
     pub rest_params: Option<OperandKind>,
 }
 
@@ -394,15 +464,24 @@ impl Enumerant {
     /// or that an operand's absence signals the end of operands (`Optional`),
     /// which is also the exit signal for the "rest operands" infinite iterators.
     pub fn all_params(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
+        self.all_params_with_names()
+            .map(|(mode, name_and_kind)| (mode, name_and_kind.kind()))
+    }
+
+    /// Like `all_params`, but providing access to the operand names as well.
+    pub fn all_params_with_names(
+        &self,
+    ) -> impl Iterator<Item = (OperandMode, PackedOperandNameAndKind)> + '_ {
         self.req_params
             .iter()
             .copied()
             .map(|kind| (OperandMode::Required, kind))
-            .chain(
-                self.rest_params
-                    .into_iter()
-                    .flat_map(|kind| iter::repeat_with(move || (OperandMode::Optional, kind))),
-            )
+            .chain(self.rest_params.into_iter().flat_map(|kind| {
+                iter::repeat((
+                    OperandMode::Optional,
+                    PackedOperandNameAndKind::unnamed(kind),
+                ))
+            }))
     }
 }
 
@@ -463,6 +542,38 @@ impl Spec {
             }
         }
 
+        // HACK(eddyb) ad-hoc interning, to reduce the cost of tracking operand names
+        // down to a single extra byte per operand (see `PackedOperandNameAndKind`).
+        let mut operand_names = FxIndexSet::default();
+        assert_eq!(
+            operand_names.insert_full("").0,
+            PackedOperandNameAndKind::EMPTY_NAME_IDX
+        );
+        let mut pack_operand_name_and_kind = |name: &Option<raw::CowStr<'static>>, kind| {
+            let name = name
+                .as_ref()
+                .and_then(|name| match name {
+                    &raw::CowStr::Borrowed(s) => {
+                        s.strip_prefix('\'')?.strip_suffix('\'').filter(|s| {
+                            // HACK(eddyb) it's pretty bad that SPIR-V uses spaces
+                            // in operand names, but by constraining the rest of
+                            // the character set (to be identifier-like), we get
+                            // to remove spaces (to get `FooBar`), or even replace
+                            // them with `_` (to get `Foo_Bar` or even `foo_bar`).
+                            s.starts_with(|c: char| c.is_ascii_alphabetic())
+                                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ')
+                        })
+                    }
+                    raw::CowStr::Owned(s) => {
+                        assert!(s.contains("', +\n'"), "unexpected non-zero-copy {s:?}");
+                        None
+                    }
+                })
+                .unwrap_or("");
+            let (name_idx, _) = operand_names.insert_full(name);
+            PackedOperandNameAndKind::pack(name_idx, kind)
+        };
+
         // Constructing the full `OperandKindDef` may require looking up other
         // `OperandKind`s by name, so build the lookup table for that up-front.
         let operand_kind_by_name: FxHashMap<_, _> = raw_core_grammar
@@ -477,25 +588,28 @@ impl Spec {
             .operand_kinds
             .iter()
             .filter_map(|o| {
-                let enumerant_from_raw = |e: &raw::OperandKindEnumerant<'_>| {
+                let mut enumerant_from_raw = |e: &raw::OperandKindEnumerant<'static>| {
                     let mut all_params = e
                         .parameters
                         .iter()
-                        .map(|p| (&p.quantifier, operand_kind_by_name[p.kind]));
+                        .map(|p| (&p.name, &p.quantifier, operand_kind_by_name[p.kind]));
 
                     let rest_params = match all_params.clone().next_back() {
-                        Some((Some(raw::Quantifier::Rest), kind)) => {
+                        Some((_, Some(raw::Quantifier::Rest), kind)) => {
                             all_params.next_back();
                             Some(kind)
                         }
                         _ => None,
                     };
-                    let req_params = all_params
-                        .map(|(quantifier, kind)| {
-                            assert!(quantifier.is_none());
-                            kind
-                        })
-                        .collect();
+
+                    let mut req_params = ArrayVec::new();
+                    for (name, quantifier, kind) in all_params {
+                        assert!(quantifier.is_none());
+                        req_params
+                            .try_push(pack_operand_name_and_kind(name, kind))
+                            .map_err(|err| format!("{}/{name:?}: {err}", o.kind))
+                            .unwrap();
+                    }
 
                     Enumerant {
                         req_params,
@@ -781,11 +895,17 @@ impl Spec {
                             Seq::IdResult
                         }
                         None => {
-                            def.req_operands.push(single.unwrap());
+                            def.req_operands
+                                .try_push(pack_operand_name_and_kind(&o.name, single.unwrap()))
+                                .map_err(|err| format!("{}/{:?}: {err}", inst.opname, o.name))
+                                .unwrap();
                             Seq::Required
                         }
                         Some(raw::Quantifier::Optional) => {
-                            def.opt_operands.push(single.unwrap());
+                            def.opt_operands
+                                .try_push(pack_operand_name_and_kind(&o.name, single.unwrap()))
+                                .map_err(|err| format!("{}/{:?}: {err}", inst.opname, o.name))
+                                .unwrap();
                             Seq::Optional
                         }
                         Some(raw::Quantifier::Rest) => {
@@ -858,6 +978,8 @@ impl Spec {
             instructions,
             well_known,
             operand_kinds,
+
+            operand_names,
         }
     }
 }
@@ -866,13 +988,12 @@ impl Spec {
 pub mod raw {
     use serde::Deserialize;
     use smallvec::SmallVec;
-    use std::borrow::Cow;
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct CoreGrammar<'a> {
         #[serde(borrow)]
-        pub copyright: Vec<Cow<'a, str>>,
+        pub copyright: Vec<CowStr<'a>>,
 
         #[serde(deserialize_with = "dew_u32_maybe_hex")]
         pub magic_number: u32,
@@ -917,7 +1038,8 @@ pub mod raw {
     pub struct Operand<'a> {
         pub kind: &'a str,
         pub quantifier: Option<Quantifier>,
-        pub name: Option<Cow<'a, str>>,
+        #[serde(borrow)]
+        pub name: Option<CowStr<'a>>,
     }
 
     #[derive(Deserialize)]
@@ -970,6 +1092,15 @@ pub mod raw {
         pub version: Option<&'a str>,
         #[serde(rename = "lastVersion")]
         pub last_version: Option<&'a str>,
+    }
+
+    // HACK(eddyb) `Cow<'a, str>` that works w/ zero-copy deserialization, even
+    // when nested (`serde` only special-cases `Cow` used directly as a field type).
+    #[derive(Deserialize, Debug)]
+    #[serde(untagged)]
+    pub enum CowStr<'a> {
+        Borrowed(&'a str),
+        Owned(String),
     }
 
     /// Helper to generate functions usable with `deserialize_with` (hence "dew"),

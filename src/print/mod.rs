@@ -34,6 +34,7 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::mem;
 
@@ -911,6 +912,12 @@ impl Printer<'_> {
             ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
         }
     }
+    fn named_argument_label_style(&self) -> pretty::Styles {
+        pretty::Styles {
+            size: Some(-5),
+            ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
+        }
+    }
     fn numeric_literal_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::YELLOW)
     }
@@ -961,6 +968,16 @@ impl Printer<'_> {
 }
 
 impl<'a> Printer<'a> {
+    /// Pretty-print a `name: ` style "named argument" prefix.
+    //
+    // FIXME(eddyb) add methods like this for all styled text (e.g. literals).
+    fn pretty_named_argument_prefix(&self, name: impl Into<Cow<'static, str>>) -> pretty::Fragment {
+        // FIXME(eddyb) avoid the cost of allocating here.
+        self.named_argument_label_style()
+            .apply(format!("{}: ", name.into()))
+            .into()
+    }
+
     /// Pretty-print a `: T` style "type ascription" suffix.
     ///
     /// This should be used everywhere some type ascription notation is needed,
@@ -989,6 +1006,39 @@ impl<'a> Printer<'a> {
     ) -> pretty::Fragment {
         pretty::Fragment::new(operand.tokens.into_iter().map(|token| match token {
             spv::print::Token::Error(s) => self.error_style().apply(s).into(),
+            spv::print::Token::OperandName(s) => {
+                Some(s)
+                    .and_then(|name| {
+                        // HACK(eddyb) some operand names are useless.
+                        if name == "Type"
+                            || name
+                                .strip_prefix("Operand ")
+                                .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+                        {
+                            return None;
+                        }
+
+                        // Turn `Foo Bar` and `Foo bar` into `FooBar`.
+                        // FIXME(eddyb) use `&[AsciiChar]` when that stabilizes.
+                        let name = name
+                            .split_ascii_whitespace()
+                            .map(|word| {
+                                if word.starts_with(|c: char| c.is_ascii_lowercase()) {
+                                    let mut word = word.to_string();
+                                    word[..1].make_ascii_uppercase();
+                                    Cow::Owned(word)
+                                } else {
+                                    word.into()
+                                }
+                            })
+                            .reduce(|out, extra| (out.into_owned() + &extra).into())
+                            .unwrap_or_default();
+
+                        Some(name)
+                    })
+                    .map(|name| self.pretty_named_argument_prefix(name))
+                    .unwrap_or_default()
+            }
             spv::print::Token::Punctuation(s) => s.into(),
             spv::print::Token::OperandKindNamespacePrefix(s) => {
                 pretty::Fragment::new([
@@ -1052,12 +1102,14 @@ impl<'a> Printer<'a> {
             imms.iter().copied(),
             printed_ids.into_iter().map(|printed_id| printed_id.into()),
         )
-        .filter_map(|operand| {
-            if let [spv::print::Token::Id(None)] = operand.tokens[..] {
-                None
-            } else {
-                Some(self.pretty_spv_print_tokens_for_operand(operand))
-            }
+        .filter_map(|operand| match operand.tokens[..] {
+            [spv::print::Token::Id(None)]
+            | [
+                spv::print::Token::OperandName(_),
+                spv::print::Token::Id(None),
+            ] => None,
+
+            _ => Some(self.pretty_spv_print_tokens_for_operand(operand)),
         })
         .peekable();
 
@@ -1846,10 +1898,11 @@ impl Print for Attr {
                             "(",
                             [
                                 pretty::Fragment::new([
-                                    "input_idx: ".into(),
+                                    printer.pretty_named_argument_prefix("input_idx"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(format!("{input_idx}")),
+                                        .apply(format!("{input_idx}"))
+                                        .into(),
                                 ]),
                                 pointee.0.print(printer),
                             ],
@@ -2310,7 +2363,7 @@ impl Print for GlobalVarDecl {
                                         [
                                             addr_space.print(printer),
                                             pretty::Fragment::new([
-                                                "size: ".into(),
+                                                printer.pretty_named_argument_prefix("size"),
                                                 pretty::Fragment::new(
                                                     Some(buf.fixed_base.size)
                                                         .filter(|&base_size| {
@@ -2336,10 +2389,11 @@ impl Print for GlobalVarDecl {
                                                 ),
                                             ]),
                                             pretty::Fragment::new([
-                                                "align: ".into(),
+                                                printer.pretty_named_argument_prefix("align"),
                                                 printer
                                                     .numeric_literal_style()
-                                                    .apply(buf.fixed_base.align.to_string()),
+                                                    .apply(buf.fixed_base.align.to_string())
+                                                    .into(),
                                             ]),
                                         ],
                                         ")",
@@ -2377,16 +2431,18 @@ impl Print for GlobalVarDecl {
                                 "(",
                                 [
                                     pretty::Fragment::new([
-                                        "size: ".into(),
+                                        printer.pretty_named_argument_prefix("size"),
                                         printer
                                             .numeric_literal_style()
-                                            .apply(mem_layout.size.to_string()),
+                                            .apply(mem_layout.size.to_string())
+                                            .into(),
                                     ]),
                                     pretty::Fragment::new([
-                                        "align: ".into(),
+                                        printer.pretty_named_argument_prefix("align"),
                                         printer
                                             .numeric_literal_style()
-                                            .apply(mem_layout.align.to_string()),
+                                            .apply(mem_layout.align.to_string())
+                                            .into(),
                                     ]),
                                 ],
                                 ")",
@@ -2837,21 +2893,26 @@ impl Print for DataInstDef {
                             "func_local_var",
                             [
                                 pretty::Fragment::new([
-                                    "size: ".into(),
+                                    printer.pretty_named_argument_prefix("size"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(mem_layout.size.to_string()),
+                                        .apply(mem_layout.size.to_string())
+                                        .into(),
                                 ]),
                                 pretty::Fragment::new([
-                                    "align: ".into(),
+                                    printer.pretty_named_argument_prefix("align"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(mem_layout.align.to_string()),
+                                        .apply(mem_layout.align.to_string())
+                                        .into(),
                                 ]),
                             ]
                             .into_iter()
                             .chain(extra_inputs.get(0).map(|&init| {
-                                pretty::Fragment::new(["init: ".into(), init.print(printer)])
+                                pretty::Fragment::new([
+                                    printer.pretty_named_argument_prefix("initializer"),
+                                    init.print(printer),
+                                ])
                             }))
                             .collect(),
                         )
@@ -2880,16 +2941,18 @@ impl Print for DataInstDef {
                             "buffer_dyn_len",
                             [
                                 pretty::Fragment::new([
-                                    "fixed_base_size: ".into(),
+                                    printer.pretty_named_argument_prefix("fixed_base_size"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(fixed_base_size.to_string()),
+                                        .apply(fixed_base_size.to_string())
+                                        .into(),
                                 ]),
                                 pretty::Fragment::new([
-                                    "dyn_unit_stride: ".into(),
+                                    printer.pretty_named_argument_prefix("dyn_unit_stride"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(dyn_unit_stride.to_string()),
+                                        .apply(dyn_unit_stride.to_string())
+                                        .into(),
                                 ]),
                             ]
                             .into_iter()
