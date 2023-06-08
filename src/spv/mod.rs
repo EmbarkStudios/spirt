@@ -117,7 +117,7 @@ pub type Id = NonZeroU32;
 /// Given a single `LiteralString` (as one [`Imm::Short`] or a [`Imm::LongStart`]
 /// followed by some number of [`Imm::LongCont`] - will panic otherwise), returns a
 /// Rust [`String`] if the literal is valid UTF-8, or the validation error otherwise.
-fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
+pub fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
     let wk = &spec::Spec::get().well_known;
 
     let mut words = match *imms {
@@ -148,7 +148,7 @@ fn extract_literal_string(imms: &[Imm]) -> Result<String, FromUtf8Error> {
 }
 
 // FIXME(eddyb) this shouldn't just panic when `s.contains('\0')`.
-fn encode_literal_string(s: &str) -> impl Iterator<Item = Imm> + '_ {
+pub fn encode_literal_string(s: &str) -> impl Iterator<Item = Imm> + '_ {
     let wk = &spec::Spec::get().well_known;
 
     let bytes = s.as_bytes();

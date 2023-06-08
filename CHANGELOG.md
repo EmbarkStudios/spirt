@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#36](https://github.com/EmbarkStudios/spirt/pull/36) started using `OpName`s
+  in pretty-printing, to replace the `T1`/`F2`/`v3` "anonymous" style, when unambiguous
 - [PR#40](https://github.com/EmbarkStudios/spirt/pull/40) increased the pretty-printed
   HTML `font-size` from `15px` to `17px`, to improve readability
 - [PR#39](https://github.com/EmbarkStudios/spirt/pull/39) shortened pretty-printed names

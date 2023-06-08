@@ -118,6 +118,7 @@ pub mod palettes {
     /// Minimalist palette, chosen to work with both light and dark backgrounds.
     pub mod simple {
         pub const DARK_GRAY: [u8; 3] = [0x44, 0x44, 0x44];
+        pub const LIGHT_GRAY: [u8; 3] = [0x88, 0x88, 0x88];
 
         pub const RED: [u8; 3] = [0xcc, 0x55, 0x55];
         pub const GREEN: [u8; 3] = [0x44, 0x99, 0x44];

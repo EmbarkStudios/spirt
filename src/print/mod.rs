@@ -28,14 +28,18 @@ use crate::{
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
     ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef,
     DataInstKind, DeclDef, Diag, DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func,
-    FuncDecl, FuncParam, FxIndexMap, GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module,
-    ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
+    Import, Module, ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeCtor,
+    TypeCtorArg, TypeDef, Value,
 };
+use arrayvec::ArrayVec;
+use itertools::Either;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
+use std::fmt::{self, Write as _};
+use std::hash::Hash;
 use std::mem;
 
 mod multiversion;
@@ -77,6 +81,29 @@ pub struct Plan<'a> {
     /// as opposed to their sum. This approach avoids pessimizing e.g. inline
     /// printing of interned definitions, which may need the use count to be `1`.
     use_counts: FxIndexMap<Use, usize>,
+
+    /// Merged per-[`AttrSet`] unique SPIR-V `OpName`s across all versions.
+    ///
+    /// That is, each [`AttrSet`] maps to one of the SPIR-V `OpName`s contained
+    /// within the [`AttrSet`], as long as these three conditions are met:
+    /// * in each version using an [`AttrSet`], there is only one use of it
+    ///   (e.g. different [`Type`]s/[`Const`]s/etc. can't use the same [`AttrSet`])
+    /// * in each version using an [`AttrSet`], no other [`AttrSet`]s are used
+    ///   that "claim" the same SPIR-V `OpName`
+    /// * an [`AttrSet`] "claims" the same SPIR-V `OpName` across all versions
+    ///   using it (with per-version "claiming", only merged after the fact)
+    ///
+    /// Note that these conditions still allow the same SPIR-V `OpName` being
+    /// "claimed" by different [`AttrSet`]s, *as long as* they only show up in
+    /// *disjoint* versions (e.g. [`GlobalVarDecl`] attributes being modified
+    /// between versions, but keeping the same `OpName` attribute unchanged).
+    attrs_to_unique_spv_name: FxHashMap<AttrSet, Result<&'a spv::Inst, AmbiguousName>>,
+
+    /// Reverse map of `attrs_to_unique_spv_name_imms`, only used during visiting
+    /// (i.e. intra-version), to track which SPIR-V `OpName`s have been "claimed"
+    /// by some [`AttrSet`] and detect conflicts (which are resolved by marking
+    /// *both* overlapping [`AttrSet`], *and* the `OpName` itself, as ambiguous).
+    claimed_spv_names: FxHashMap<&'a spv::Inst, Result<AttrSet, AmbiguousName>>,
 }
 
 /// One version of a multi-version [`Plan`] (see also its `versions` field),
@@ -95,6 +122,10 @@ struct PlanVersion<'a> {
     /// after all of its dependencies (making up the rest of the [`Plan`]).
     root: &'a dyn Print<Output = pretty::Fragment>,
 }
+
+/// Error type used when tracking `OpName` uniqueness.
+#[derive(Copy, Clone)]
+struct AmbiguousName;
 
 /// Print [`Plan`] top-level entry, an effective reification of SPIR-T's implicit DAG.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -205,8 +236,8 @@ impl From<Value> for Use {
 impl Use {
     // HACK(eddyb) this is used in `AttrsAndDef::insert_name_before_def` to
     // detect alignment anchors specifically, so it needs to not overlap with
-    // any other name prefix.
-    const ANCHOR_ALIGNMENT_NAME_PREFIX: &str = "AA";
+    // any other name (including those containing escaped `OpName` strings).
+    const ANCHOR_ALIGNMENT_NAME_PREFIX: &str = "AA.";
 
     fn keyword_and_name_prefix(self) -> (&'static str, &'static str) {
         match self {
@@ -266,9 +297,15 @@ impl<'a> Plan<'a> {
             current_module: None,
             versions: vec![],
             use_counts: FxIndexMap::default(),
+            attrs_to_unique_spv_name: FxHashMap::default(),
+            claimed_spv_names: FxHashMap::default(),
         };
         for (version_name, version_root) in versions {
             let mut combined_use_counts = mem::take(&mut plan.use_counts);
+            let mut combined_attrs_to_unique_spv_name =
+                mem::take(&mut plan.attrs_to_unique_spv_name);
+            plan.claimed_spv_names.clear();
+
             plan.versions.push(PlanVersion {
                 name: version_name.into(),
                 node_defs: FxHashMap::default(),
@@ -285,7 +322,29 @@ impl<'a> Plan<'a> {
                 }
                 plan.use_counts = combined_use_counts;
             }
+
+            // Merge per-`AttrSet` unique `OpName`s (from second version onward).
+            if !combined_attrs_to_unique_spv_name.is_empty() {
+                for (attrs, unique_spv_name) in plan.attrs_to_unique_spv_name.drain() {
+                    let combined = combined_attrs_to_unique_spv_name
+                        .entry(attrs)
+                        .or_insert(unique_spv_name);
+
+                    *combined = match (*combined, unique_spv_name) {
+                        // HACK(eddyb) can use pointer comparison because both
+                        // `OpName`s are in the same `AttrSetDef`'s `BTreeSet`,
+                        // so they can only be equal in the same set slot.
+                        (Ok(combined), Ok(new)) if std::ptr::eq(combined, new) => Ok(combined),
+
+                        _ => Err(AmbiguousName),
+                    };
+                }
+                plan.attrs_to_unique_spv_name = combined_attrs_to_unique_spv_name;
+            }
         }
+
+        // HACK(eddyb) release memory used by this map (and avoid later misuse).
+        mem::take(&mut plan.claimed_spv_names);
 
         plan
     }
@@ -374,7 +433,51 @@ impl<'a> Plan<'a> {
 
 impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
-        self.visit_attr_set_def(&self.cx[attrs]);
+        let wk = &spv::spec::Spec::get().well_known;
+
+        let attrs_def = &self.cx[attrs];
+        self.visit_attr_set_def(attrs_def);
+
+        // Try to claim a SPIR-V `OpName`, if any are present in `attrs`.
+        let mut spv_names = attrs_def
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attr::SpvAnnotation(spv_inst) if spv_inst.opcode == wk.OpName => Some(spv_inst),
+                _ => None,
+            })
+            .peekable();
+        if let Some(existing_entry) = self.attrs_to_unique_spv_name.get_mut(&attrs) {
+            // Same `attrs` seen more than once (from different definitions).
+            *existing_entry = Err(AmbiguousName);
+        } else if let Some(&first_spv_name) = spv_names.peek() {
+            let mut result = Ok(first_spv_name);
+
+            // HACK(eddyb) claim all SPIR-V `OpName`s in `attrs`, even if we'll
+            // use only one - this guarantees any overlaps will be detected, and
+            // while that may be overly strict, it's also the only easy way to
+            // have a completely order-indepdendent name choices.
+            for spv_name in spv_names {
+                let claim = self.claimed_spv_names.entry(spv_name).or_insert(Ok(attrs));
+
+                if let Ok(claimant) = *claim {
+                    if claimant == attrs {
+                        // Only possible way to succeed is if we just made the claim.
+                        continue;
+                    }
+
+                    // Invalidate the old user of this SPIR-V `OpName`.
+                    self.attrs_to_unique_spv_name
+                        .insert(claimant, Err(AmbiguousName));
+                }
+
+                // Either we just found a conflict, or one already existed.
+                *claim = Err(AmbiguousName);
+                result = Err(AmbiguousName);
+            }
+
+            self.attrs_to_unique_spv_name.insert(attrs, result);
+        }
     }
     fn visit_type_use(&mut self, ty: Type) {
         self.use_interned(CxInterned::Type(ty));
@@ -561,18 +664,31 @@ impl Plan<'_> {
 pub struct Printer<'a> {
     cx: &'a Context,
     use_styles: FxIndexMap<Use, UseStyle>,
+
+    /// Subset of the `Plan`'s original `attrs_to_unique_spv_name` map, only
+    /// containing those entries which are actively used for `UseStyle::Named`
+    /// values in `use_styles`, and therefore need to be hidden from attributes.
+    attrs_with_spv_name_in_use: FxHashMap<AttrSet, &'a spv::Inst>,
 }
 
 /// How an [`Use`] of a definition should be printed.
-#[derive(Copy, Clone)]
 enum UseStyle {
-    /// Refer to the definition by its name prefix and an `idx` (e.g. `"T123"`).
+    /// Refer to the definition by its name prefix and an `idx` (e.g. "T123").
     Anon {
         /// For intra-function [`Use`]s (i.e. [`Use::ControlRegionLabel`] and values),
         /// this disambiguates the parent function (for e.g. anchors).
         parent_func: Option<Func>,
 
         idx: usize,
+    },
+
+    /// Refer to the definition by its name prefix and a `name` (e.g. "T`Foo`").
+    Named {
+        /// For intra-function [`Use`]s (i.e. [`Use::ControlRegionLabel`] and values),
+        /// this disambiguates the parent function (for e.g. anchors).
+        parent_func: Option<Func>,
+
+        name: String,
     },
 
     /// Print the definition inline at the use site.
@@ -583,6 +699,73 @@ impl<'a> Printer<'a> {
     fn new(plan: &Plan<'a>) -> Self {
         let cx = plan.cx;
         let wk = &spv::spec::Spec::get().well_known;
+
+        // HACK(eddyb) move this elsewhere.
+        enum SmallSet<T, const N: usize> {
+            Linear(ArrayVec<T, N>),
+            Hashed(Box<FxIndexSet<T>>),
+        }
+
+        type SmallSetIter<'a, T> = Either<std::slice::Iter<'a, T>, indexmap::set::Iter<'a, T>>;
+
+        impl<T, const N: usize> Default for SmallSet<T, N> {
+            fn default() -> Self {
+                Self::Linear(ArrayVec::new())
+            }
+        }
+
+        impl<T: Eq + Hash, const N: usize> SmallSet<T, N> {
+            fn insert(&mut self, x: T) {
+                match self {
+                    Self::Linear(xs) => {
+                        // HACK(eddyb) this optimizes for values repeating, i.e.
+                        // `xs.last() == Some(&x)` being the most common case.
+                        if !xs.iter().rev().any(|old| *old == x) {
+                            if let Err(err) = xs.try_push(x) {
+                                *self = Self::Hashed(Box::new(
+                                    xs.drain(..).chain([err.element()]).collect(),
+                                ));
+                            }
+                        }
+                    }
+                    Self::Hashed(xs) => {
+                        xs.insert(x);
+                    }
+                }
+            }
+
+            fn iter(&self) -> SmallSetIter<'_, T> {
+                match self {
+                    Self::Linear(xs) => Either::Left(xs.iter()),
+                    Self::Hashed(xs) => Either::Right(xs.iter()),
+                }
+            }
+        }
+
+        let mut attrs_with_spv_name_in_use = FxHashMap::default();
+
+        // NOTE(eddyb) `SmallSet` is an important optimization, as most attributes
+        // *do not* change across versions, so we avoid a lot of repeated work.
+        let mut try_claim_name_from_attrs_across_versions =
+            |deduped_attrs_across_versions: SmallSetIter<'_, AttrSet>| {
+                deduped_attrs_across_versions
+                    .copied()
+                    .map(|attrs| Some((attrs, plan.attrs_to_unique_spv_name.get(&attrs)?.ok()?)))
+                    .collect::<Option<SmallVec<[_; 4]>>>()
+                    .filter(|all_names| all_names.iter().map(|(_, spv_name)| spv_name).all_equal())
+                    .and_then(|all_names| {
+                        let &(_, spv_name) = all_names.get(0)?;
+                        let name = spv::extract_literal_string(&spv_name.imms).ok()?;
+
+                        // This is the point of no return: these `insert`s will
+                        // cause `OpName`s to be hidden from their `AttrSet`s.
+                        for (attrs, spv_name) in all_names {
+                            attrs_with_spv_name_in_use.insert(attrs, spv_name);
+                        }
+
+                        Some(name)
+                    })
+            };
 
         #[derive(Default)]
         struct AnonCounters {
@@ -617,6 +800,45 @@ impl<'a> Printer<'a> {
                         UseStyle::Anon {
                             parent_func: None,
                             idx: 0,
+                        },
+                    );
+                }
+
+                let mut deduped_attrs_across_versions = SmallSet::<_, 8>::default();
+                match use_kind {
+                    Use::CxInterned(interned) => {
+                        deduped_attrs_across_versions.insert(match interned {
+                            CxInterned::Type(ty) => cx[ty].attrs,
+                            CxInterned::Const(ct) => cx[ct].attrs,
+                        });
+                    }
+                    Use::Node(node) => {
+                        for version in &plan.versions {
+                            let attrs = match version.node_defs.get(&node) {
+                                Some(NodeDef::GlobalVar(gv_decl)) => gv_decl.attrs,
+                                Some(NodeDef::Func(func_decl)) => func_decl.attrs,
+                                _ => continue,
+                            };
+                            deduped_attrs_across_versions.insert(attrs);
+                        }
+                    }
+                    Use::ControlRegionLabel(_)
+                    | Use::ControlRegionInput { .. }
+                    | Use::ControlNodeOutput { .. }
+                    | Use::DataInstOutput(_)
+                    | Use::AlignmentAnchorForControlRegion(_)
+                    | Use::AlignmentAnchorForControlNode(_)
+                    | Use::AlignmentAnchorForDataInst(_) => unreachable!(),
+                }
+
+                if let Some(name) =
+                    try_claim_name_from_attrs_across_versions(deduped_attrs_across_versions.iter())
+                {
+                    return (
+                        use_kind,
+                        UseStyle::Named {
+                            parent_func: None,
+                            name,
                         },
                     );
                 }
@@ -666,6 +888,7 @@ impl<'a> Printer<'a> {
                             }
                     }
                     Use::Node(_) => false,
+
                     Use::ControlRegionLabel(_)
                     | Use::ControlRegionInput { .. }
                     | Use::ControlNodeOutput { .. }
@@ -720,45 +943,21 @@ impl<'a> Printer<'a> {
         for func in all_funcs {
             assert!(matches!(
                 use_styles.get(&Use::Node(Node::Func(func))),
-                Some(UseStyle::Anon { .. })
+                Some(UseStyle::Anon { .. } | UseStyle::Named { .. })
             ));
 
-            let mut control_region_label_counter = 0;
-            let mut value_counter = 0;
-            let mut alignment_anchor_counter = 0;
-
-            // Assign a new label/value/alignment-anchor index, but only if:
-            // * the definition is actually used (except for alignment anchors)
-            // * it doesn't already have an index (e.g. from a previous version)
-            let mut define = |use_kind: Use| {
-                let (counter, use_style_slot) = match use_kind {
-                    Use::ControlRegionLabel(_) => (
-                        &mut control_region_label_counter,
-                        use_styles.get_mut(&use_kind),
-                    ),
-
-                    Use::ControlRegionInput { .. }
-                    | Use::ControlNodeOutput { .. }
-                    | Use::DataInstOutput(_) => (&mut value_counter, use_styles.get_mut(&use_kind)),
-
-                    Use::AlignmentAnchorForControlRegion(_)
-                    | Use::AlignmentAnchorForControlNode(_)
-                    | Use::AlignmentAnchorForDataInst(_) => (
-                        &mut alignment_anchor_counter,
-                        Some(use_styles.entry(use_kind).or_insert(UseStyle::Inline)),
-                    ),
-
-                    _ => unreachable!(),
-                };
-                if let Some(use_style @ UseStyle::Inline) = use_style_slot {
-                    let idx = *counter;
-                    *counter += 1;
-                    *use_style = UseStyle::Anon {
-                        parent_func: Some(func),
-                        idx,
-                    };
-                }
-            };
+            // HACK(eddyb) in order to claim `OpName`s unambiguously for any
+            // intra-function `Use`, we need its attrs from *all* versions, at
+            // the same time, but we visit each version's `FuncDefBody` one at
+            // a time, and `EntityDefs` (intentionally) bans even checking if
+            // some entity is defined at all, so we can't rely on random-access,
+            // and we have to first buffer all the intra-function definitions.
+            #[derive(Default)]
+            struct IntraFuncDefAcrossVersions {
+                deduped_attrs_across_versions: SmallSet<AttrSet, 4>,
+            }
+            let mut intra_func_defs_across_versions: FxIndexMap<Use, IntraFuncDefAcrossVersions> =
+                FxIndexMap::default();
 
             let func_def_bodies_across_versions = plan.versions.iter().filter_map(|version| {
                 match version.node_defs.get(&Node::Func(func))? {
@@ -772,11 +971,18 @@ impl<'a> Printer<'a> {
             });
 
             for func_def_body in func_def_bodies_across_versions {
+                let mut define = |use_kind, attrs| {
+                    let def = intra_func_defs_across_versions.entry(use_kind).or_default();
+                    if let Some(attrs) = attrs {
+                        def.deduped_attrs_across_versions.insert(attrs);
+                    }
+                };
                 let visit_region = |func_at_region: FuncAt<'_, ControlRegion>| {
                     let region = func_at_region.position;
 
-                    define(Use::AlignmentAnchorForControlRegion(region));
-                    define(Use::ControlRegionLabel(region));
+                    define(Use::AlignmentAnchorForControlRegion(region), None);
+                    // FIXME(eddyb) should labels have names?
+                    define(Use::ControlRegionLabel(region), None);
 
                     let ControlRegionDef {
                         inputs,
@@ -784,34 +990,47 @@ impl<'a> Printer<'a> {
                         outputs: _,
                     } = func_def_body.at(region).def();
 
-                    for (i, _) in inputs.iter().enumerate() {
-                        define(Use::ControlRegionInput {
-                            region,
-                            input_idx: i.try_into().unwrap(),
-                        });
+                    for (i, input_decl) in inputs.iter().enumerate() {
+                        define(
+                            Use::ControlRegionInput {
+                                region,
+                                input_idx: i.try_into().unwrap(),
+                            },
+                            Some(input_decl.attrs),
+                        );
                     }
 
                     for func_at_control_node in func_def_body.at(*children) {
                         let control_node = func_at_control_node.position;
 
-                        define(Use::AlignmentAnchorForControlNode(control_node));
+                        define(Use::AlignmentAnchorForControlNode(control_node), None);
 
                         let ControlNodeDef { kind, outputs } = func_at_control_node.def();
 
                         if let ControlNodeKind::Block { insts } = *kind {
                             for func_at_inst in func_def_body.at(insts) {
-                                define(Use::AlignmentAnchorForDataInst(func_at_inst.position));
-                                if cx[func_at_inst.def().form].output_type.is_some() {
-                                    define(Use::DataInstOutput(func_at_inst.position));
+                                define(
+                                    Use::AlignmentAnchorForDataInst(func_at_inst.position),
+                                    None,
+                                );
+                                let inst_def = func_at_inst.def();
+                                if cx[inst_def.form].output_type.is_some() {
+                                    define(
+                                        Use::DataInstOutput(func_at_inst.position),
+                                        Some(inst_def.attrs),
+                                    );
                                 }
                             }
                         }
 
-                        for (i, _) in outputs.iter().enumerate() {
-                            define(Use::ControlNodeOutput {
-                                control_node,
-                                output_idx: i.try_into().unwrap(),
-                            });
+                        for (i, output_decl) in outputs.iter().enumerate() {
+                            define(
+                                Use::ControlNodeOutput {
+                                    control_node,
+                                    output_idx: i.try_into().unwrap(),
+                                },
+                                Some(output_decl.attrs),
+                            );
                         }
                     }
                 };
@@ -838,9 +1057,57 @@ impl<'a> Printer<'a> {
                 }
                 func_def_body.inner_visit_with(&mut VisitAllRegions(visit_region));
             }
+
+            let mut control_region_label_counter = 0;
+            let mut value_counter = 0;
+            let mut alignment_anchor_counter = 0;
+
+            // Assign an unique label/value/alignment-anchor name/index to each
+            // intra-function definition which appears in at least one version,
+            // but only if it's actually used (or is an alignment anchor).
+            for (use_kind, def) in intra_func_defs_across_versions {
+                let (counter, use_style_slot) = match use_kind {
+                    Use::ControlRegionLabel(_) => (
+                        &mut control_region_label_counter,
+                        use_styles.get_mut(&use_kind),
+                    ),
+
+                    Use::ControlRegionInput { .. }
+                    | Use::ControlNodeOutput { .. }
+                    | Use::DataInstOutput(_) => (&mut value_counter, use_styles.get_mut(&use_kind)),
+
+                    Use::AlignmentAnchorForControlRegion(_)
+                    | Use::AlignmentAnchorForControlNode(_)
+                    | Use::AlignmentAnchorForDataInst(_) => (
+                        &mut alignment_anchor_counter,
+                        Some(use_styles.entry(use_kind).or_insert(UseStyle::Inline)),
+                    ),
+
+                    _ => unreachable!(),
+                };
+                if let Some(use_style) = use_style_slot {
+                    assert!(matches!(use_style, UseStyle::Inline));
+
+                    let parent_func = Some(func);
+                    let named_style = try_claim_name_from_attrs_across_versions(
+                        def.deduped_attrs_across_versions.iter(),
+                    )
+                    .map(|name| UseStyle::Named { parent_func, name });
+
+                    *use_style = named_style.unwrap_or_else(|| {
+                        let idx = *counter;
+                        *counter += 1;
+                        UseStyle::Anon { parent_func, idx }
+                    });
+                }
+            }
         }
 
-        Self { cx, use_styles }
+        Self {
+            cx,
+            use_styles,
+            attrs_with_spv_name_in_use,
+        }
     }
 
     pub fn cx(&self) -> &'a Context {
@@ -901,10 +1168,9 @@ impl Printer<'_> {
     }
     fn attr_style(&self) -> pretty::Styles {
         pretty::Styles {
-            color: Some(pretty::palettes::simple::GREEN),
             color_opacity: Some(0.6),
             thickness: Some(-2),
-            ..Default::default()
+            ..pretty::Styles::color(pretty::palettes::simple::GREEN)
         }
     }
 
@@ -1183,53 +1449,138 @@ pub trait Print {
 impl Use {
     /// Common implementation for [`Use::print`] and [`Use::print_as_def`].
     fn print_as_ref_or_def(&self, printer: &Printer<'_>, is_def: bool) -> pretty::Fragment {
-        let style = printer
-            .use_styles
-            .get(self)
-            .copied()
-            .unwrap_or(UseStyle::Inline);
+        let style = printer.use_styles.get(self).unwrap_or(&UseStyle::Inline);
         match style {
-            UseStyle::Anon { parent_func, idx } => {
-                // HACK(eddyb) these are "global" to the whole print `Plan`.
-                let (keyword, name_prefix) = self.keyword_and_name_prefix();
-                let name = if let Use::Node(Node::ModuleDialect | Node::ModuleDebugInfo) = self {
-                    assert_eq!((is_def, name_prefix, idx), (true, "", 0));
-                    keyword.into()
-                } else {
-                    format!("{name_prefix}{idx}")
-                };
+            &UseStyle::Anon {
+                parent_func,
+                idx: _,
+            }
+            | &UseStyle::Named {
+                parent_func,
+                name: _,
+            } => {
+                // FIXME(eddyb) should this be used as part of `UseStyle`'s definition?
+                #[derive(Debug, PartialEq, Eq)]
+                enum Suffix<'a> {
+                    Num(usize),
+                    Name(&'a str),
+                }
 
-                let anchor = if let Some(func) = parent_func {
-                    // Disambiguate intra-function anchors (labels/values) by
-                    // prepending a prefix of the form `F123_`.
-                    let func = Use::Node(Node::Func(func));
-                    let (_, func_name_prefix) = func.keyword_and_name_prefix();
-                    let func_idx = match printer.use_styles[&func] {
-                        UseStyle::Anon { idx, .. } => idx,
-                        UseStyle::Inline => unreachable!(),
-                    };
-                    format!("{func_name_prefix}{func_idx}.{name}")
-                } else {
-                    // FIXME(eddyb) avoid having to clone `String`s here.
-                    name.clone()
-                };
-                let name = match self {
-                    Self::AlignmentAnchorForControlRegion(_)
-                    | Self::AlignmentAnchorForControlNode(_)
-                    | Self::AlignmentAnchorForDataInst(_) => None,
+                impl Suffix<'_> {
+                    /// Format `self` into `w`, escaping (`Sufix::Name`) `char`s
+                    /// wherever needed, to limit the charset to `[A-Za-z0-9_]`
+                    /// (plus `\`, `{` and `}` for escape sequences alone).
+                    fn write_escaped_to(&self, w: &mut impl fmt::Write) -> fmt::Result {
+                        match *self {
+                            Suffix::Num(idx) => write!(w, "{idx}"),
+                            Suffix::Name(mut name) => {
+                                // HACK(eddyb) clearly separate from whatever is
+                                // before (e.g. a category name), and disambiguate
+                                // between e.g. `Num(123)` and `Name("123")`.
+                                w.write_str("_")?;
 
-                    _ if is_def && !keyword.is_empty() && !name_prefix.is_empty() => {
-                        Some(format!("{keyword} {name}"))
+                                while !name.is_empty() {
+                                    // HACK(eddyb) this is convenient way to
+                                    // grab the longest prefix that is all valid.
+                                    let is_valid = |c: char| c.is_ascii_alphanumeric() || c == '_';
+                                    let name_after_valid = name.trim_start_matches(is_valid);
+                                    let valid_prefix = &name[..name.len() - name_after_valid.len()];
+                                    name = name_after_valid;
+
+                                    if !valid_prefix.is_empty() {
+                                        w.write_str(valid_prefix)?;
+                                    }
+
+                                    // `name` is either empty now, or starts with
+                                    // an invalid `char` (that we need to escape).
+                                    let mut chars = name.chars();
+                                    if let Some(c) = chars.next() {
+                                        assert!(!is_valid(c));
+                                        write!(w, "{}", c.escape_unicode())?;
+                                    }
+                                    name = chars.as_str();
+                                }
+                                Ok(())
+                            }
+                        }
                     }
-                    _ => Some(name),
+                }
+
+                let suffix_of = |style| match style {
+                    &UseStyle::Anon { idx, .. } => Suffix::Num(idx),
+                    UseStyle::Named { name, .. } => Suffix::Name(name),
+                    UseStyle::Inline => unreachable!(),
                 };
+
+                let (keyword, name_prefix) = self.keyword_and_name_prefix();
+                let suffix = suffix_of(style);
+
                 // FIXME(eddyb) could the `anchor: Rc<str>` be cached?
-                pretty::Node::Anchor {
+                let mk_anchor = |anchor: String, text: Vec<_>| pretty::Node::Anchor {
                     is_def,
                     anchor: anchor.into(),
-                    text: name.into_iter().map(|text| (None, text.into())).collect(),
+                    text: text.into(),
+                };
+
+                // HACK(eddyb) these are "global" to the whole print `Plan`.
+                if let Use::Node(Node::ModuleDialect | Node::ModuleDebugInfo) = self {
+                    assert_eq!((is_def, name_prefix, suffix), (true, "", Suffix::Num(0)));
+                    return mk_anchor(keyword.into(), vec![(None, keyword.into())]).into();
                 }
-                .into()
+
+                let mut anchor = String::new();
+                if let Some(func) = parent_func {
+                    // Disambiguate intra-function anchors (labels/values) by
+                    // prepending a prefix of the form `F123.`.
+                    let func = Use::Node(Node::Func(func));
+                    write!(anchor, "{}", func.keyword_and_name_prefix().1).unwrap();
+                    suffix_of(&printer.use_styles[&func])
+                        .write_escaped_to(&mut anchor)
+                        .unwrap();
+                    anchor += ".";
+                }
+                anchor += name_prefix;
+                suffix.write_escaped_to(&mut anchor).unwrap();
+
+                let name = if let Self::AlignmentAnchorForControlRegion(_)
+                | Self::AlignmentAnchorForControlNode(_)
+                | Self::AlignmentAnchorForDataInst(_) = self
+                {
+                    vec![]
+                } else {
+                    // HACK(eddyb) make the suffix larger for e.g. `T` than `v`.
+                    let suffix_size = if name_prefix.ends_with(|c: char| c.is_ascii_uppercase()) {
+                        -1
+                    } else {
+                        -2
+                    };
+                    let suffix = match suffix {
+                        Suffix::Num(idx) => (
+                            Some(pretty::Styles {
+                                size: Some(suffix_size),
+                                subscript: true,
+                                ..Default::default()
+                            }),
+                            format!("{idx}").into(),
+                        ),
+                        Suffix::Name(name) => (
+                            Some(pretty::Styles {
+                                thickness: Some(0),
+                                size: Some(suffix_size - 1),
+                                color: Some(pretty::palettes::simple::LIGHT_GRAY),
+                                ..Default::default()
+                            }),
+                            format!("`{name}`").into(),
+                        ),
+                    };
+                    Some(keyword)
+                        .filter(|kw| is_def && !kw.is_empty())
+                        .into_iter()
+                        .flat_map(|kw| [(None, kw.into()), (None, " ".into())])
+                        .chain([(None, name_prefix.into()), suffix])
+                        .collect()
+                };
+                mk_anchor(anchor, name).into()
             }
             UseStyle::Inline => match *self {
                 Self::CxInterned(interned) => interned
@@ -1643,8 +1994,10 @@ impl CxInterned {
         let fragments = printer
             .use_styles
             .iter()
-            .filter_map(|(&use_kind, &use_style)| match (use_kind, use_style) {
-                (Use::CxInterned(interned), UseStyle::Anon { .. }) => Some(interned),
+            .filter_map(|(&use_kind, use_style)| match (use_kind, use_style) {
+                (Use::CxInterned(interned), UseStyle::Anon { .. } | UseStyle::Named { .. }) => {
+                    Some(interned)
+                }
                 _ => None,
             })
             .map(|interned| {
@@ -1679,18 +2032,19 @@ impl Print for CxInterned {
 impl Print for AttrSet {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        printer.cx[*self].print(printer)
-    }
-}
+        let AttrSetDef { attrs } = &printer.cx[*self];
 
-impl Print for AttrSetDef {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        let Self { attrs } = self;
+        // Avoid showing `#[spv.OpName("...")]` when it's already in use as the
+        // name of the definition (but keep it in all other cases).
+        let spv_name_to_hide = printer.attrs_with_spv_name_in_use.get(self).copied();
 
         pretty::Fragment::new(
             attrs
                 .iter()
+                .filter(|attr| match attr {
+                    Attr::SpvAnnotation(spv_inst) => Some(spv_inst) != spv_name_to_hide,
+                    _ => true,
+                })
                 .map(|attr| attr.print(printer))
                 .flat_map(|entry| [entry, pretty::Node::ForceLineSeparation.into()]),
         )
