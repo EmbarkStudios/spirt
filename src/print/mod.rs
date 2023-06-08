@@ -22,7 +22,7 @@ use itertools::Itertools as _;
 use crate::func_at::FuncAt;
 use crate::print::multiversion::Versions;
 use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
-use crate::visit::{DynVisit, InnerVisit, Visit, Visitor};
+use crate::visit::{InnerVisit, Visit, Visitor};
 use crate::{
     cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
@@ -59,22 +59,17 @@ pub struct Plan<'a> {
 
     /// When visiting module-stored nodes, the [`Module`] is needed to map the
     /// [`Node`] to the (per-version) definition, which is then stored in the
-    /// (per-version) [`FxHashMap`] within `per_version_name_and_node_defs`.
+    /// (per-version) `node_defs` map.
     current_module: Option<&'a Module>,
 
     /// Versions allow comparing multiple copies of the same e.g. [`Module`],
     /// with definitions sharing a [`Node`] key being shown together.
     ///
-    /// Each `per_version_name_and_node_defs` entry contains a "version" with:
-    /// * a descriptive name (e.g. the name of a pass that produced that version)
-    ///   * the name is left empty in the default single-version mode
-    /// * its [`Node`] definitions (dynamic via the [`DynNodeDef`] helper trait)
-    ///
     /// Specific [`Node`]s may be present in only a subset of versions, and such
     /// a distinction will be reflected in the output.
     ///
-    /// For [`Node`] collection, the last entry consistutes the "active" version.
-    per_version_name_and_node_defs: Vec<(String, FxHashMap<Node, &'a dyn DynNodeDef<'a>>)>,
+    /// For [`Node`] collection, `versions.last()` constitutes the "active" one.
+    versions: Vec<PlanVersion<'a>>,
 
     /// Merged per-[`Use`] counts across all versions.
     ///
@@ -84,13 +79,25 @@ pub struct Plan<'a> {
     use_counts: FxIndexMap<Use, usize>,
 }
 
+/// One version of a multi-version [`Plan`] (see also its `versions` field),
+/// or the sole one (in the single-version mode).
+struct PlanVersion<'a> {
+    /// Descriptive name for this version (e.g. the name of a pass that produced it),
+    /// or left empty (in the single-version mode).
+    name: String,
+
+    /// Type-erased [`Node`] definitions, for later printing.
+    node_defs: FxHashMap<Node, &'a dyn Print<Output = AttrsAndDef>>,
+
+    /// Either a whole [`Module`], or some other printable type passed to
+    /// [`Plan::for_root`]/[`Plan::for_versions`], which gets printed last,
+    /// after all of its dependencies (making up the rest of the [`Plan`]).
+    root: &'a dyn Print<Output = pretty::Fragment>,
+}
+
 /// Print [`Plan`] top-level entry, an effective reification of SPIR-T's implicit DAG.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Node {
-    /// Either a whole [`Module`], or some other printable type passed to
-    /// [`Plan::for_root`] (e.g. [`ExpectedVsFound`]).
-    Root,
-
     /// Definitions for all [`CxInterned`] that need them, grouped together.
     AllCxInterned,
 
@@ -106,8 +113,6 @@ enum Node {
 impl Node {
     fn category(self) -> Result<&'static str, &'static str> {
         match self {
-            Self::Root => Err("Node::Root"),
-
             Self::AllCxInterned => Err("Node::AllCxInterned"),
 
             // FIXME(eddyb) these don't have the same kind of `{category}{idx}`
@@ -140,23 +145,6 @@ impl CxInterned {
         }
     }
 }
-
-/// A [`Print`] `Output` type that splits the attributes from the main body of the
-/// definition, allowing additional processing before they get concatenated.
-#[derive(Default)]
-pub struct AttrsAndDef {
-    pub attrs: pretty::Fragment,
-
-    /// Definition that typically looks like one of these cases:
-    /// * ` = ...` for `name = ...`
-    /// * `(...) {...}` for `name(...) {...}` (i.e. functions)
-    ///
-    /// Where `name` is added later (i.e. between `attrs` and `def_without_name`).
-    pub def_without_name: pretty::Fragment,
-}
-
-trait DynNodeDef<'a>: DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef> {}
-impl<'a, T: DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>> DynNodeDef<'a> for T {}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Use {
@@ -233,16 +221,9 @@ impl<'a> Plan<'a> {
     // FIXME(eddyb) consider renaming this and removing the `for_module` shorthand.
     pub fn for_root(
         cx: &'a Context,
-        root: &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef>),
+        root: &'a (impl Visit + Print<Output = pretty::Fragment>),
     ) -> Self {
-        let mut plan = Self {
-            cx,
-            current_module: None,
-            per_version_name_and_node_defs: vec![(String::new(), FxHashMap::default())],
-            use_counts: FxIndexMap::default(),
-        };
-        plan.use_node(Node::Root, root);
-        plan
+        Self::for_versions(cx, [("", root)])
     }
 
     /// Create a [`Plan`] with all of `module`'s contents.
@@ -254,7 +235,7 @@ impl<'a> Plan<'a> {
 
     /// Create a [`Plan`] that combines [`Plan::for_root`] from each version.
     ///
-    /// Each version has a string, which should contain a descriptive name
+    /// Each version also has a string, which should contain a descriptive name
     /// (e.g. the name of a pass that produced that version).
     ///
     /// While the roots (and their dependencies) can be entirely unrelated, the
@@ -266,22 +247,25 @@ impl<'a> Plan<'a> {
         versions: impl IntoIterator<
             Item = (
                 impl Into<String>,
-                &'a (impl DynVisit<'a, Plan<'a>> + Print<Output = AttrsAndDef> + 'a),
+                &'a (impl Visit + Print<Output = pretty::Fragment> + 'a),
             ),
         >,
     ) -> Self {
         let mut plan = Self {
             cx,
             current_module: None,
-            per_version_name_and_node_defs: vec![],
+            versions: vec![],
             use_counts: FxIndexMap::default(),
         };
         for (version_name, version_root) in versions {
             let mut combined_use_counts = mem::take(&mut plan.use_counts);
-            plan.per_version_name_and_node_defs
-                .push((version_name.into(), FxHashMap::default()));
+            plan.versions.push(PlanVersion {
+                name: version_name.into(),
+                node_defs: FxHashMap::default(),
+                root: version_root,
+            });
 
-            plan.use_node(Node::Root, version_root);
+            version_root.visit_with(&mut plan);
 
             // Merge use counts (from second version onward).
             if !combined_use_counts.is_empty() {
@@ -291,15 +275,6 @@ impl<'a> Plan<'a> {
                 }
                 plan.use_counts = combined_use_counts;
             }
-        }
-
-        // HACK(eddyb) avoid having `Node::Root` before any of its dependencies,
-        // but without having to go through the non-trivial approach of properly
-        // interleaving all the nodes, from each version, together.
-        {
-            let (map, k) = (&mut plan.use_counts, Use::Node(Node::Root));
-            // FIXME(eddyb) this is effectively a "rotate" operation.
-            map.shift_remove(&k).map(|v| map.insert(k, v));
         }
 
         plan
@@ -335,16 +310,20 @@ impl<'a> Plan<'a> {
     ///
     /// Only the first call recurses into the definition, subsequent calls only
     /// update its (internally tracked) "use count".
-    fn use_node(&mut self, node: Node, node_def: &'a dyn DynNodeDef<'a>) {
+    fn use_node(
+        &mut self,
+        node: Node,
+        node_def: &'a (impl Visit + Print<Output = AttrsAndDef> + 'a),
+    ) {
         if let Some(use_count) = self.use_counts.get_mut(&Use::Node(node)) {
             *use_count += 1;
             return;
         }
 
-        let (_, node_defs) = self.per_version_name_and_node_defs.last_mut().unwrap();
-        match node_defs.entry(node) {
+        let current_version = self.versions.last_mut().unwrap();
+        match current_version.node_defs.entry(node) {
             Entry::Occupied(entry) => {
-                let dyn_data_ptr = |r| (r as *const dyn DynNodeDef<'_>).cast::<()>();
+                let dyn_data_ptr = |r| (r as *const dyn Print<Output = AttrsAndDef>).cast::<()>();
                 assert!(
                     std::ptr::eq(dyn_data_ptr(*entry.get()), dyn_data_ptr(node_def)),
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
@@ -359,7 +338,7 @@ impl<'a> Plan<'a> {
             }
         }
 
-        node_def.dyn_visit_with(self);
+        node_def.visit_with(self);
 
         *self.use_counts.entry(Use::Node(node)).or_default() += 1;
     }
@@ -543,11 +522,11 @@ impl Plan<'_> {
     ) {
         let printer = Printer::new(self);
         (
-            self.print_with_node_filter(&printer, |node| !matches!(node, Node::Root))
+            self.print_all_nodes_and_or_root(&printer, true, false)
                 .map_pretty_fragments(|fragment| {
                     fragment.layout_with_max_line_width(MAX_LINE_WIDTH)
                 }),
-            self.print_with_node_filter(&printer, |node| matches!(node, Node::Root))
+            self.print_all_nodes_and_or_root(&printer, false, true)
                 .map_pretty_fragments(|fragment| {
                     fragment.layout_with_max_line_width(MAX_LINE_WIDTH)
                 }),
@@ -606,7 +585,7 @@ impl<'a> Printer<'a> {
 
                 // HACK(eddyb) these are "global" to the whole print `Plan`.
                 if let Use::Node(
-                    Node::Root | Node::AllCxInterned | Node::ModuleDialect | Node::ModuleDebugInfo,
+                    Node::AllCxInterned | Node::ModuleDialect | Node::ModuleDebugInfo,
                 ) = use_kind
                 {
                     return (
@@ -684,10 +663,7 @@ impl<'a> Printer<'a> {
                         Use::Node(Node::Func(_)) => &mut ac.funcs,
 
                         Use::Node(
-                            Node::Root
-                            | Node::AllCxInterned
-                            | Node::ModuleDialect
-                            | Node::ModuleDebugInfo,
+                            Node::AllCxInterned | Node::ModuleDialect | Node::ModuleDebugInfo,
                         )
                         | Use::ControlRegionLabel(_)
                         | Use::ControlRegionInput { .. }
@@ -760,19 +736,20 @@ impl<'a> Printer<'a> {
                 }
             };
 
-            let func_def_bodies_across_versions = plan
-                .per_version_name_and_node_defs
-                .iter()
-                .filter_map(|(_, node_defs)| {
-                    match node_defs.get(&Node::Func(func))?.downcast_as_func_decl()? {
-                        FuncDecl {
-                            def: DeclDef::Present(func_def_body),
-                            ..
-                        } => Some(func_def_body),
+            let func_def_bodies_across_versions = plan.versions.iter().filter_map(|version| {
+                match version
+                    .node_defs
+                    .get(&Node::Func(func))?
+                    .downcast_as_func_decl()?
+                {
+                    FuncDecl {
+                        def: DeclDef::Present(func_def_body),
+                        ..
+                    } => Some(func_def_body),
 
-                        _ => None,
-                    }
-                });
+                    _ => None,
+                }
+            });
 
             for func_def_body in func_def_bodies_across_versions {
                 let visit_region = |func_at_region: FuncAt<'_, ControlRegion>| {
@@ -1080,6 +1057,20 @@ impl<'a> Printer<'a> {
     }
 }
 
+/// A [`Print`] `Output` type that splits the attributes from the main body of the
+/// definition, allowing additional processing before they get concatenated.
+#[derive(Default)]
+pub struct AttrsAndDef {
+    pub attrs: pretty::Fragment,
+
+    /// Definition that typically looks like one of these cases:
+    /// * ` = ...` for `name = ...`
+    /// * `(...) {...}` for `name(...) {...}` (i.e. functions)
+    ///
+    /// Where `name` is added later (i.e. between `attrs` and `def_without_name`).
+    pub def_without_name: pretty::Fragment,
+}
+
 impl AttrsAndDef {
     /// Concat `attrs`, `name` and `def_without_name` into a [`pretty::Fragment`],
     /// effectively "filling in" the `name` missing from `def_without_name`.
@@ -1286,63 +1277,81 @@ impl Print for Func {
 impl Print for Plan<'_> {
     type Output = Versions<pretty::Fragment>;
     fn print(&self, printer: &Printer<'_>) -> Versions<pretty::Fragment> {
-        self.print_with_node_filter(printer, |_| true)
+        self.print_all_nodes_and_or_root(printer, true, true)
     }
 }
 
 impl Plan<'_> {
-    fn print_with_node_filter(
+    fn print_all_nodes_and_or_root(
         &self,
         printer: &Printer<'_>,
-        filter: impl Fn(&Node) -> bool,
+        print_all_nodes: bool,
+        print_root: bool,
     ) -> Versions<pretty::Fragment> {
-        let num_versions = self.per_version_name_and_node_defs.len();
-        let per_node_versions_with_repeat_count = printer
+        enum NodeOrRoot {
+            Node(Node),
+            Root,
+        }
+
+        let all_nodes = printer
             .use_styles
             .keys()
             .filter_map(|&use_kind| match use_kind {
                 Use::Node(node) => Some(node),
                 _ => None,
             })
-            .filter(filter)
-            .map(|node| -> SmallVec<[_; 1]> {
-                if num_versions == 0 {
-                    return [].into_iter().collect();
-                }
+            .map(NodeOrRoot::Node);
+        let root = [NodeOrRoot::Root].into_iter();
+        let all_nodes_and_or_root = Some(all_nodes)
+            .filter(|_| print_all_nodes)
+            .into_iter()
+            .flatten()
+            .chain(Some(root).filter(|_| print_root).into_iter().flatten());
 
-                let name = if node.category().is_err() {
-                    pretty::Fragment::default()
-                } else {
-                    Use::Node(node).print_as_def(printer)
-                };
-
+        let per_node_versions_with_repeat_count =
+            all_nodes_and_or_root.map(|node_or_root| -> SmallVec<[_; 1]> {
                 // Avoid printing `AllCxInterned` more than once, it doesn't
                 // really have per-version node definitions in the first place.
-                if let Node::AllCxInterned = node {
-                    // FIXME(eddyb) maybe make `DynNodeDef` `Any`-like, to be
-                    // able to assert that all per-version defs are identical.
+                if let NodeOrRoot::Node(node @ Node::AllCxInterned) = node_or_root {
+                    node.category().unwrap_err();
+
+                    // FIXME(eddyb) maybe make `Print` `Any`-like, to be able
+                    // to assert that all per-version defs are identical.
                     return [(
-                        AllCxInterned.print(printer).insert_name_before_def(name),
-                        num_versions,
+                        AllCxInterned
+                            .print(printer)
+                            .insert_name_before_def(pretty::Fragment::default()),
+                        self.versions.len(),
                     )]
                     .into_iter()
                     .collect();
                 }
 
-                self.per_version_name_and_node_defs
+                self.versions
                     .iter()
-                    .map(move |(_, node_defs)| {
-                        node_defs
-                            .get(&node)
-                            .map(|def| def.print(printer).insert_name_before_def(name.clone()))
-                            .unwrap_or_default()
+                    .map(move |version| match node_or_root {
+                        NodeOrRoot::Node(node) => {
+                            // HACK(eddyb) the special case was handled above.
+                            node.category().unwrap();
+
+                            let name = if node.category().is_err() {
+                                pretty::Fragment::default()
+                            } else {
+                                Use::Node(node).print_as_def(printer)
+                            };
+                            version
+                                .node_defs
+                                .get(&node)
+                                .map(|def| def.print(printer).insert_name_before_def(name.clone()))
+                                .unwrap_or_default()
+                        }
+                        NodeOrRoot::Root => version.root.print(printer),
                     })
                     .dedup_with_count()
                     .map(|(repeat_count, fragment)| {
                         // FIXME(eddyb) consider rewriting intra-func anchors
-                        // here, post-deduplication, to be unique per-version.
-                        // Additionally, a diff algorithm could be employed, to
-                        // annotate the changes between versions.
+                        // here, post-deduplication, to be unique per-version,
+                        // though `multiversion` should probably handle it.
 
                         (fragment, repeat_count)
                     })
@@ -1350,7 +1359,7 @@ impl Plan<'_> {
             });
 
         // Unversioned, flatten the nodes.
-        if num_versions == 1 && self.per_version_name_and_node_defs[0].0.is_empty() {
+        if self.versions.len() == 1 && self.versions[0].name.is_empty() {
             Versions::Single(pretty::Fragment::new(
                 per_node_versions_with_repeat_count
                     .map(|mut versions_with_repeat_count| {
@@ -1366,11 +1375,7 @@ impl Plan<'_> {
             ))
         } else {
             Versions::Multiple {
-                version_names: self
-                    .per_version_name_and_node_defs
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect(),
+                version_names: self.versions.iter().map(|v| v.name.clone()).collect(),
                 per_row_versions_with_repeat_count: per_node_versions_with_repeat_count.collect(),
             }
         }
@@ -1378,13 +1383,13 @@ impl Plan<'_> {
 }
 
 impl Print for Module {
-    type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         if self.exports.is_empty() {
-            return AttrsAndDef::default();
+            return pretty::Fragment::default();
         }
 
-        let exports = pretty::Fragment::new([
+        pretty::Fragment::new([
             printer.declarative_keyword_style().apply("export").into(),
             " ".into(),
             pretty::join_comma_sep(
@@ -1403,12 +1408,7 @@ impl Print for Module {
                     }),
                 "}",
             ),
-        ]);
-
-        AttrsAndDef {
-            attrs: pretty::Fragment::default(),
-            def_without_name: exports,
-        }
+        ])
     }
 }
 
@@ -1733,9 +1733,7 @@ impl Print for Attr {
                                 }
                             };
 
-                            let mut printed_message = message
-                                .print(printer)
-                                .insert_name_before_def(pretty::Fragment::default());
+                            let mut printed_message = message.print(printer);
 
                             // HACK(eddyb) apply the right style to all the plain
                             // text parts of the already-printed message.
@@ -1874,22 +1872,16 @@ impl Print for Attr {
 }
 
 impl Print for Vec<DiagMsgPart> {
-    // HACK(eddyb) this is only `AttrsAndDef` so it can be pretty-printed as a
-    // root - but ideally `DynNodeDef` should allow `pretty::Fragment` too.
-    type Output = AttrsAndDef;
+    type Output = pretty::Fragment;
 
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let msg = pretty::Fragment::new(self.iter().map(|part| match part {
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        pretty::Fragment::new(self.iter().map(|part| match part {
             DiagMsgPart::Plain(text) => pretty::Node::Text(text.clone()).into(),
             DiagMsgPart::Attrs(attrs) => attrs.print(printer),
             DiagMsgPart::Type(ty) => ty.print(printer),
             DiagMsgPart::Const(ct) => ct.print(printer),
             DiagMsgPart::QPtrUsage(usage) => usage.print(printer),
-        }));
-        AttrsAndDef {
-            attrs: pretty::Fragment::default(),
-            def_without_name: msg,
-        }
+        }))
     }
 }
 

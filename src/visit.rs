@@ -141,20 +141,6 @@ impl_visit! {
     }
 }
 
-/// Dynamic dispatch version of [`Visit`].
-///
-/// `dyn DynVisit<'a, V>` is possible, unlike `dyn Visit`, because of the
-/// `trait`-level type parameter `V`, which replaces the method parameter.
-pub trait DynVisit<'a, V> {
-    fn dyn_visit_with(&'a self, visitor: &mut V);
-}
-
-impl<'a, T: Visit, V: Visitor<'a>> DynVisit<'a, V> for T {
-    fn dyn_visit_with(&'a self, visitor: &mut V) {
-        self.visit_with(visitor);
-    }
-}
-
 /// Trait implemented on "deeply visitable" types, to further "explore" a type
 /// by visiting its "interior" (i.e. variants and/or fields).
 ///
