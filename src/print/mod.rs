@@ -84,13 +84,6 @@ pub struct Plan<'a> {
     use_counts: FxIndexMap<Use, usize>,
 }
 
-/// Helper for printing a mismatch error between two nodes (e.g. types), while
-/// taking advantage of the print infrastructure that will print all dependencies.
-pub struct ExpectedVsFound<E, F> {
-    pub expected: E,
-    pub found: F,
-}
-
 /// Print [`Plan`] top-level entry, an effective reification of SPIR-T's implicit DAG.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum Node {
@@ -517,21 +510,6 @@ impl<'a> Visitor<'a> for Plan<'a> {
             _ => *self.use_counts.entry(Use::from(*v)).or_default() += 1,
         }
         v.inner_visit_with(self);
-    }
-}
-
-impl<E: Visit, F: Visit> Visit for ExpectedVsFound<E, F> {
-    fn visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        self.inner_visit_with(visitor);
-    }
-}
-
-impl<E: Visit, F: Visit> InnerVisit for ExpectedVsFound<E, F> {
-    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { expected, found } = self;
-
-        expected.visit_with(visitor);
-        found.visit_with(visitor);
     }
 }
 
@@ -1191,26 +1169,6 @@ pub trait Print {
     // could eventually be `fn setup_printer(&self, printer: &mut Printer)`.
     fn downcast_as_func_decl(&self) -> Option<&FuncDecl> {
         None
-    }
-}
-
-impl<E: Print<Output = pretty::Fragment>, F: Print<Output = pretty::Fragment>> Print
-    for ExpectedVsFound<E, F>
-{
-    type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self { expected, found } = self;
-
-        AttrsAndDef {
-            attrs: pretty::Fragment::default(),
-            def_without_name: pretty::Fragment::new([
-                "expected: ".into(),
-                expected.print(printer),
-                pretty::Node::ForceLineSeparation.into(),
-                "found: ".into(),
-                found.print(printer),
-            ]),
-        }
     }
 }
 
