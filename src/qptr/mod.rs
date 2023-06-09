@@ -4,7 +4,7 @@
 // FIXME(eddyb) PR description of https://github.com/EmbarkStudios/spirt/pull/24
 // has more useful docs that could be copied here.
 
-use crate::{AddrSpace, Attr, DataInstKind, OrdAssertEq, Type};
+use crate::{AddrSpace, OrdAssertEq, Type};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::ops::Range;
@@ -60,12 +60,6 @@ pub enum QPtrAttr {
     /// `ControlRegionInputDecl` or `ControlNodeOutputDecl`, this tracks all the
     /// ways in which the pointer may be used (see `QPtrUsage`).
     Usage(OrdAssertEq<QPtrUsage>),
-}
-
-impl From<QPtrAttr> for Attr {
-    fn from(attr: QPtrAttr) -> Self {
-        Attr::QPtr(attr)
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -217,10 +211,4 @@ pub enum QPtrOp {
     //
     // FIXME(eddyb) implement more ops! at the very least copying!
     // (and lowering could ignore pointercasts, I guess?)
-}
-
-impl From<QPtrOp> for DataInstKind {
-    fn from(op: QPtrOp) -> Self {
-        DataInstKind::QPtr(op)
-    }
 }
