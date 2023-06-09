@@ -86,8 +86,9 @@ struct PlanVersion<'a> {
     /// or left empty (in the single-version mode).
     name: String,
 
-    /// Type-erased [`Node`] definitions, for later printing.
-    node_defs: FxHashMap<Node, &'a dyn Print<Output = AttrsAndDef>>,
+    /// Definitions for all the [`Node`]s which may need to be printed later
+    /// (with the exception of [`Node::AllCxInterned`], which is special-cased).
+    node_defs: FxHashMap<Node, NodeDef<'a>>,
 
     /// Either a whole [`Module`], or some other printable type passed to
     /// [`Plan::for_root`]/[`Plan::for_versions`], which gets printed last,
@@ -126,8 +127,17 @@ impl Node {
     }
 }
 
-/// Helper for [`Node::AllCxInterned`]'s definition, to  be used in `node_defs`.
-struct AllCxInterned;
+/// Definition of a [`Node`] (i.e. a reference pointing into a [`Module`]).
+///
+/// Note: [`Node::AllCxInterned`] does *not* have its own `NodeDef` variant,
+/// as it *must* be specially handled instead.
+#[derive(Copy, Clone, derive_more::From)]
+enum NodeDef<'a> {
+    ModuleDialect(&'a ModuleDialect),
+    ModuleDebugInfo(&'a ModuleDebugInfo),
+    GlobalVar(&'a GlobalVarDecl),
+    Func(&'a FuncDecl),
+}
 
 /// Anything interned in [`Context`], that might need to be printed once
 /// (as part of [`Node::AllCxInterned`]) and referenced multiple times.
@@ -301,7 +311,10 @@ impl<'a> Plan<'a> {
         }
 
         // Group all `CxInterned`s in a single top-level `Node`.
-        self.use_node(Node::AllCxInterned, &AllCxInterned);
+        *self
+            .use_counts
+            .entry(Use::Node(Node::AllCxInterned))
+            .or_default() += 1;
 
         *self.use_counts.entry(use_kind).or_default() += 1;
     }
@@ -310,11 +323,10 @@ impl<'a> Plan<'a> {
     ///
     /// Only the first call recurses into the definition, subsequent calls only
     /// update its (internally tracked) "use count".
-    fn use_node(
-        &mut self,
-        node: Node,
-        node_def: &'a (impl Visit + Print<Output = AttrsAndDef> + 'a),
-    ) {
+    fn use_node<D: Visit>(&mut self, node: Node, node_def: &'a D)
+    where
+        NodeDef<'a>: From<&'a D>,
+    {
         if let Some(use_count) = self.use_counts.get_mut(&Use::Node(node)) {
             *use_count += 1;
             return;
@@ -323,18 +335,33 @@ impl<'a> Plan<'a> {
         let current_version = self.versions.last_mut().unwrap();
         match current_version.node_defs.entry(node) {
             Entry::Occupied(entry) => {
-                let dyn_data_ptr = |r| (r as *const dyn Print<Output = AttrsAndDef>).cast::<()>();
+                let old_ptr_eq_new = match (*entry.get(), NodeDef::from(node_def)) {
+                    (NodeDef::ModuleDialect(old), NodeDef::ModuleDialect(new)) => {
+                        std::ptr::eq(old, new)
+                    }
+                    (NodeDef::ModuleDebugInfo(old), NodeDef::ModuleDebugInfo(new)) => {
+                        std::ptr::eq(old, new)
+                    }
+                    (NodeDef::GlobalVar(old), NodeDef::GlobalVar(new)) => std::ptr::eq(old, new),
+                    (NodeDef::Func(old), NodeDef::Func(new)) => std::ptr::eq(old, new),
+                    _ => false,
+                };
+
+                // HACK(eddyb) this avoids infinite recursion - we can't insert
+                // into `use_counts` before `node_def.visit_with(self)` because
+                // we want dependencies to come before dependends, so recursion
+                // from the visitor (recursive `Func`s, or `visit_foo` calling
+                // `use_node` which calls the same `visit_foo` method again)
+                // ends up here, and we have to both allow it and early-return.
                 assert!(
-                    std::ptr::eq(dyn_data_ptr(*entry.get()), dyn_data_ptr(node_def)),
+                    old_ptr_eq_new,
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
                     node.category().unwrap_or_else(|s| s)
                 );
-
-                // Avoid infinite recursion for e.g. recursive functions.
                 return;
             }
             Entry::Vacant(entry) => {
-                entry.insert(node_def);
+                entry.insert(NodeDef::from(node_def));
             }
         }
 
@@ -490,10 +517,6 @@ impl<'a> Visitor<'a> for Plan<'a> {
         }
         v.inner_visit_with(self);
     }
-}
-
-impl Visit for AllCxInterned {
-    fn visit_with<'a>(&'a self, _visitor: &mut impl Visitor<'a>) {}
 }
 
 // FIXME(eddyb) make max line width configurable.
@@ -737,15 +760,11 @@ impl<'a> Printer<'a> {
             };
 
             let func_def_bodies_across_versions = plan.versions.iter().filter_map(|version| {
-                match version
-                    .node_defs
-                    .get(&Node::Func(func))?
-                    .downcast_as_func_decl()?
-                {
-                    FuncDecl {
+                match version.node_defs.get(&Node::Func(func))? {
+                    NodeDef::Func(FuncDecl {
                         def: DeclDef::Present(func_def_body),
                         ..
-                    } => Some(func_def_body),
+                    }) => Some(func_def_body),
 
                     _ => None,
                 }
@@ -1152,15 +1171,11 @@ impl AttrsAndDef {
 }
 
 pub trait Print {
+    // FIXME(eddyb) maybe remove `type Output;` flexibility by having two traits
+    // instead of one? (a method that returns `self.attrs` would allow for some
+    // automation, and remove a lot of the noise that `AttrsAndDef` adds).
     type Output;
     fn print(&self, printer: &Printer<'_>) -> Self::Output;
-
-    // HACK(eddyb) this is only ever implemented by `FuncDecl`, to allow for
-    // `Printer::new` to compute its per-function indices. A better replacement
-    // could eventually be `fn setup_printer(&self, printer: &mut Printer)`.
-    fn downcast_as_func_decl(&self) -> Option<&FuncDecl> {
-        None
-    }
 }
 
 impl Use {
@@ -1310,21 +1325,14 @@ impl Plan<'_> {
 
         let per_node_versions_with_repeat_count =
             all_nodes_and_or_root.map(|node_or_root| -> SmallVec<[_; 1]> {
-                // Avoid printing `AllCxInterned` more than once, it doesn't
-                // really have per-version node definitions in the first place.
+                // Only print `Node::AllCxInterned` once (it doesn't really have
+                // per-version node definitions in the first place, anyway).
                 if let NodeOrRoot::Node(node @ Node::AllCxInterned) = node_or_root {
                     node.category().unwrap_err();
 
-                    // FIXME(eddyb) maybe make `Print` `Any`-like, to be able
-                    // to assert that all per-version defs are identical.
-                    return [(
-                        AllCxInterned
-                            .print(printer)
-                            .insert_name_before_def(pretty::Fragment::default()),
-                        self.versions.len(),
-                    )]
-                    .into_iter()
-                    .collect();
+                    return [(CxInterned::print_all(printer), self.versions.len())]
+                        .into_iter()
+                        .collect();
                 }
 
                 self.versions
@@ -1409,6 +1417,18 @@ impl Print for Module {
                 "}",
             ),
         ])
+    }
+}
+
+impl Print for NodeDef<'_> {
+    type Output = AttrsAndDef;
+    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+        match self {
+            Self::ModuleDialect(dialect) => dialect.print(printer),
+            Self::ModuleDebugInfo(debug_info) => debug_info.print(printer),
+            Self::GlobalVar(gv_decl) => gv_decl.print(printer),
+            Self::Func(func_decl) => func_decl.print(printer),
+        }
     }
 }
 
@@ -1618,9 +1638,8 @@ impl Print for Exportee {
     }
 }
 
-impl Print for AllCxInterned {
-    type Output = AttrsAndDef;
-    fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
+impl CxInterned {
+    fn print_all(printer: &Printer<'_>) -> pretty::Fragment {
         let fragments = printer
             .use_styles
             .iter()
@@ -1655,10 +1674,7 @@ impl Print for AllCxInterned {
                 "\n\n".into()
             });
 
-        AttrsAndDef {
-            attrs: pretty::Fragment::default(),
-            def_without_name: pretty::Fragment::new(fragments),
-        }
+        pretty::Fragment::new(fragments)
     }
 }
 
@@ -1873,7 +1889,6 @@ impl Print for Attr {
 
 impl Print for Vec<DiagMsgPart> {
     type Output = pretty::Fragment;
-
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         pretty::Fragment::new(self.iter().map(|part| match part {
             DiagMsgPart::Plain(text) => pretty::Node::Text(text.clone()).into(),
@@ -1887,7 +1902,6 @@ impl Print for Vec<DiagMsgPart> {
 
 impl Print for QPtrUsage {
     type Output = pretty::Fragment;
-
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
             QPtrUsage::Handles(qptr::shapes::Handle::Opaque(ty)) => ty.print(printer),
@@ -1907,7 +1921,6 @@ impl Print for QPtrUsage {
 
 impl Print for QPtrMemUsage {
     type Output = pretty::Fragment;
-
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         // FIXME(eddyb) should this be a helper on `Printer`?
         let num_lit = |x: u32| printer.numeric_literal_style().apply(format!("{x}")).into();
@@ -2498,10 +2511,6 @@ impl Print for FuncDecl {
             attrs: attrs.print(printer),
             def_without_name,
         }
-    }
-
-    fn downcast_as_func_decl(&self) -> Option<&FuncDecl> {
-        Some(self)
     }
 }
 
