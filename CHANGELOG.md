@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example (which only dumped plaintext, not HTML) with a more useful `spv-lower-print` one
 
 ### Fixed 🩹
+- [PR#37](https://github.com/EmbarkStudios/spirt/pull/37) fixed pretty-printing layout
+  accuracy regarding line widths (by tracking `font-size`-aware "fractional columns"),
+  and raised the maximum line width back up to `120` columns
 - [PR#27](https://github.com/EmbarkStudios/spirt/pull/27) fixed some pretty-printing issues
   in the initial `Attr::Diagnostics` implementation (`BUG` paths and `/* ... */` indentation)
 
