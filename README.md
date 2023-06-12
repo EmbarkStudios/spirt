@@ -130,28 +130,33 @@ fn main() -> @location(0) i32 {
 <!--FIXME(eddyb) this is SPIR-T but GitHub can't syntax-highlight it (ever?) -->
 <sup>
 
+<!-- NOTE(eddyb) BEGIN/END below processed by .github/workflows/check-examples.sh -->
+<!-- BEGIN tests/data/for-loop.wgsl.spvasm.structured.spirt -->
 ```cxx
-#{
-  OpDecorate<Decoration.Flat>,
-  OpDecorate<Decoration.Location(0)>,
-}
-global_var0 in StorageClass.Output: s32
+type0 = spv.OpTypePointer<spv.StorageClass.Output>(s32)
 
-func0() -> OpTypeVoid {
-  loop(v5: s32 <- 1s32, v6: s32 <- 1s32) {
-    v2 = OpSLessThan(v6, 10s32): bool
-    (v7: bool, v8: s32, v9: s32) = if v2 {
-      v3 = OpIMul(v5, v6): s32
-      v4 = OpIAdd(v6, 1s32): s32
-      (true, v3, v4)
+#{
+  spv.OpDecorate<spv.Decoration.Flat>,
+  spv.OpDecorate<spv.Decoration.Location(0)>,
+}
+global_var0 in spv.StorageClass.Output: s32
+
+func0() -> spv.OpTypeVoid {
+  loop(v0: s32 <- 1s32, v1: s32 <- 1s32) {
+    v2 = spv.OpSLessThan(v1, 10s32): bool
+    (v3: bool, v4: s32, v5: s32) = if v2 {
+      v6 = spv.OpIMul(v0, v1): s32
+      v7 = spv.OpIAdd(v1, 1s32): s32
+      (true, v6, v7)
     } else {
-      OpStore(&global_var0, v5)
-      (false, OpUndef: s32, OpUndef: s32)
+      spv.OpStore(&global_var0, v0)
+      (false, spv.OpUndef: s32, spv.OpUndef: s32)
     }
-    (v8, v9) -> (v5, v6)
-  } while v7
+    (v4, v5) -> (v0, v1)
+  } while v3
 }
 ```
+<!-- END tests/data/for-loop.wgsl.spvasm.structured.spirt -->
 </sup>
 </td><td>
 

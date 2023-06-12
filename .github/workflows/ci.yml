@@ -55,8 +55,8 @@ jobs:
       - name: Prepare Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.0
         with:
-          vulkan-query-version: 1.3.204.0
-          vulkan-components: Glslang
+          vulkan-query-version: 1.3.250.0
+          vulkan-components: Glslang SPIRV-Tools
           vulkan-use-cache: true
       - run: cargo fetch
       # FIXME(eddyb) `cargo test` is not even that important yet.
@@ -72,6 +72,9 @@ jobs:
           glslangValidator -V --target-env spirv1.3 -g tests/data/debug-printf.vert.glsl -o tests/data/debug-printf.vert.glsl.dbg.spv
           cargo run --release --example spv-lower-link-lift tests/data/basic.frag.glsl.dbg.spv
           cargo run --release --example spv-lower-link-lift tests/data/debug-printf.vert.glsl.dbg.spv
+      - if: ${{ runner.os == 'Linux' }}
+        name: Check examples are up to date
+        run: .github/workflows/check-examples.sh
 
   deny-check:
     name: cargo-deny
