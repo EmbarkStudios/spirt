@@ -133,8 +133,6 @@ fn main() -> @location(0) i32 {
 <!-- NOTE(eddyb) BEGIN/END below processed by .github/workflows/check-examples.sh -->
 <!-- BEGIN tests/data/for-loop.wgsl.spvasm.structured.spirt -->
 ```cxx
-type0 = spv.OpTypePointer<spv.StorageClass.Output>(s32)
-
 #{
   spv.OpDecorate<spv.Decoration.Flat>,
   spv.OpDecorate<spv.Decoration.Location(0)>,
