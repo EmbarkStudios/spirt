@@ -135,7 +135,6 @@ struct AllCxInterned;
 /// (as part of [`Node::AllCxInterned`]) and referenced multiple times.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 enum CxInterned {
-    AttrSet(AttrSet),
     Type(Type),
     Const(Const),
 }
@@ -143,7 +142,6 @@ enum CxInterned {
 impl CxInterned {
     fn category(self) -> &'static str {
         match self {
-            Self::AttrSet(_) => "attrs",
             Self::Type(_) => "type",
             Self::Const(_) => "const",
         }
@@ -326,9 +324,6 @@ impl<'a> Plan<'a> {
         }
 
         match interned {
-            CxInterned::AttrSet(attrs) => {
-                self.visit_attr_set_def(&self.cx[attrs]);
-            }
             CxInterned::Type(ty) => {
                 self.visit_type_def(&self.cx[ty]);
             }
@@ -379,7 +374,7 @@ impl<'a> Plan<'a> {
 
 impl<'a> Visitor<'a> for Plan<'a> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
-        self.use_interned(CxInterned::AttrSet(attrs));
+        self.visit_attr_set_def(&self.cx[attrs]);
     }
     fn visit_type_use(&mut self, ty: Type) {
         self.use_interned(CxInterned::Type(ty));
@@ -610,7 +605,6 @@ impl<'a> Printer<'a> {
 
         #[derive(Default)]
         struct AnonCounters {
-            attr_sets: usize,
             types: usize,
             consts: usize,
 
@@ -650,20 +644,6 @@ impl<'a> Printer<'a> {
                     Use::CxInterned(interned) => {
                         use_count == 1
                             || match interned {
-                                CxInterned::AttrSet(attrs) => {
-                                    let AttrSetDef { attrs } = &cx[attrs];
-                                    attrs.len() <= 1
-                                        || attrs.iter().any(|attr| {
-                                            // HACK(eddyb) because of how these
-                                            // are printed as comments outside
-                                            // the `#{...}` syntax, they can't
-                                            // work unless they're printed inline.
-                                            matches!(
-                                                attr,
-                                                Attr::Diagnostics(_) | Attr::SpvDebugLine { .. }
-                                            )
-                                        })
-                                }
                                 CxInterned::Type(ty) => {
                                     let ty_def = &cx[ty];
 
@@ -720,7 +700,6 @@ impl<'a> Printer<'a> {
                 } else {
                     let ac = &mut anon_counters;
                     let counter = match use_kind {
-                        Use::CxInterned(CxInterned::AttrSet(_)) => &mut ac.attr_sets,
                         Use::CxInterned(CxInterned::Type(_)) => &mut ac.types,
                         Use::CxInterned(CxInterned::Const(_)) => &mut ac.consts,
                         Use::Node(Node::GlobalVar(_)) => &mut ac.global_vars,
@@ -1267,30 +1246,20 @@ impl Use {
                     // FIXME(eddyb) avoid having to clone `String`s here.
                     name.clone()
                 };
-                let (name, name_style) = match self {
-                    Self::CxInterned(CxInterned::AttrSet(_)) => {
-                        (format!("#{name}"), printer.attr_style())
-                    }
-
+                let name = match self {
                     Self::AlignmentAnchorForControlRegion(_)
                     | Self::AlignmentAnchorForControlNode(_)
-                    | Self::AlignmentAnchorForDataInst(_) => ("".to_string(), Default::default()),
+                    | Self::AlignmentAnchorForDataInst(_) => "".to_string(),
 
-                    _ => (name, Default::default()),
+                    _ => name,
                 };
-                let name = pretty::Styles {
+                pretty::Styles {
                     anchor: Some(anchor),
                     anchor_is_def: is_def,
-                    ..name_style
+                    ..Default::default()
                 }
-                .apply(name);
-                match self {
-                    Self::CxInterned(CxInterned::AttrSet(_)) => {
-                        // HACK(eddyb) separate `AttrSet` uses from their target.
-                        pretty::Fragment::new([name, pretty::Node::ForceLineSeparation])
-                    }
-                    _ => name.into(),
-                }
+                .apply(name)
+                .into()
             }
             UseStyle::Inline => match *self {
                 Self::CxInterned(interned) => interned
@@ -1328,12 +1297,6 @@ impl Print for Use {
 }
 
 // Interned/module-stored nodes dispatch through the `Use` impl above.
-impl Print for AttrSet {
-    type Output = pretty::Fragment;
-    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        Use::CxInterned(CxInterned::AttrSet(*self)).print(printer)
-    }
-}
 impl Print for Type {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
@@ -1745,13 +1708,16 @@ impl Print for CxInterned {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         match *self {
-            Self::AttrSet(attrs) => AttrsAndDef {
-                attrs: pretty::Fragment::default(),
-                def_without_name: printer.cx[attrs].print(printer),
-            },
             Self::Type(ty) => printer.cx[ty].print(printer),
             Self::Const(ct) => printer.cx[ct].print(printer),
         }
+    }
+}
+
+impl Print for AttrSet {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        printer.cx[*self].print(printer)
     }
 }
 
@@ -1760,59 +1726,21 @@ impl Print for AttrSetDef {
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         let Self { attrs } = self;
 
-        let mut comments = SmallVec::<[_; 1]>::new();
-        let mut non_comment_attrs = SmallVec::<[_; 4]>::new();
-        for attr in attrs {
-            let (attr_style, attr) = attr.print(printer);
-            match attr_style {
-                AttrStyle::Comment => comments.push(attr),
-                AttrStyle::NonComment => non_comment_attrs.push(attr),
-            }
-        }
-
-        let non_comment_attrs = if non_comment_attrs.is_empty() {
-            None
-        } else {
-            // FIXME(eddyb) remove this special-case by having some mode for
-            // "prefer multi-line but admit a single-element compact form"
-            // (a comma that's always `,\n`, effectively)
-            let per_attr_prefix = if non_comment_attrs.len() > 1 {
-                Some(pretty::Node::ForceLineSeparation.into())
-            } else {
-                None
-            };
-
-            // FIXME(eddyb) apply `attr_style` to more than just `#{` and `}`.
-            Some(pretty::join_comma_sep(
-                printer.attr_style().apply("#{"),
-                non_comment_attrs.into_iter().map(|attr| {
-                    pretty::Fragment::new(per_attr_prefix.clone().into_iter().chain([attr]))
-                }),
-                printer.attr_style().apply("}"),
-            ))
-        };
-
         pretty::Fragment::new(
-            non_comment_attrs
-                .into_iter()
-                .chain(comments)
+            attrs
+                .iter()
+                .map(|attr| attr.print(printer))
                 .flat_map(|entry| [entry, pretty::Node::ForceLineSeparation.into()]),
         )
     }
 }
 
-pub enum AttrStyle {
-    Comment,
-    NonComment,
-}
-
 impl Print for Attr {
-    type Output = (AttrStyle, pretty::Fragment);
-    fn print(&self, printer: &Printer<'_>) -> (AttrStyle, pretty::Fragment) {
-        match self {
-            Attr::Diagnostics(diags) => (
-                AttrStyle::Comment,
-                pretty::Fragment::new(
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        let non_comment_attr = match self {
+            Attr::Diagnostics(diags) => {
+                return pretty::Fragment::new(
                     diags
                         .0
                         .iter()
@@ -1887,8 +1815,8 @@ impl Print for Attr {
                             ])
                         })
                         .intersperse(pretty::Node::ForceLineSeparation.into()),
-                ),
-            ),
+                );
+            }
 
             Attr::QPtr(attr) => {
                 let (name, params_inputs) = match attr {
@@ -1927,23 +1855,34 @@ impl Print for Attr {
                         pretty::join_comma_sep("(", [usage.0.print(printer)], ")"),
                     ),
                 };
-                (
-                    AttrStyle::NonComment,
-                    pretty::Fragment::new([
-                        printer
-                            .demote_style_for_namespace_prefix(printer.attr_style())
-                            .apply("qptr.")
-                            .into(),
-                        printer.attr_style().apply(name).into(),
-                        params_inputs,
-                    ]),
-                )
+                pretty::Fragment::new([
+                    printer
+                        .demote_style_for_namespace_prefix(printer.attr_style())
+                        .apply("qptr.")
+                        .into(),
+                    printer.attr_style().apply(name).into(),
+                    params_inputs,
+                ])
             }
 
-            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => (
-                AttrStyle::NonComment,
-                printer.pretty_spv_inst(printer.attr_style(), *opcode, imms, [None]),
-            ),
+            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
+                let wk = &spv::spec::Spec::get().well_known;
+
+                // HACK(eddyb) `#[spv.OpDecorate(...)]` is redundant (with its operand).
+                if [wk.OpDecorate, wk.OpDecorateString, wk.OpExecutionMode].contains(opcode) {
+                    printer.pretty_spv_operand_from_imms(imms.iter().copied())
+                } else if *opcode == wk.OpName {
+                    // HACK(eddyb) unlike `OpDecorate`, we can't just omit `OpName`,
+                    // but pretending it's a SPIR-T-specific `#[name = "..."]`
+                    // attribute should be good enough for now.
+                    pretty::Fragment::new([
+                        printer.attr_style().apply("name = ").into(),
+                        printer.pretty_spv_operand_from_imms(imms.iter().copied()),
+                    ])
+                } else {
+                    printer.pretty_spv_inst(printer.attr_style(), *opcode, imms, [None])
+                }
+            }
             &Attr::SpvDebugLine {
                 file_path,
                 line,
@@ -1964,16 +1903,15 @@ impl Print for Attr {
                 } else {
                     format!("// at {file_path:?}:{line}:{col}")
                 };
-                (
-                    AttrStyle::Comment,
-                    printer.comment_style().apply(comment).into(),
-                )
+                return printer.comment_style().apply(comment).into();
             }
-            &Attr::SpvBitflagsOperand(imm) => (
-                AttrStyle::NonComment,
-                printer.pretty_spv_operand_from_imms([imm]),
-            ),
-        }
+            &Attr::SpvBitflagsOperand(imm) => printer.pretty_spv_operand_from_imms([imm]),
+        };
+        pretty::Fragment::new([
+            printer.attr_style().apply("#[").into(),
+            non_comment_attr,
+            printer.attr_style().apply("]").into(),
+        ])
     }
 }
 
