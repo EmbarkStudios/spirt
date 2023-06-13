@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#33](https://github.com/EmbarkStudios/spirt/pull/33) replaced the `spv.OpFoo<imms>(IDs)`
+  style of pretty-printing with `spv.OpFoo(A: imm, B: ID, C: imm, ...)` (unified parenthesized
+  list of operands, with deemphasized operand names in `foo:` "named arguments" style)
 - [PR#28](https://github.com/EmbarkStudios/spirt/pull/28) moved two `DataInstDef`
   fields (`kind` and `output_type`) to `DataInstForm`, a new interned type
 - [PR#30](https://github.com/EmbarkStudios/spirt/pull/30) replaced the old `spv-lower-dump`
