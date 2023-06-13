@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example (which only dumped plaintext, not HTML) with a more useful `spv-lower-print` one
 
 ### Fixed 🩹
+- [PR#34](https://github.com/EmbarkStudios/spirt/pull/34) fixed `OpTypePointer`s being
+  spuriously printed as dependencies of `GlobalVarDecl`/`PtrToGlobalVar` (neither of
+  which actually print the pointer type), and added a CI check for `README.md` examples
 - [PR#37](https://github.com/EmbarkStudios/spirt/pull/37) fixed pretty-printing layout
   accuracy regarding line widths (by tracking `font-size`-aware "fractional columns"),
   and raised the maximum line width back up to `120` columns

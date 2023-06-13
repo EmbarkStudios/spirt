@@ -443,6 +443,59 @@ impl<'a> Visitor<'a> for Plan<'a> {
         }
     }
 
+    fn visit_const_def(&mut self, ct_def: &'a ConstDef) {
+        // HACK(eddyb) the type of a `PtrToGlobalVar` is never printed, skip it.
+        if let ConstCtor::PtrToGlobalVar(gv) = ct_def.ctor {
+            self.visit_attr_set_use(ct_def.attrs);
+            self.visit_global_var_use(gv);
+        } else {
+            ct_def.inner_visit_with(self);
+        }
+    }
+
+    fn visit_global_var_decl(&mut self, gv_decl: &'a GlobalVarDecl) {
+        // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
+        // ideally the `GlobalVarDecl` would hold that type itself.
+        let pointee_type = {
+            let wk = &spv::spec::Spec::get().well_known;
+
+            let type_of_ptr_to_def = &self.cx[gv_decl.type_of_ptr_to];
+            match &type_of_ptr_to_def.ctor {
+                TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypePointer => {
+                    match type_of_ptr_to_def.ctor_args[..] {
+                        [TypeCtorArg::Type(ty)] => Some(ty),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        // HACK(eddyb) if we can get away without visiting the `OpTypePointer`
+        // `type_of_ptr_to`, but only its pointee type, do so to avoid spurious
+        // `OpTypePointer` types showing up in the pretty-printed output.
+        match (gv_decl, pointee_type) {
+            (
+                GlobalVarDecl {
+                    attrs,
+                    type_of_ptr_to: _,
+                    shape: None,
+                    addr_space: AddrSpace::SpvStorageClass(_),
+                    def,
+                },
+                Some(pointee_type),
+            ) => {
+                self.visit_attr_set_use(*attrs);
+                self.visit_type_use(pointee_type);
+                def.inner_visit_with(self);
+            }
+
+            _ => {
+                gv_decl.inner_visit_with(self);
+            }
+        }
+    }
+
     fn visit_func_decl(&mut self, func_decl: &'a FuncDecl) {
         if let DeclDef::Present(func_def_body) = &func_decl.def {
             if let Some(cfg) = &func_def_body.unstructured_cfg {
@@ -461,6 +514,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
         func_decl.inner_visit_with(self);
     }
+
     fn visit_value_use(&mut self, v: &'a Value) {
         match *v {
             Value::Const(_) => {}
