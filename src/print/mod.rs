@@ -34,6 +34,7 @@ use crate::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::mem;
 
@@ -911,6 +912,12 @@ impl Printer<'_> {
             ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
         }
     }
+    fn named_argument_label_style(&self) -> pretty::Styles {
+        pretty::Styles {
+            size: Some(-5),
+            ..pretty::Styles::color(pretty::palettes::simple::DARK_GRAY)
+        }
+    }
     fn numeric_literal_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::YELLOW)
     }
@@ -961,6 +968,16 @@ impl Printer<'_> {
 }
 
 impl<'a> Printer<'a> {
+    /// Pretty-print a `name: ` style "named argument" prefix.
+    //
+    // FIXME(eddyb) add methods like this for all styled text (e.g. literals).
+    fn pretty_named_argument_prefix(&self, name: impl Into<Cow<'static, str>>) -> pretty::Fragment {
+        // FIXME(eddyb) avoid the cost of allocating here.
+        self.named_argument_label_style()
+            .apply(format!("{}: ", name.into()))
+            .into()
+    }
+
     /// Pretty-print a `: T` style "type ascription" suffix.
     ///
     /// This should be used everywhere some type ascription notation is needed,
@@ -982,47 +999,76 @@ impl<'a> Printer<'a> {
         ])
     }
 
+    /// Pretty-print a `spv::print::TokensForOperand` (common helper used below).
+    fn pretty_spv_print_tokens_for_operand(
+        &self,
+        operand: spv::print::TokensForOperand<Option<pretty::Fragment>>,
+    ) -> pretty::Fragment {
+        pretty::Fragment::new(operand.tokens.into_iter().map(|token| match token {
+            spv::print::Token::Error(s) => self.error_style().apply(s).into(),
+            spv::print::Token::OperandName(s) => {
+                Some(s)
+                    .and_then(|name| {
+                        // HACK(eddyb) some operand names are useless.
+                        if name == "Type"
+                            || name
+                                .strip_prefix("Operand ")
+                                .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+                        {
+                            return None;
+                        }
+
+                        // Turn `Foo Bar` and `Foo bar` into `FooBar`.
+                        // FIXME(eddyb) use `&[AsciiChar]` when that stabilizes.
+                        let name = name
+                            .split_ascii_whitespace()
+                            .map(|word| {
+                                if word.starts_with(|c: char| c.is_ascii_lowercase()) {
+                                    let mut word = word.to_string();
+                                    word[..1].make_ascii_uppercase();
+                                    Cow::Owned(word)
+                                } else {
+                                    word.into()
+                                }
+                            })
+                            .reduce(|out, extra| (out.into_owned() + &extra).into())
+                            .unwrap_or_default();
+
+                        Some(name)
+                    })
+                    .map(|name| self.pretty_named_argument_prefix(name))
+                    .unwrap_or_default()
+            }
+            spv::print::Token::Punctuation(s) => s.into(),
+            spv::print::Token::OperandKindNamespacePrefix(s) => {
+                pretty::Fragment::new([
+                    // HACK(eddyb) double-demote to end up with `spv.A.B`,
+                    // with increasing size from `spv.` to `A.` to `B`.
+                    self.demote_style_for_namespace_prefix(
+                        self.demote_style_for_namespace_prefix(self.spv_base_style()),
+                    )
+                    .apply("spv."),
+                    // FIXME(eddyb) avoid the cost of allocating here.
+                    self.demote_style_for_namespace_prefix(self.declarative_keyword_style())
+                        .apply(format!("{s}.")),
+                ])
+            }
+            spv::print::Token::EnumerandName(s) => self.spv_enumerand_name_style().apply(s).into(),
+            spv::print::Token::NumericLiteral(s) => self.numeric_literal_style().apply(s).into(),
+            spv::print::Token::StringLiteral(s) => self.string_literal_style().apply(s).into(),
+            spv::print::Token::Id(id) => {
+                id.unwrap_or_else(|| self.comment_style().apply("/* implicit ID */").into())
+            }
+        }))
+    }
+
     /// Pretty-print a single SPIR-V operand from only immediates, potentially
     /// composed of an enumerand with parameters (which consumes more immediates).
     fn pretty_spv_operand_from_imms(
         &self,
         imms: impl IntoIterator<Item = spv::Imm>,
     ) -> pretty::Fragment {
-        // FIXME(eddyb) deduplicate the `Token` match with `pretty_spv_inst`.
-        pretty::Fragment::new(
-            spv::print::operand_from_imms(imms)
-                .tokens
-                .into_iter()
-                .map(|token| match token {
-                    spv::print::Token::Error(s) => self.error_style().apply(s).into(),
-                    spv::print::Token::Punctuation(s) => s.into(),
-                    spv::print::Token::OperandKindNamespacePrefix(s) => {
-                        pretty::Fragment::new([
-                            // HACK(eddyb) double-demote to end up with `spv.A.B`,
-                            // with increasing size from `spv.` to `A.` to `B`.
-                            self.demote_style_for_namespace_prefix(
-                                self.demote_style_for_namespace_prefix(self.spv_base_style()),
-                            )
-                            .apply("spv."),
-                            // FIXME(eddyb) avoid the cost of allocating here.
-                            self.demote_style_for_namespace_prefix(
-                                self.declarative_keyword_style(),
-                            )
-                            .apply(format!("{s}.")),
-                        ])
-                    }
-                    spv::print::Token::EnumerandName(s) => {
-                        self.spv_enumerand_name_style().apply(s).into()
-                    }
-                    spv::print::Token::NumericLiteral(s) => {
-                        self.numeric_literal_style().apply(s).into()
-                    }
-                    spv::print::Token::StringLiteral(s) => {
-                        self.string_literal_style().apply(s).into()
-                    }
-                    spv::print::Token::Id(_) => unreachable!(),
-                }),
-        )
+        self.pretty_spv_print_tokens_for_operand(spv::print::operand_from_imms(imms))
     }
 
     /// Pretty-print a single SPIR-V (short) immediate (e.g. an enumerand).
@@ -1030,109 +1076,47 @@ impl<'a> Printer<'a> {
         self.pretty_spv_operand_from_imms([spv::Imm::Short(kind, word)])
     }
 
-    /// Pretty-print an arbitrary SPIR-V `opcode` with `imms` and `ids` as its
-    /// SPIR-V operands (with each `ID` in `ids` passed through `print_id`),
-    /// and optionally with a ` : ...` type ascription at the end (`result_type`).
+    /// Pretty-print an arbitrary SPIR-V `opcode` with its SPIR-V operands being
+    /// given by `imms` (non-IDs) and `printed_ids` (IDs, printed by the caller).
     ///
-    /// `print_id` can return `None` to indicate an ID operand is implicit in
-    /// SPIR-T, and should not be printed (e.g. decorations' target IDs).
-    /// But if `print_id` doesn't need to return `Option<_>` (for `None`), its
-    /// return type can skip the `Option` entirely (which allows passing in the
-    /// [`Print::print`] method, instead of a closure, as `print_id`).
+    /// `printed_ids` elements can be `None` to indicate an ID operand is implicit
+    /// in SPIR-T, and should not be printed (e.g. decorations' target IDs).
+    /// But if `printed_ids` doesn't need to have `None` elements, it can skip
+    /// the `Option` entirely (i.e. have `pretty::Fragment` elements directly).
     ///
-    /// Immediate operands are wrapped in angle brackets, while `ID` operands are
-    /// wrapped in parentheses, e.g.: `spv.OpFoo<Bar, 123, "baz">(v1, v2)`.
+    /// Immediate and `ID` operands are interleaved (in the order mandated by
+    /// the SPIR-V standard) and together wrapped in parentheses, e.g.:
+    /// `spv.OpFoo(spv.FooEnum.Bar, v1, 123, v2, "baz")`.
     ///
     /// This should be used everywhere a SPIR-V instruction needs to be printed,
     /// to ensure consistency across all such situations.
-    fn pretty_spv_inst<ID: Copy, OPF: Into<Option<pretty::Fragment>>>(
+    fn pretty_spv_inst<OPF: Into<Option<pretty::Fragment>>>(
         &self,
         spv_inst_name_style: pretty::Styles,
         opcode: spv::spec::Opcode,
         imms: &[spv::Imm],
-        ids: impl IntoIterator<Item = ID>,
-        print_id: impl Fn(ID, &Self) -> OPF,
-        result_type: Option<Type>,
+        printed_ids: impl IntoIterator<Item = OPF>,
     ) -> pretty::Fragment {
-        // Split operands into "angle brackets" (immediates) and "parens" (IDs),
-        // with compound operands (i.e. enumerand with ID parameter) using both,
-        // e.g: `spv.OpFoo<Bar(/* #0 */)>(/* #0 */ v123)`.
-        let mut next_extra_idx: usize = 0;
-        let mut paren_operands = SmallVec::<[_; 16]>::new();
-        let mut angle_bracket_operands =
-            spv::print::inst_operands(opcode, imms.iter().copied(), ids)
-                .filter_map(|operand| {
-                    if let [spv::print::Token::Id(id)] = operand.tokens[..] {
-                        paren_operands.extend(print_id(id, self).into());
-                        None
-                    } else {
-                        // FIXME(eddyb) deduplicate the `Token` match with `pretty_spv_operand_from_imms`.
-                        Some(pretty::Fragment::new(operand.tokens.into_iter().map(
-                            |token| match token {
-                                spv::print::Token::Error(s) => self.error_style().apply(s).into(),
-                                spv::print::Token::Punctuation(s) => s.into(),
-                                spv::print::Token::OperandKindNamespacePrefix(s) => {
-                                    pretty::Fragment::new([
-                                        // HACK(eddyb) double-demote to end up with `spv.A.B`,
-                                        // with increasing size from `spv.` to `A.` to `B`.
-                                        self.demote_style_for_namespace_prefix(
-                                            self.demote_style_for_namespace_prefix(
-                                                self.spv_base_style(),
-                                            ),
-                                        )
-                                        .apply("spv."),
-                                        // FIXME(eddyb) avoid the cost of allocating here.
-                                        self.demote_style_for_namespace_prefix(
-                                            self.declarative_keyword_style(),
-                                        )
-                                        .apply(format!("{s}.")),
-                                    ])
-                                }
-                                spv::print::Token::EnumerandName(s) => {
-                                    self.spv_enumerand_name_style().apply(s).into()
-                                }
-                                spv::print::Token::NumericLiteral(s) => {
-                                    self.numeric_literal_style().apply(s).into()
-                                }
-                                spv::print::Token::StringLiteral(s) => {
-                                    self.string_literal_style().apply(s).into()
-                                }
-                                spv::print::Token::Id(id) => {
-                                    let comment = self
-                                        .comment_style()
-                                        .apply(format!("/* #{next_extra_idx} */"));
-                                    next_extra_idx += 1;
+        let mut operands = spv::print::inst_operands(
+            opcode,
+            imms.iter().copied(),
+            printed_ids.into_iter().map(|printed_id| printed_id.into()),
+        )
+        .filter_map(|operand| match operand.tokens[..] {
+            [spv::print::Token::Id(None)]
+            | [
+                spv::print::Token::OperandName(_),
+                spv::print::Token::Id(None),
+            ] => None,
 
-                                    let id = print_id(id, self).into().unwrap_or_else(|| {
-                                        self.comment_style().apply("/* implicit ID */").into()
-                                    });
-                                    paren_operands.push(pretty::join_space(comment.clone(), [id]));
+            _ => Some(self.pretty_spv_print_tokens_for_operand(operand)),
+        })
+        .peekable();
 
-                                    comment.into()
-                                }
-                            },
-                        )))
-                    }
-                })
-                .peekable();
-
-        // Put together all the pieces, angle-bracketed operands then parenthesized
-        // ones, e.g.: `spv.OpFoo<Bar, 123, "baz">(v1, v2)` (with either group optional).
         let mut out = self.pretty_spv_opcode(spv_inst_name_style, opcode);
 
-        if angle_bracket_operands.peek().is_some() {
-            out = pretty::Fragment::new([
-                out,
-                pretty::join_comma_sep("<", angle_bracket_operands, ">"),
-            ]);
-        }
-
-        if !paren_operands.is_empty() {
-            out = pretty::Fragment::new([out, pretty::join_comma_sep("(", paren_operands, ")")]);
-        }
-
-        if let Some(ty) = result_type {
-            out = pretty::Fragment::new([out, self.pretty_type_ascription_suffix(ty)]);
+        if operands.peek().is_some() {
+            out = pretty::Fragment::new([out, pretty::join_comma_sep("(", operands, ")")]);
         }
 
         out
@@ -1697,16 +1681,7 @@ impl Print for ExportKey {
             } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
-                struct ImplicitTargetId;
-
-                printer.pretty_spv_inst(
-                    printer.spv_op_style(),
-                    wk.OpEntryPoint,
-                    imms,
-                    &[ImplicitTargetId],
-                    |ImplicitTargetId, _| None,
-                    None,
-                )
+                printer.pretty_spv_inst(printer.spv_op_style(), wk.OpEntryPoint, imms, [None])
             }
         }
     }
@@ -1919,17 +1894,20 @@ impl Print for Attr {
                 let (name, params_inputs) = match attr {
                     QPtrAttr::ToSpvPtrInput { input_idx, pointee } => (
                         "to_spv_ptr_input",
-                        pretty::Fragment::new([
-                            // FIXME(eddyb) is using angle brackets like this consistent styling?
-                            pretty::join_comma_sep(
-                                "<",
-                                [printer
-                                    .numeric_literal_style()
-                                    .apply(format!("{input_idx}"))],
-                                ">",
-                            ),
-                            pretty::join_comma_sep("(", [pointee.0.print(printer)], ")"),
-                        ]),
+                        pretty::Fragment::new([pretty::join_comma_sep(
+                            "(",
+                            [
+                                pretty::Fragment::new([
+                                    printer.pretty_named_argument_prefix("input_idx"),
+                                    printer
+                                        .numeric_literal_style()
+                                        .apply(format!("{input_idx}"))
+                                        .into(),
+                                ]),
+                                pointee.0.print(printer),
+                            ],
+                            ")",
+                        )]),
                     ),
 
                     QPtrAttr::FromSpvPtrOutput {
@@ -1937,11 +1915,11 @@ impl Print for Attr {
                         pointee,
                     } => (
                         "from_spv_ptr_output",
-                        pretty::Fragment::new([
-                            // FIXME(eddyb) is using angle brackets like this consistent styling?
-                            pretty::join_comma_sep("<", [addr_space.0.print(printer)], ">"),
-                            pretty::join_comma_sep("(", [pointee.0.print(printer)], ")"),
-                        ]),
+                        pretty::join_comma_sep(
+                            "(",
+                            [addr_space.0.print(printer), pointee.0.print(printer)],
+                            ")",
+                        ),
                     ),
 
                     QPtrAttr::Usage(usage) => (
@@ -1962,21 +1940,10 @@ impl Print for Attr {
                 )
             }
 
-            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => {
-                struct ImplicitTargetId;
-
-                (
-                    AttrStyle::NonComment,
-                    printer.pretty_spv_inst(
-                        printer.attr_style(),
-                        *opcode,
-                        imms,
-                        &[ImplicitTargetId],
-                        |ImplicitTargetId, _| None,
-                        None,
-                    ),
-                )
-            }
+            Attr::SpvAnnotation(spv::Inst { opcode, imms }) => (
+                AttrStyle::NonComment,
+                printer.pretty_spv_inst(printer.attr_style(), *opcode, imms, [None]),
+            ),
             &Attr::SpvDebugLine {
                 file_path,
                 line,
@@ -2175,12 +2142,10 @@ impl Print for TypeDef {
                         printer.spv_op_style(),
                         opcode,
                         imms,
-                        ctor_args,
-                        |&arg, printer| match arg {
+                        ctor_args.iter().map(|&arg| match arg {
                             TypeCtorArg::Type(ty) => ty.print(printer),
                             TypeCtorArg::Const(ct) => ct.print(printer),
-                        },
-                        None,
+                        }),
                     ),
                     TypeCtor::SpvStringLiteralForExtInst => pretty::Fragment::new([
                         printer.error_style().apply("type_of").into(),
@@ -2326,22 +2291,23 @@ impl Print for ConstDef {
                 ConstCtor::PtrToGlobalVar(gv) => {
                     pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
-                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                    printer.spv_op_style(),
-                    opcode,
-                    imms,
-                    ctor_args,
-                    Print::print,
-                    Some(*ty),
-                ),
+                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => pretty::Fragment::new([
+                    printer.pretty_spv_inst(
+                        printer.spv_op_style(),
+                        opcode,
+                        imms,
+                        ctor_args.iter().map(|arg| arg.print(printer)),
+                    ),
+                    printer.pretty_type_ascription_suffix(*ty),
+                ]),
                 ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
                     printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
-                    "<".into(),
+                    "(".into(),
                     printer
                         .string_literal_style()
                         .apply(format!("{:?}", &printer.cx[s]))
                         .into(),
-                    ">".into(),
+                    ")".into(),
                 ]),
             }),
         }
@@ -2392,13 +2358,12 @@ impl Print for GlobalVarDecl {
                             qptr::shapes::Handle::Buffer(addr_space, buf) => {
                                 pretty::Fragment::new([
                                     printer.declarative_keyword_style().apply("buffer").into(),
-                                    // FIXME(eddyb) is using angle brackets like this consistent styling?
-                                    pretty::join_comma_sep("<", [addr_space.print(printer)], ">"),
                                     pretty::join_comma_sep(
                                         "(",
                                         [
+                                            addr_space.print(printer),
                                             pretty::Fragment::new([
-                                                "size: ".into(),
+                                                printer.pretty_named_argument_prefix("size"),
                                                 pretty::Fragment::new(
                                                     Some(buf.fixed_base.size)
                                                         .filter(|&base_size| {
@@ -2424,10 +2389,11 @@ impl Print for GlobalVarDecl {
                                                 ),
                                             ]),
                                             pretty::Fragment::new([
-                                                "align: ".into(),
+                                                printer.pretty_named_argument_prefix("align"),
                                                 printer
                                                     .numeric_literal_style()
-                                                    .apply(buf.fixed_base.align.to_string()),
+                                                    .apply(buf.fixed_base.align.to_string())
+                                                    .into(),
                                             ]),
                                         ],
                                         ")",
@@ -2465,16 +2431,18 @@ impl Print for GlobalVarDecl {
                                 "(",
                                 [
                                     pretty::Fragment::new([
-                                        "size: ".into(),
+                                        printer.pretty_named_argument_prefix("size"),
                                         printer
                                             .numeric_literal_style()
-                                            .apply(mem_layout.size.to_string()),
+                                            .apply(mem_layout.size.to_string())
+                                            .into(),
                                     ]),
                                     pretty::Fragment::new([
-                                        "align: ".into(),
+                                        printer.pretty_named_argument_prefix("align"),
                                         printer
                                             .numeric_literal_style()
-                                            .apply(mem_layout.align.to_string()),
+                                            .apply(mem_layout.align.to_string())
+                                            .into(),
                                     ]),
                                 ],
                                 ")",
@@ -2904,11 +2872,12 @@ impl Print for DataInstDef {
 
         let DataInstFormDef { kind, output_type } = &printer.cx[*form];
 
-        let header = match kind {
+        let def_without_type = match kind {
             &DataInstKind::FuncCall(func) => pretty::Fragment::new([
                 printer.declarative_keyword_style().apply("call").into(),
                 " ".into(),
                 func.print(printer),
+                pretty::join_comma_sep("(", inputs.iter().map(|v| v.print(printer)), ")"),
             ]),
 
             DataInstKind::QPtr(op) => {
@@ -2924,21 +2893,26 @@ impl Print for DataInstDef {
                             "func_local_var",
                             [
                                 pretty::Fragment::new([
-                                    "size: ".into(),
+                                    printer.pretty_named_argument_prefix("size"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(mem_layout.size.to_string()),
+                                        .apply(mem_layout.size.to_string())
+                                        .into(),
                                 ]),
                                 pretty::Fragment::new([
-                                    "align: ".into(),
+                                    printer.pretty_named_argument_prefix("align"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(mem_layout.align.to_string()),
+                                        .apply(mem_layout.align.to_string())
+                                        .into(),
                                 ]),
                             ]
                             .into_iter()
                             .chain(extra_inputs.get(0).map(|&init| {
-                                pretty::Fragment::new(["init: ".into(), init.print(printer)])
+                                pretty::Fragment::new([
+                                    printer.pretty_named_argument_prefix("initializer"),
+                                    init.print(printer),
+                                ])
                             }))
                             .collect(),
                         )
@@ -2967,16 +2941,18 @@ impl Print for DataInstDef {
                             "buffer_dyn_len",
                             [
                                 pretty::Fragment::new([
-                                    "fixed_base_size: ".into(),
+                                    printer.pretty_named_argument_prefix("fixed_base_size"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(fixed_base_size.to_string()),
+                                        .apply(fixed_base_size.to_string())
+                                        .into(),
                                 ]),
                                 pretty::Fragment::new([
-                                    "dyn_unit_stride: ".into(),
+                                    printer.pretty_named_argument_prefix("dyn_unit_stride"),
                                     printer
                                         .numeric_literal_style()
-                                        .apply(dyn_unit_stride.to_string()),
+                                        .apply(dyn_unit_stride.to_string())
+                                        .into(),
                                 ]),
                             ]
                             .into_iter()
@@ -3029,74 +3005,63 @@ impl Print for DataInstDef {
                     }
                 };
 
-                // HACK(eddyb) this duplicates and intentionally breaks away from
-                // the style of SPIR-V instructions and how they handle immediates.
-                // FIXME(eddyb) pick a consistent style, this is getting annoying.
-                return AttrsAndDef {
-                    attrs,
-                    def_without_name: pretty::Fragment::new([
-                        printer
-                            .demote_style_for_namespace_prefix(printer.declarative_keyword_style())
-                            .apply("qptr.")
-                            .into(),
-                        printer.declarative_keyword_style().apply(name).into(),
-                        pretty::join_comma_sep(
-                            "(",
-                            qptr_input
-                                .map(|v| v.print(printer))
-                                .into_iter()
-                                .chain(extra_inputs),
-                            ")",
-                        ),
-                        output_type
-                            .map(|ty| printer.pretty_type_ascription_suffix(ty))
-                            .unwrap_or_default(),
-                    ]),
-                };
+                pretty::Fragment::new([
+                    printer
+                        .demote_style_for_namespace_prefix(printer.declarative_keyword_style())
+                        .apply("qptr.")
+                        .into(),
+                    printer.declarative_keyword_style().apply(name).into(),
+                    pretty::join_comma_sep(
+                        "(",
+                        qptr_input
+                            .map(|v| v.print(printer))
+                            .into_iter()
+                            .chain(extra_inputs),
+                        ")",
+                    ),
+                ])
             }
 
-            DataInstKind::SpvInst(inst) => {
-                return AttrsAndDef {
-                    attrs,
-                    def_without_name: printer.pretty_spv_inst(
-                        printer.spv_op_style(),
-                        inst.opcode,
-                        &inst.imms,
-                        inputs,
-                        Print::print,
-                        *output_type,
-                    ),
-                };
-            }
+            DataInstKind::SpvInst(inst) => printer.pretty_spv_inst(
+                printer.spv_op_style(),
+                inst.opcode,
+                &inst.imms,
+                inputs.iter().map(|v| v.print(printer)),
+            ),
             &DataInstKind::SpvExtInst { ext_set, inst } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
                 // FIXME(eddyb) should this be rendered more compactly?
                 pretty::Fragment::new([
-                    "(".into(),
-                    printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInstImport),
-                    "<".into(),
-                    printer
-                        .string_literal_style()
-                        .apply(format!("{:?}", &printer.cx[ext_set]))
-                        .into(),
-                    ">).".into(),
                     printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInst),
-                    "<".into(),
-                    printer
-                        .numeric_literal_style()
-                        .apply(format!("{inst}"))
-                        .into(),
-                    ">".into(),
+                    pretty::join_comma_sep(
+                        "(",
+                        [
+                            pretty::Fragment::new([
+                                printer
+                                    .pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInstImport),
+                                "(".into(),
+                                printer
+                                    .string_literal_style()
+                                    .apply(format!("{:?}", &printer.cx[ext_set]))
+                                    .into(),
+                                ")".into(),
+                            ]),
+                            printer
+                                .numeric_literal_style()
+                                .apply(format!("{inst}"))
+                                .into(),
+                        ]
+                        .into_iter()
+                        .chain(inputs.iter().map(|v| v.print(printer))),
+                        ")",
+                    ),
                 ])
             }
         };
 
-        // FIXME(eddyb) deduplicate the "parens + optional type ascription"
-        // logic with `pretty_spv_inst`.
         let def_without_name = pretty::Fragment::new([
-            header,
-            pretty::join_comma_sep("(", inputs.iter().map(|v| v.print(printer)), ")"),
+            def_without_type,
             output_type
                 .map(|ty| printer.pretty_type_ascription_suffix(ty))
                 .unwrap_or_default(),
@@ -3161,7 +3126,12 @@ impl Print for cfg::ControlInst {
             })) => {
                 // FIXME(eddyb) use `targets.is_empty()` when that is stabilized.
                 assert!(targets.len() == 0);
-                printer.pretty_spv_inst(kw_style, *opcode, imms, inputs, Print::print, None)
+                printer.pretty_spv_inst(
+                    kw_style,
+                    *opcode,
+                    imms,
+                    inputs.iter().map(|v| v.print(printer)),
+                )
             }
 
             cfg::ControlInstKind::Branch => {
@@ -3206,22 +3176,13 @@ impl SelectionKind {
                 ])
             }
             SelectionKind::SpvInst(spv::Inst { opcode, ref imms }) => {
-                #[derive(Copy, Clone)]
-                struct TargetLabelId;
-
                 let header = printer.pretty_spv_inst(
                     kw_style.clone(),
                     opcode,
                     imms,
-                    [scrutinee]
+                    [Some(scrutinee.print(printer))]
                         .into_iter()
-                        .map(Ok)
-                        .chain((0..cases.len()).map(|_| Err(TargetLabelId))),
-                    |id, printer| match id {
-                        Ok(v) => Some(v.print(printer)),
-                        Err(TargetLabelId) => None,
-                    },
-                    None,
+                        .chain((0..cases.len()).map(|_| None)),
                 );
 
                 pretty::Fragment::new([

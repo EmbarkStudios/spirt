@@ -20,6 +20,10 @@ pub enum Token<ID> {
     /// a block comment (i.e. the [`String`] is always of the form `"/* ... */"`).
     Error(String),
 
+    // NOTE(eddyb) this implies a suffix `: ` not included in the string, and
+    // optionally some processing of the name (e.g. removing spaces).
+    OperandName(&'static str),
+
     // FIXME(eddyb) perhaps encode the hierarchical structure of e.g. enumerand
     // parameters, so that the SPIR-T printer can do layout for them.
     Punctuation(&'static str),
@@ -57,6 +61,7 @@ impl TokensForOperand<String> {
             .into_iter()
             .flat_map(|token| {
                 let (first, second): (Cow<'_, str>, _) = match token {
+                    Token::OperandName(s) => (s.into(), Some(": ".into())),
                     Token::OperandKindNamespacePrefix(s) => (s.into(), Some(".".into())),
                     Token::Punctuation(s) | Token::EnumerandName(s) => (s.into(), None),
                     Token::Error(s)
@@ -91,7 +96,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
     fn enumerant_params(&mut self, enumerant: &spec::Enumerant) {
         let mut first = true;
-        for (mode, kind) in enumerant.all_params() {
+        for (mode, name_and_kind) in enumerant.all_params_with_names() {
             if mode == spec::OperandMode::Optional && self.is_exhausted() {
                 break;
             }
@@ -101,7 +106,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 .push(Token::Punctuation(if first { "(" } else { ", " }));
             first = false;
 
-            self.operand(kind);
+            let (name, kind) = name_and_kind.name_and_kind();
+            self.operand(name, kind);
         }
         if !first {
             self.out.tokens.push(Token::Punctuation(")"));
@@ -157,7 +163,11 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         self.out.tokens.push(literal_token);
     }
 
-    fn operand(&mut self, kind: spec::OperandKind) {
+    fn operand(&mut self, operand_name: &'static str, kind: spec::OperandKind) {
+        if !operand_name.is_empty() {
+            self.out.tokens.push(Token::OperandName(operand_name));
+        }
+
         let (name, def) = kind.name_and_def();
 
         // FIXME(eddyb) should this be a hard error?
@@ -246,20 +256,23 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
     }
 
     fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = TokensForOperand<ID>> {
-        opcode.def().all_operands().map_while(move |(mode, kind)| {
-            if mode == spec::OperandMode::Optional && self.is_exhausted() {
-                return None;
-            }
-            self.operand(kind);
-            Some(mem::take(&mut self.out))
-        })
+        opcode
+            .def()
+            .all_operands_with_names()
+            .map_while(move |(mode, name_and_kind)| {
+                if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                    return None;
+                }
+                let (name, kind) = name_and_kind.name_and_kind();
+                self.operand(name, kind);
+                Some(mem::take(&mut self.out))
+            })
     }
 }
 
 /// Print a single SPIR-V operand from only immediates, potentially composed of
 /// an enumerand with parameters (which consumes more immediates).
-// FIXME(eddyb) the return type should likely be `TokensForOperand<!>`.
-pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForOperand<String> {
+pub fn operand_from_imms<T>(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForOperand<T> {
     let mut printer = OperandPrinter {
         imms: imms.into_iter().peekable(),
         ids: iter::empty().peekable(),
@@ -269,7 +282,7 @@ pub fn operand_from_imms(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForO
         spv::Imm::Short(kind, _) | spv::Imm::LongStart(kind, _) => kind,
         spv::Imm::LongCont(..) => unreachable!(),
     };
-    printer.operand(kind);
+    printer.operand("", kind);
     assert!(printer.imms.next().is_none());
     printer.out
 }
