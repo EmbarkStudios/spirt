@@ -135,9 +135,9 @@ fn main() -> @location(0) i32 {
 ```cxx
 #[spv.Decoration.Flat]
 #[spv.Decoration.Location(Location: 0)]
-global_var0 in spv.StorageClass.Output: s32
+global_var GV0 in spv.StorageClass.Output: s32
 
-func0() -> spv.OpTypeVoid {
+func F0() -> spv.OpTypeVoid {
   loop(v0: s32 <- 1s32, v1: s32 <- 1s32) {
     v2 = spv.OpSLessThan(v1, 10s32): bool
     (v3: bool, v4: s32, v5: s32) = if v2 {
@@ -145,7 +145,7 @@ func0() -> spv.OpTypeVoid {
       v7 = spv.OpIAdd(v1, 1s32): s32
       (true, v6, v7)
     } else {
-      spv.OpStore(Pointer: &global_var0, Object: v0)
+      spv.OpStore(Pointer: &GV0, Object: v0)
       (false, spv.OpUndef: s32, spv.OpUndef: s32)
     }
     (v4, v5) -> (v0, v1)

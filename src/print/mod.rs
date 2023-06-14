@@ -112,17 +112,17 @@ enum Node {
 }
 
 impl Node {
-    fn category(self) -> Result<&'static str, &'static str> {
+    fn keyword_and_name_prefix(self) -> Result<(&'static str, &'static str), &'static str> {
         match self {
             Self::AllCxInterned => Err("Node::AllCxInterned"),
 
-            // FIXME(eddyb) these don't have the same kind of `{category}{idx}`
+            // FIXME(eddyb) these don't have the same kind of `{name_prefix}{idx}`
             // formatting, so maybe they don't belong in here to begin with?
-            Self::ModuleDialect => Ok("module.dialect"),
-            Self::ModuleDebugInfo => Ok("module.debug_info"),
+            Self::ModuleDialect => Ok(("module.dialect", "")),
+            Self::ModuleDebugInfo => Ok(("module.debug_info", "")),
 
-            Self::GlobalVar(_) => Ok("global_var"),
-            Self::Func(_) => Ok("func"),
+            Self::GlobalVar(_) => Ok(("global_var", "GV")),
+            Self::Func(_) => Ok(("func", "F")),
         }
     }
 }
@@ -148,10 +148,10 @@ enum CxInterned {
 }
 
 impl CxInterned {
-    fn category(self) -> &'static str {
+    fn keyword_and_name_prefix(self) -> (&'static str, &'static str) {
         match self {
-            Self::Type(_) => "type",
-            Self::Const(_) => "const",
+            Self::Type(_) => ("type", "T"),
+            Self::Const(_) => ("const", "C"),
         }
     }
 }
@@ -205,22 +205,22 @@ impl From<Value> for Use {
 impl Use {
     // HACK(eddyb) this is used in `AttrsAndDef::insert_name_before_def` to
     // detect alignment anchors specifically, so it needs to not overlap with
-    // any other category name.
-    const ANCHOR_ALIGNMENT_CATEGORY: &str = "AA";
+    // any other name prefix.
+    const ANCHOR_ALIGNMENT_NAME_PREFIX: &str = "AA";
 
-    fn category(self) -> &'static str {
+    fn keyword_and_name_prefix(self) -> (&'static str, &'static str) {
         match self {
-            Self::Node(node) => node.category().unwrap(),
-            Self::CxInterned(interned) => interned.category(),
-            Self::ControlRegionLabel(_) => "label",
+            Self::Node(node) => node.keyword_and_name_prefix().unwrap(),
+            Self::CxInterned(interned) => interned.keyword_and_name_prefix(),
+            Self::ControlRegionLabel(_) => ("label", "L"),
 
             Self::ControlRegionInput { .. }
             | Self::ControlNodeOutput { .. }
-            | Self::DataInstOutput(_) => "v",
+            | Self::DataInstOutput(_) => ("", "v"),
 
             Self::AlignmentAnchorForControlRegion(_)
             | Self::AlignmentAnchorForControlNode(_)
-            | Self::AlignmentAnchorForDataInst(_) => Self::ANCHOR_ALIGNMENT_CATEGORY,
+            | Self::AlignmentAnchorForDataInst(_) => ("", Self::ANCHOR_ALIGNMENT_NAME_PREFIX),
         }
     }
 }
@@ -356,7 +356,8 @@ impl<'a> Plan<'a> {
                 assert!(
                     old_ptr_eq_new,
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
-                    node.category().unwrap_or_else(|s| s)
+                    node.keyword_and_name_prefix()
+                        .map_or_else(|s| s, |(_, s)| s)
                 );
                 return;
             }
@@ -565,7 +566,7 @@ pub struct Printer<'a> {
 /// How an [`Use`] of a definition should be printed.
 #[derive(Copy, Clone)]
 enum UseStyle {
-    /// Refer to the definition by its category and an `idx` (e.g. `"type123"`).
+    /// Refer to the definition by its name prefix and an `idx` (e.g. `"T123"`).
     Anon {
         /// For intra-function [`Use`]s (i.e. [`Use::ControlRegionLabel`] and values),
         /// this disambiguates the parent function (for e.g. anchors).
@@ -1135,7 +1136,7 @@ impl AttrsAndDef {
                                 .anchor
                                 .as_ref()
                                 .unwrap()
-                                .contains(Use::ANCHOR_ALIGNMENT_CATEGORY)
+                                .contains(Use::ANCHOR_ALIGNMENT_NAME_PREFIX)
                     }
                     _ => false,
                 };
@@ -1189,23 +1190,24 @@ impl Use {
         match style {
             UseStyle::Anon { parent_func, idx } => {
                 // HACK(eddyb) these are "global" to the whole print `Plan`.
+                let (keyword, name_prefix) = self.keyword_and_name_prefix();
                 let name = if let Use::Node(Node::ModuleDialect | Node::ModuleDebugInfo) = self {
-                    assert_eq!(idx, 0);
-                    self.category().into()
+                    assert_eq!((is_def, name_prefix, idx), (true, "", 0));
+                    keyword.into()
                 } else {
-                    format!("{}{}", self.category(), idx)
+                    format!("{name_prefix}{idx}")
                 };
 
                 let anchor = if let Some(func) = parent_func {
                     // Disambiguate intra-function anchors (labels/values) by
-                    // prepending a prefix of the form `func123_`.
+                    // prepending a prefix of the form `F123_`.
                     let func = Use::Node(Node::Func(func));
-                    let func_category = func.category();
+                    let (_, func_name_prefix) = func.keyword_and_name_prefix();
                     let func_idx = match printer.use_styles[&func] {
                         UseStyle::Anon { idx, .. } => idx,
                         UseStyle::Inline => unreachable!(),
                     };
-                    format!("{func_category}{func_idx}.{name}")
+                    format!("{func_name_prefix}{func_idx}.{name}")
                 } else {
                     // FIXME(eddyb) avoid having to clone `String`s here.
                     name.clone()
@@ -1215,6 +1217,9 @@ impl Use {
                     | Self::AlignmentAnchorForControlNode(_)
                     | Self::AlignmentAnchorForDataInst(_) => "".to_string(),
 
+                    _ if is_def && !keyword.is_empty() && !name_prefix.is_empty() => {
+                        format!("{keyword} {name}")
+                    }
                     _ => name,
                 };
                 pretty::Styles {
@@ -1233,7 +1238,8 @@ impl Use {
                     .error_style()
                     .apply(format!(
                         "/* undefined {} */_",
-                        node.category().unwrap_or_else(|s| s)
+                        node.keyword_and_name_prefix()
+                            .map_or_else(|s| s, |(s, _)| s)
                     ))
                     .into(),
                 Self::ControlRegionLabel(_)
@@ -1328,7 +1334,7 @@ impl Plan<'_> {
                 // Only print `Node::AllCxInterned` once (it doesn't really have
                 // per-version node definitions in the first place, anyway).
                 if let NodeOrRoot::Node(node @ Node::AllCxInterned) = node_or_root {
-                    node.category().unwrap_err();
+                    node.keyword_and_name_prefix().unwrap_err();
 
                     return [(CxInterned::print_all(printer), self.versions.len())]
                         .into_iter()
@@ -1338,21 +1344,14 @@ impl Plan<'_> {
                 self.versions
                     .iter()
                     .map(move |version| match node_or_root {
-                        NodeOrRoot::Node(node) => {
-                            // HACK(eddyb) the special case was handled above.
-                            node.category().unwrap();
-
-                            let name = if node.category().is_err() {
-                                pretty::Fragment::default()
-                            } else {
-                                Use::Node(node).print_as_def(printer)
-                            };
-                            version
-                                .node_defs
-                                .get(&node)
-                                .map(|def| def.print(printer).insert_name_before_def(name.clone()))
-                                .unwrap_or_default()
-                        }
+                        NodeOrRoot::Node(node) => version
+                            .node_defs
+                            .get(&node)
+                            .map(|def| {
+                                def.print(printer)
+                                    .insert_name_before_def(Use::Node(node).print_as_def(printer))
+                            })
+                            .unwrap_or_default(),
                         NodeOrRoot::Root => version.root.print(printer),
                     })
                     .dedup_with_count()
@@ -1644,28 +1643,16 @@ impl CxInterned {
             .use_styles
             .iter()
             .filter_map(|(&use_kind, &use_style)| match (use_kind, use_style) {
-                (
-                    Use::CxInterned(interned),
-                    UseStyle::Anon {
-                        parent_func: _,
-                        idx,
-                    },
-                ) => Some((interned, idx)),
+                (Use::CxInterned(interned), UseStyle::Anon { .. }) => Some(interned),
                 _ => None,
             })
-            .map(|(interned, anon_idx)| {
-                let name = format!("{}{}", interned.category(), anon_idx);
-                let name = pretty::Styles {
-                    // FIXME(eddyb) avoid having to clone `String`s here.
-                    anchor: Some(name.clone()),
-                    anchor_is_def: true,
-                    ..Default::default()
-                }
-                .apply(name);
-
+            .map(|interned| {
                 interned
                     .print(printer)
-                    .insert_name_before_def(pretty::Fragment::new([name, " = ".into()]))
+                    .insert_name_before_def(pretty::Fragment::new([
+                        Use::CxInterned(interned).print_as_def(printer),
+                        " = ".into(),
+                    ]))
             })
             .intersperse({
                 // Separate top-level definitions with empty lines.
