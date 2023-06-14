@@ -38,6 +38,11 @@ copyleft = "deny"
 multiple-versions = "deny"
 # Lint level for when a crate version requirement is `*`
 wildcards = "deny"
+# Certain crates/versions that will be skipped when doing duplicate detection.
+skip = [
+    # FIXME(eddyb) `syn 2` has not replaced `syn 1` across the ecosystem yet.
+    { name = "syn", version = "2" },
+]
 
 # This section is considered when running `cargo deny check sources`.
 # More documentation about the 'sources' section can be found here:
