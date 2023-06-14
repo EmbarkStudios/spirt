@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#39](https://github.com/EmbarkStudios/spirt/pull/39) shortened pretty-printed names
+  like `type2`/`func3`/etc. to `T2`/`F3`/etc. (with e.g. `type T2 = ...` style definitions)
 - [PR#38](https://github.com/EmbarkStudios/spirt/pull/38) split off `print::Node::Root`,
   allowing "roots" and "non-root nodes" to have different APIs, and dynamic dispatch
   to be limited to "roots" (as "non-root nodes" are a small finite set of types)
