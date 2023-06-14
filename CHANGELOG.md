@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#38](https://github.com/EmbarkStudios/spirt/pull/38) split off `print::Node::Root`,
+  allowing "roots" and "non-root nodes" to have different APIs, and dynamic dispatch
+  to be limited to "roots" (as "non-root nodes" are a small finite set of types)
 - [PR#35](https://github.com/EmbarkStudios/spirt/pull/35) abandoned the custom
   `#{A, B, C}` "attribute set" style in favor of Rust-like `#[A]` `#[B]` `#[C]`
   (and always printing them inline, without any `attrs123` shorthands)

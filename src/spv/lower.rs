@@ -5,8 +5,8 @@ use crate::spv::{self, spec};
 use crate::{
     cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeDef,
     ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
-    DataInstFormDef, DataInstKind, DeclDef, EntityDefs, EntityList, ExportKey, Exportee, Func,
-    FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
+    DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList, ExportKey, Exportee,
+    Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
     InternedStr, Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
 use rustc_hash::FxHashMap;
@@ -748,19 +748,22 @@ impl Module {
                 if func_ret_type != func_type_ret_type {
                     // FIXME(remove) embed IDs in errors by moving them to the
                     // `let invalid = |...| ...;` closure that wraps insts.
-                    return Err(invalid(&format!(
-                        "in %{}, return type differs between `OpFunction` (expected) \
-                         and `OpTypeFunction` (found):\n\n{}",
-                        func_id,
-                        print::Plan::for_root(
+                    return Err(invalid(
+                        &print::Plan::for_root(
                             &cx,
-                            &print::ExpectedVsFound {
-                                expected: func_ret_type,
-                                found: func_type_ret_type,
-                            }
+                            &Diag::err([
+                                format!("in %{}, ", func_id).into(),
+                                "return type differs between `OpFunction` (".into(),
+                                func_ret_type.into(),
+                                ") and `OpTypeFunction` (".into(),
+                                func_type_ret_type.into(),
+                                ")".into(),
+                            ])
+                            .message,
                         )
                         .pretty_print()
-                    )));
+                        .to_string(),
+                    ));
                 }
 
                 let def = match pending_imports.remove(&func_id) {
@@ -1485,21 +1488,23 @@ impl Module {
                     if func_decl_param.ty != param.ty {
                         // FIXME(remove) embed IDs in errors by moving them to the
                         // `let invalid = |...| ...;` closure that wraps insts.
-                        return Err(invalid(&format!(
-                            "in %{}, param {}'s type differs between \
-                             `OpTypeFunction` (expected) and \
-                             `OpFunctionParameter` (found):\n\n{}",
-                            func_id,
-                            i,
-                            print::Plan::for_root(
+                        return Err(invalid(
+                            &print::Plan::for_root(
                                 &cx,
-                                &print::ExpectedVsFound {
-                                    expected: func_decl_param.ty,
-                                    found: param.ty,
-                                }
+                                &Diag::err([
+                                    format!("in %{}, ", func_id).into(),
+                                    format!("param #{i}'s type differs between `OpTypeFunction` (")
+                                        .into(),
+                                    func_decl_param.ty.into(),
+                                    ") and `OpFunctionParameter` (".into(),
+                                    param.ty.into(),
+                                    ")".into(),
+                                ])
+                                .message,
                             )
                             .pretty_print()
-                        )));
+                            .to_string(),
+                        ));
                     }
                 }
             }

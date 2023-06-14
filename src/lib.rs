@@ -338,9 +338,10 @@ impl AttrSet {
 /// Always used via [`AttrSetDef`] (interned as [`AttrSet`]).
 //
 // FIXME(eddyb) consider interning individual attrs, not just `AttrSet`s.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From)]
 pub enum Attr {
     /// `QPtr`-specific attributes (see [`qptr::QPtrAttr`]).
+    #[from]
     QPtr(qptr::QPtrAttr),
 
     SpvAnnotation(spv::Inst),
@@ -410,8 +411,12 @@ pub enum DiagLevel {
 ///
 /// Note: [`visit::Visitor`] and [`transform::Transformer`] *do not* interact
 /// with any interpolated information, and it's instead treated as "frozen" data.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
+// HACK(eddyb) this sets the default as "opt-out", to avoid `#[from(forward)]`
+// on the `Plain` variant from making it "opt-in" for all variants.
+#[from]
 pub enum DiagMsgPart {
+    #[from(forward)]
     Plain(Cow<'static, str>),
 
     // FIXME(eddyb) use `dyn Trait` instead of listing out a few cases.
@@ -419,43 +424,6 @@ pub enum DiagMsgPart {
     Type(Type),
     Const(Const),
     QPtrUsage(qptr::QPtrUsage),
-}
-
-// FIXME(eddyb) move this out of `lib.rs` and/or define with a macro.
-impl From<&'static str> for DiagMsgPart {
-    fn from(s: &'static str) -> Self {
-        Self::Plain(s.into())
-    }
-}
-
-impl From<String> for DiagMsgPart {
-    fn from(s: String) -> Self {
-        Self::Plain(s.into())
-    }
-}
-
-impl From<AttrSet> for DiagMsgPart {
-    fn from(attrs: AttrSet) -> Self {
-        Self::Attrs(attrs)
-    }
-}
-
-impl From<Type> for DiagMsgPart {
-    fn from(ty: Type) -> Self {
-        Self::Type(ty)
-    }
-}
-
-impl From<Const> for DiagMsgPart {
-    fn from(ct: Const) -> Self {
-        Self::Const(ct)
-    }
-}
-
-impl From<qptr::QPtrUsage> for DiagMsgPart {
-    fn from(usage: qptr::QPtrUsage) -> Self {
-        Self::QPtrUsage(usage)
-    }
 }
 
 /// Wrapper to limit `Ord` for interned index types (e.g. [`InternedStr`])
@@ -894,15 +862,17 @@ pub struct DataInstFormDef {
     pub output_type: Option<Type>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum DataInstKind {
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
 
     /// `QPtr`-specific operations (see [`qptr::QPtrOp`]).
+    #[from]
     QPtr(qptr::QPtrOp),
 
+    // FIXME(eddyb) should this have `#[from]`?
     SpvInst(spv::Inst),
     SpvExtInst {
         ext_set: InternedStr,
