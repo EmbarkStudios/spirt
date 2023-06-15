@@ -1108,55 +1108,56 @@ impl AttrsAndDef {
         let mut maybe_def_start_anchor = pretty::Fragment::default();
         let mut maybe_def_end_anchor = pretty::Fragment::default();
         let mut name = name.into();
-        if let [pretty::Node::StyledText(name_start_styles_and_text), ..] = &mut name.nodes[..] {
-            let name_start_styles = &mut name_start_styles_and_text.0;
-            if name_start_styles.anchor_is_def {
-                let anchor = name_start_styles.anchor.as_ref().unwrap();
-                if !attrs.nodes.is_empty() {
-                    name_start_styles.anchor_is_def = false;
-                    maybe_hoisted_anchor = pretty::Styles {
-                        anchor: Some(anchor.clone()),
-                        anchor_is_def: true,
-                        ..Default::default()
-                    }
-                    .apply("")
-                    .into();
+        if let [
+            pretty::Node::Anchor {
+                is_def: ref mut original_anchor_is_def @ true,
+                anchor,
+                text: _,
+            },
+            ..,
+        ] = &mut name.nodes[..]
+        {
+            if !attrs.nodes.is_empty() {
+                *original_anchor_is_def = false;
+                maybe_hoisted_anchor = pretty::Node::Anchor {
+                    is_def: true,
+                    anchor: anchor.clone(),
+                    text: vec![].into(),
                 }
+                .into();
+            }
 
-                // HACK(eddyb) add a pair of anchors "bracketing" the definition
-                // (though see below for why only the "start" side is currently
-                // in use), to help with `multiversion` alignment, as long as
-                // there's no alignment anchor already starting the definition.
-                let has_alignment_anchor = match &def_without_name.nodes[..] {
-                    [pretty::Node::StyledText(def_start_styles_and_text), ..] => {
-                        let (def_start_styles, def_start_text) = &**def_start_styles_and_text;
-                        def_start_text == ""
-                            && def_start_styles.anchor_is_def
-                            && def_start_styles
-                                .anchor
-                                .as_ref()
-                                .unwrap()
-                                .contains(Use::ANCHOR_ALIGNMENT_NAME_PREFIX)
-                    }
-                    _ => false,
-                };
-                let mk_anchor_def = |suffix| {
-                    pretty::Styles {
-                        anchor: Some(format!("{anchor}.{suffix}")),
-                        anchor_is_def: true,
-                        ..Default::default()
-                    }
-                    .apply("")
-                    .into()
-                };
-                if !has_alignment_anchor {
-                    maybe_def_start_anchor = mk_anchor_def("start");
-                    // FIXME(eddyb) having end alignment may be useful, but the
-                    // current logic in `multiversion` would prefer aligning
-                    // the ends, to the detriment of the rest (causing huge gaps).
-                    if false {
-                        maybe_def_end_anchor = mk_anchor_def("end");
-                    }
+            // HACK(eddyb) add a pair of anchors "bracketing" the definition
+            // (though see below for why only the "start" side is currently
+            // in use), to help with `multiversion` alignment, as long as
+            // there's no alignment anchor already starting the definition.
+            let has_alignment_anchor = match &def_without_name.nodes[..] {
+                [
+                    pretty::Node::Anchor {
+                        is_def: true,
+                        anchor,
+                        text,
+                    },
+                    ..,
+                ] => anchor.contains(Use::ANCHOR_ALIGNMENT_NAME_PREFIX) && text.is_empty(),
+
+                _ => false,
+            };
+            let mk_anchor_def = |suffix| {
+                pretty::Node::Anchor {
+                    is_def: true,
+                    anchor: format!("{anchor}.{suffix}").into(),
+                    text: vec![].into(),
+                }
+                .into()
+            };
+            if !has_alignment_anchor {
+                maybe_def_start_anchor = mk_anchor_def("start");
+                // FIXME(eddyb) having end alignment may be useful, but the
+                // current logic in `multiversion` would prefer aligning
+                // the ends, to the detriment of the rest (causing huge gaps).
+                if false {
+                    maybe_def_end_anchor = mk_anchor_def("end");
                 }
             }
         }
@@ -1215,19 +1216,19 @@ impl Use {
                 let name = match self {
                     Self::AlignmentAnchorForControlRegion(_)
                     | Self::AlignmentAnchorForControlNode(_)
-                    | Self::AlignmentAnchorForDataInst(_) => "".to_string(),
+                    | Self::AlignmentAnchorForDataInst(_) => None,
 
                     _ if is_def && !keyword.is_empty() && !name_prefix.is_empty() => {
-                        format!("{keyword} {name}")
+                        Some(format!("{keyword} {name}"))
                     }
-                    _ => name,
+                    _ => Some(name),
                 };
-                pretty::Styles {
-                    anchor: Some(anchor),
-                    anchor_is_def: is_def,
-                    ..Default::default()
+                // FIXME(eddyb) could the `anchor: Rc<str>` be cached?
+                pretty::Node::Anchor {
+                    is_def,
+                    anchor: anchor.into(),
+                    text: name.into_iter().map(|text| (None, text.into())).collect(),
                 }
-                .apply(name)
                 .into()
             }
             UseStyle::Inline => match *self {
@@ -1729,7 +1730,7 @@ impl Print for Attr {
                                         Some((_path_prefix, intra_src)) => intra_src,
                                         None => &location,
                                     };
-                                    comment_style.clone().apply(format!("[{location}] ")).into()
+                                    comment_style.apply(format!("[{location}] ")).into()
                                 }
                                 DiagLevel::Error | DiagLevel::Warning => {
                                     pretty::Fragment::default()
@@ -1740,9 +1741,10 @@ impl Print for Attr {
 
                             // HACK(eddyb) apply the right style to all the plain
                             // text parts of the already-printed message.
+                            // FIXME(eddyb) consider merging the styles somewhat?
                             for node in &mut printed_message.nodes {
-                                if let pretty::Node::Text(text) = node {
-                                    *node = comment_style.clone().apply(mem::take(text));
+                                if let pretty::Node::Text(style @ None, _) = node {
+                                    *style = Some(comment_style);
                                 }
                             }
 
@@ -1750,7 +1752,7 @@ impl Print for Attr {
                             // but adding the line prefix properly to everything
                             // is a bit of a pain without special `pretty` support.
                             pretty::Fragment::new([
-                                comment_style.clone().apply("/*"),
+                                comment_style.apply("/*"),
                                 pretty::Node::BreakingOnlySpace,
                                 pretty::Node::InlineOrIndentedBlock(vec![pretty::Fragment::new([
                                     pretty::Styles {
@@ -1878,7 +1880,7 @@ impl Print for Vec<DiagMsgPart> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         pretty::Fragment::new(self.iter().map(|part| match part {
-            DiagMsgPart::Plain(text) => pretty::Node::Text(text.clone()).into(),
+            DiagMsgPart::Plain(text) => pretty::Node::Text(None, text.clone()).into(),
             DiagMsgPart::Attrs(attrs) => attrs.print(printer),
             DiagMsgPart::Type(ty) => ty.print(printer),
             DiagMsgPart::Const(ct) => ct.print(printer),
@@ -2583,7 +2585,7 @@ impl Print for FuncAt<'_, ControlNode> {
         // FIXME(eddyb) using `declarative_keyword_style` seems more
         // appropriate here, but it's harder to spot at a glance.
         let kw_style = printer.imperative_keyword_style();
-        let kw = |kw| kw_style.clone().apply(kw).into();
+        let kw = |kw| kw_style.apply(kw).into();
         let control_node_body = match kind {
             ControlNodeKind::Block { insts } => {
                 assert!(outputs.is_empty());
@@ -2972,7 +2974,7 @@ impl Print for cfg::ControlInst {
         let attrs = attrs.print(printer);
 
         let kw_style = printer.imperative_keyword_style();
-        let kw = |kw| kw_style.clone().apply(kw).into();
+        let kw = |kw| kw_style.apply(kw).into();
 
         let mut targets = targets.iter().map(|&target_region| {
             let mut target = pretty::Fragment::new([
@@ -3025,7 +3027,7 @@ impl Print for cfg::ControlInst {
 
             cfg::ControlInstKind::SelectBranch(kind) => {
                 assert_eq!(inputs.len(), 1);
-                kind.print_with_scrutinee_and_cases(printer, kw_style.clone(), inputs[0], targets)
+                kind.print_with_scrutinee_and_cases(printer, kw_style, inputs[0], targets)
             }
         };
 
@@ -3041,7 +3043,7 @@ impl SelectionKind {
         scrutinee: Value,
         mut cases: impl ExactSizeIterator<Item = pretty::Fragment>,
     ) -> pretty::Fragment {
-        let kw = |kw| kw_style.clone().apply(kw).into();
+        let kw = |kw| kw_style.apply(kw).into();
         match *self {
             SelectionKind::BoolCond => {
                 assert_eq!(cases.len(), 2);
@@ -3061,7 +3063,7 @@ impl SelectionKind {
             }
             SelectionKind::SpvInst(spv::Inst { opcode, ref imms }) => {
                 let header = printer.pretty_spv_inst(
-                    kw_style.clone(),
+                    kw_style,
                     opcode,
                     imms,
                     [Some(scrutinee.print(printer))]

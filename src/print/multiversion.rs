@@ -243,8 +243,8 @@ impl Versions<pretty::FragmentPostLayout> {
                                             // which can go before indents.
                                             while let [TextOp::Text(pretty::INDENT), rest @ ..]
                                             | [
-                                                TextOp::PushStyles(_),
-                                                TextOp::PopStyles(_),
+                                                TextOp::PushAnchor { .. },
+                                                TextOp::PopAnchor { .. },
                                                 rest @ ..,
                                             ] = line
                                             {
@@ -329,7 +329,7 @@ struct AnchorAligner<'a> {
     /// into `merged_lines`), which the next column will align to.
     //
     // FIXME(eddyb) does this need additional interning?
-    anchor_def_to_merged_line_idx: FxIndexMap<&'a String, usize>,
+    anchor_def_to_merged_line_idx: FxIndexMap<&'a str, usize>,
 
     // FIXME(eddyb) fine-tune this inline size.
     // FIXME(eddyb) maybe don't keep most of this data around anyway?
@@ -456,14 +456,14 @@ impl<'a> AnchorAligner<'a> {
             .enumerate()
         {
             for op in new_line_text_ops {
-                if let TextOp::PushStyles(styles) = op {
-                    if let Some(anchor) = &styles.anchor {
-                        if styles.anchor_is_def {
-                            new_anchor_def_to_line_idx
-                                .entry(anchor)
-                                .or_insert(new_line_idx);
-                        }
-                    }
+                if let TextOp::PushAnchor {
+                    is_def: true,
+                    anchor,
+                } = *op
+                {
+                    new_anchor_def_to_line_idx
+                        .entry(anchor)
+                        .or_insert(new_line_idx);
                 }
             }
         }

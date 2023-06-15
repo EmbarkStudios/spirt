@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
+use std::rc::Rc;
 use std::{fmt, iter, mem};
 
 /// Part of a pretty document, made up of [`Node`]s.
@@ -20,10 +21,17 @@ pub struct Fragment {
 
 #[derive(Clone, PartialEq)]
 pub enum Node {
-    Text(Cow<'static, str>),
+    Text(Option<Styles>, Cow<'static, str>),
 
-    // FIXME(eddyb) should this contain a `Node` instead of being text-only?
-    StyledText(Box<(Styles, Cow<'static, str>)>),
+    /// Anchor (HTML `<a href="#...">`, optionally with `id="..."` when `is_def`),
+    /// using [`Node::Text`]-like "styled text" nodes for its text contents.
+    //
+    // FIXME(eddyb) could this use `Box<Fragment>` instead? may complicate layout
+    Anchor {
+        is_def: bool,
+        anchor: Rc<str>,
+        text: Box<[(Option<Styles>, Cow<'static, str>)]>,
+    },
 
     /// Container for [`Fragment`]s, using block layout (indented on separate lines).
     IndentedBlock(Vec<Fragment>),
@@ -53,11 +61,8 @@ pub enum Node {
     IfBlockLayout(&'static str),
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Copy, Clone, Default, PartialEq)]
 pub struct Styles {
-    pub anchor: Option<String>,
-    pub anchor_is_def: bool,
-
     /// RGB color.
     pub color: Option<[u8; 3]>,
 
@@ -94,7 +99,7 @@ impl Styles {
     }
 
     pub fn apply(self, text: impl Into<Cow<'static, str>>) -> Node {
-        Node::StyledText(Box::new((self, text.into())))
+        Node::Text(Some(self), text.into())
     }
 
     // HACK(eddyb) this allows us to control `<sub>`/`<sup>` `font-size` exactly,
@@ -128,13 +133,13 @@ pub mod palettes {
 
 impl From<&'static str> for Node {
     fn from(text: &'static str) -> Self {
-        Self::Text(text.into())
+        Self::Text(None, text.into())
     }
 }
 
 impl From<String> for Node {
     fn from(text: String) -> Self {
-        Self::Text(text.into())
+        Self::Text(None, text.into())
     }
 }
 
@@ -327,20 +332,23 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
 "
         .replace("SCOPE", &format!("pre.{ROOT_CLASS_NAME}"));
 
+        let push_attr = |body: &mut String, attr, value: &str| {
+            // Quick sanity check.
+            assert!(value.chars().all(|c| !(c == '"' || c == '&')));
+
+            body.extend([" ", attr, "=\"", value, "\""]);
+        };
+
         // HACK(eddyb) load-bearing newline after `<pre ...>`, to front-load any
         // weird HTML whitespace handling, and allow the actual contents to start
         // with empty lines (i.e. `\n\n...`), without e.g. losing the first one.
         let mut body = format!("<pre class=\"{ROOT_CLASS_NAME}\">\n");
         text_ops.into_internal_iter().for_each(|op| match op {
             TextOp::PushStyles(styles) | TextOp::PopStyles(styles) => {
-                let mut special_tags = [
-                    ("a", styles.anchor.is_some()),
-                    ("sub", styles.subscript),
-                    ("sup", styles.superscript),
-                ]
-                .into_iter()
-                .filter(|&(_, cond)| cond)
-                .map(|(tag, _)| tag);
+                let mut special_tags = [("sub", styles.subscript), ("sup", styles.superscript)]
+                    .into_iter()
+                    .filter(|&(_, cond)| cond)
+                    .map(|(tag, _)| tag);
                 let tag = special_tags.next().unwrap_or("span");
                 if let Some(other_tag) = special_tags.next() {
                     // FIXME(eddyb) support by opening/closing multiple tags.
@@ -354,16 +362,7 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                 body += tag;
 
                 if let TextOp::PushStyles(_) = op {
-                    let mut push_attr = |attr, value: &str| {
-                        // Quick sanity check.
-                        assert!(value.chars().all(|c| !(c == '"' || c == '&')));
-
-                        body.extend([" ", attr, "=\"", value, "\""]);
-                    };
-
                     let Styles {
-                        ref anchor,
-                        anchor_is_def,
                         color,
                         color_opacity,
                         thickness,
@@ -372,13 +371,6 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                         superscript,
                         desaturate_and_dim_for_unchanged_multiversion_line,
                     } = *styles;
-
-                    if let Some(id) = anchor {
-                        if anchor_is_def {
-                            push_attr("id", id);
-                        }
-                        push_attr("href", &format!("#{id}"));
-                    }
 
                     let mut css_style = String::new();
 
@@ -403,12 +395,21 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                         write!(css_style, "filter:saturate(0.3)opacity(0.5);").unwrap();
                     }
                     if !css_style.is_empty() {
-                        push_attr("style", &css_style);
+                        push_attr(&mut body, "style", &css_style);
                     }
                 }
 
                 body += ">";
             }
+            TextOp::PushAnchor { is_def, anchor } => {
+                body += "<a";
+                if is_def {
+                    push_attr(&mut body, "id", anchor);
+                }
+                push_attr(&mut body, "href", &format!("#{anchor}"));
+                body += ">";
+            }
+            TextOp::PopAnchor { .. } => body += "</a>",
             TextOp::Text(text) => {
                 // Minimal escaping, just enough to produce valid HTML.
                 let escape_from = ['&', '<'];
@@ -602,17 +603,18 @@ impl Node {
     fn approx_rigid_layout(&self) -> ApproxLayout {
         // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
         // to destructure through the `Box<(_, Cow<str>)>`.
-        let text_approx_rigid_layout = |text: &str, style| {
+        let text_approx_rigid_layout = |styles: &Option<_>, text: &str| {
+            let styles = styles.as_ref();
             if let Some((pre, non_pre)) = text.split_once('\n') {
                 let (_, post) = non_pre.rsplit_once('\n').unwrap_or(("", non_pre));
 
                 ApproxLayout::BlockOrMixed {
-                    pre_worst_width: Columns::maybe_styled_text_width(pre, style),
-                    post_worst_width: Columns::maybe_styled_text_width(post, style),
+                    pre_worst_width: Columns::maybe_styled_text_width(pre, styles),
+                    post_worst_width: Columns::maybe_styled_text_width(post, styles),
                 }
             } else {
                 ApproxLayout::Inline {
-                    worst_width: Columns::maybe_styled_text_width(text, style),
+                    worst_width: Columns::maybe_styled_text_width(text, styles),
                     excess_width_from_only_if_block: Columns::ZERO,
                 }
             }
@@ -620,10 +622,20 @@ impl Node {
 
         #[allow(clippy::match_same_arms)]
         match self {
-            Self::Text(text) => text_approx_rigid_layout(text, None),
-            Self::StyledText(styles_and_text) => {
-                text_approx_rigid_layout(&styles_and_text.1, Some(&styles_and_text.0))
-            }
+            Self::Text(styles, text) => text_approx_rigid_layout(styles, text),
+
+            Self::Anchor {
+                is_def: _,
+                anchor: _,
+                text,
+            } => text
+                .iter()
+                .map(|(styles, text)| text_approx_rigid_layout(styles, text))
+                .reduce(ApproxLayout::append)
+                .unwrap_or(ApproxLayout::Inline {
+                    worst_width: Columns::ZERO,
+                    excess_width_from_only_if_block: Columns::ZERO,
+                }),
 
             Self::IndentedBlock(_) => ApproxLayout::BlockOrMixed {
                 pre_worst_width: Columns::ZERO,
@@ -643,7 +655,7 @@ impl Node {
                 // going to be used as part of an inline child of a block.
                 // NOTE(eddyb) this is currently only the case for the trailing
                 // comma added by `join_comma_sep`.
-                let text_layout = Self::Text(text.into()).approx_rigid_layout();
+                let text_layout = Self::Text(None, text.into()).approx_rigid_layout();
                 let worst_width = match text_layout {
                     ApproxLayout::Inline {
                         worst_width,
@@ -760,8 +772,8 @@ impl Node {
             }
 
             // Layout computed only in `approx_rigid_layout`.
-            Self::Text(_)
-            | Self::StyledText(_)
+            Self::Text(..)
+            | Self::Anchor { .. }
             | Self::BreakingOnlySpace
             | Self::ForceLineSeparation
             | Self::IfBlockLayout(_) => ApproxLayout::Inline {
@@ -850,10 +862,12 @@ enum LineOp<'a> {
     PopIndent,
     PushStyles(&'a Styles),
     PopStyles(&'a Styles),
+    PushAnchor { is_def: bool, anchor: &'a str },
+    PopAnchor { is_def: bool, anchor: &'a str },
 
-    // HACK(eddyb) `PushStyles`+`PopStyles`, indicating no visible text is needed
+    // HACK(eddyb) `PushAnchor`+`PopAnchor`, indicating no visible text is needed
     // (i.e. this is only for helper anchors, which only need vertical positioning).
-    StyledEmptyText(&'a Styles),
+    EmptyAnchor { is_def: bool, anchor: &'a str },
 
     AppendToLine(&'a str),
     StartNewLine,
@@ -899,9 +913,8 @@ impl Node {
         directly_in_block: bool,
         mut each_line_op: impl FnMut(LineOp<'a>) -> ControlFlow<T>,
     ) -> ControlFlow<T> {
-        // HACK(eddyb) workaround for the `Self::StyledText` arm not being able
-        // to destructure through the `Box<(_, Cow<str>)>`.
-        let text_render_to_line_ops = |styles: Option<&'a Styles>, text: &'a str| {
+        let text_render_to_line_ops = |styles: &'a Option<Styles>, text: &'a str| {
+            let styles = styles.as_ref();
             let mut lines = text.split('\n');
             styles
                 .map(LineOp::PushStyles)
@@ -915,15 +928,26 @@ impl Node {
                 .chain(styles.map(LineOp::PopStyles))
         };
         match self {
-            Self::Text(text) => {
-                text_render_to_line_ops(None, text).try_for_each(each_line_op)?;
+            Self::Text(styles, text) => {
+                text_render_to_line_ops(styles, text).try_for_each(each_line_op)?;
             }
-            Self::StyledText(styles_and_text) => {
-                let (styles, text) = &**styles_and_text;
+
+            &Self::Anchor {
+                is_def,
+                ref anchor,
+                ref text,
+            } => {
                 if text.is_empty() {
-                    each_line_op(LineOp::StyledEmptyText(styles))?;
+                    each_line_op(LineOp::EmptyAnchor { is_def, anchor })?;
                 } else {
-                    text_render_to_line_ops(Some(styles), text).try_for_each(each_line_op)?;
+                    [LineOp::PushAnchor { is_def, anchor }]
+                        .into_internal_iter()
+                        .chain(
+                            text.into_internal_iter()
+                                .flat_map(|(styles, text)| text_render_to_line_ops(styles, text)),
+                        )
+                        .chain([LineOp::PopAnchor { is_def, anchor }])
+                        .try_for_each(each_line_op)?;
                 }
             }
 
@@ -953,7 +977,7 @@ impl Node {
             Self::ForceLineSeparation => each_line_op(LineOp::BreakIfWithinLine(Break::NewLine))?,
             &Self::IfBlockLayout(text) => {
                 if directly_in_block {
-                    text_render_to_line_ops(None, text).try_for_each(each_line_op)?;
+                    text_render_to_line_ops(&None, text).try_for_each(each_line_op)?;
                 }
             }
         }
@@ -979,11 +1003,13 @@ impl Fragment {
     }
 }
 
-/// Text-oriented operation (plain text snippets interleaved with style push/pop).
+/// Text-oriented operation (plain text snippets interleaved with style/anchor push/pop).
 #[derive(Copy, Clone, PartialEq)]
 pub(super) enum TextOp<'a> {
     PushStyles(&'a Styles),
     PopStyles(&'a Styles),
+    PushAnchor { is_def: bool, anchor: &'a str },
+    PopAnchor { is_def: bool, anchor: &'a str },
 
     Text(&'a str),
 }
@@ -1019,7 +1045,7 @@ impl<'a> LineOp<'a> {
             /// This line was just started, lacking any text.
             ///
             /// The first (non-empty) `LineOp::AppendToLine` on that line, or
-            /// `LineOp::PushStyles`/`LineOp::PopStyles`, needs to materialize
+            /// `LineOp::{Push,Pop}{Styles,Anchor}`, needs to materialize
             /// `indent` levels of indentation (before emitting its `TextOp`s).
             //
             // NOTE(eddyb) indentation is not immediatelly materialized in order
@@ -1029,16 +1055,16 @@ impl<'a> LineOp<'a> {
             /// This line has `indent_so_far` levels of indentation, and may have
             /// styling applied to it, but lacks any other text.
             ///
-            /// Only used by `LineOp::StyledEmptyText` (i.e. helper anchors),
+            /// Only used by `LineOp::EmptyAnchor` (i.e. helper anchors),
             /// to avoid them adding trailing-whitespace-only lines.
             //
-            // NOTE(eddyb) the new line is started by `StyledEmptyText` so that
+            // NOTE(eddyb) the new line is started by `EmptyAnchor` so that
             // there remains separation with the previous (unrelated) line,
             // whereas the following lines are very likely related to the
             // helper anchor (but if that changes, this would need to be fixed).
-            // HACK(eddyb) `StyledEmptyText` uses `indent_so_far: 0` to
+            // HACK(eddyb) `EmptyAnchor` uses `indent_so_far: 0` to
             // allow lower-indentation text to follow on the same line.
-            OnlyIndentedOrStyled { indent_so_far: usize },
+            OnlyIndentedOrAnchored { indent_so_far: usize },
 
             /// This line has had text emitted (other than indentation).
             HasText,
@@ -1059,7 +1085,9 @@ impl<'a> LineOp<'a> {
             if let LineOp::AppendToLine(_)
             | LineOp::PushStyles(_)
             | LineOp::PopStyles(_)
-            | LineOp::StyledEmptyText(_) = op
+            | LineOp::PushAnchor { .. }
+            | LineOp::PopAnchor { .. }
+            | LineOp::EmptyAnchor { .. } = op
             {
                 if let Some(br) = pending_break_if_within_line.take() {
                     each_text_op(TextOp::Text(match br {
@@ -1072,15 +1100,15 @@ impl<'a> LineOp<'a> {
                 }
 
                 let target_indent = match line_state {
-                    // HACK(eddyb) `StyledEmptyText` uses `indent_so_far: 0` to
+                    // HACK(eddyb) `EmptyAnchor` uses `indent_so_far: 0` to
                     // allow lower-indentation text to follow on the same line.
-                    LineState::Empty | LineState::OnlyIndentedOrStyled { indent_so_far: 0 }
-                        if matches!(op, LineOp::StyledEmptyText(_)) =>
+                    LineState::Empty | LineState::OnlyIndentedOrAnchored { indent_so_far: 0 }
+                        if matches!(op, LineOp::EmptyAnchor { .. }) =>
                     {
                         Some(0)
                     }
 
-                    LineState::Empty | LineState::OnlyIndentedOrStyled { .. } => Some(indent),
+                    LineState::Empty | LineState::OnlyIndentedOrAnchored { .. } => Some(indent),
                     LineState::HasText => None,
                 };
 
@@ -1088,9 +1116,9 @@ impl<'a> LineOp<'a> {
                     let indent_so_far = match line_state {
                         LineState::Empty => 0,
 
-                        // FIXME(eddyb) `StyledEmptyText` doesn't need this, so this
+                        // FIXME(eddyb) `EmptyAnchor` doesn't need this, so this
                         // is perhaps unnecessarily over-engineered? (see above)
-                        LineState::OnlyIndentedOrStyled { indent_so_far } => {
+                        LineState::OnlyIndentedOrAnchored { indent_so_far } => {
                             // Disallow reusing lines already indented too much.
                             if indent_so_far > target_indent {
                                 each_text_op(TextOp::Text("\n"))?;
@@ -1106,7 +1134,7 @@ impl<'a> LineOp<'a> {
                     for _ in indent_so_far..target_indent {
                         each_text_op(TextOp::Text(INDENT))?;
                     }
-                    line_state = LineState::OnlyIndentedOrStyled {
+                    line_state = LineState::OnlyIndentedOrAnchored {
                         indent_so_far: target_indent,
                     };
                 }
@@ -1125,9 +1153,16 @@ impl<'a> LineOp<'a> {
                 LineOp::PushStyles(styles) => each_text_op(TextOp::PushStyles(styles))?,
                 LineOp::PopStyles(styles) => each_text_op(TextOp::PopStyles(styles))?,
 
-                LineOp::StyledEmptyText(styles) => {
-                    each_text_op(TextOp::PushStyles(styles))?;
-                    each_text_op(TextOp::PopStyles(styles))?;
+                LineOp::PushAnchor { is_def, anchor } => {
+                    each_text_op(TextOp::PushAnchor { is_def, anchor })?;
+                }
+                LineOp::PopAnchor { is_def, anchor } => {
+                    each_text_op(TextOp::PopAnchor { is_def, anchor })?;
+                }
+
+                LineOp::EmptyAnchor { is_def, anchor } => {
+                    each_text_op(TextOp::PushAnchor { is_def, anchor })?;
+                    each_text_op(TextOp::PopAnchor { is_def, anchor })?;
                 }
 
                 LineOp::AppendToLine(text) => {
@@ -1146,7 +1181,7 @@ impl<'a> LineOp<'a> {
                 LineOp::BreakIfWithinLine(br) => {
                     let elide = match line_state {
                         LineState::Empty => true,
-                        LineState::OnlyIndentedOrStyled { indent_so_far } => {
+                        LineState::OnlyIndentedOrAnchored { indent_so_far } => {
                             indent_so_far <= indent
                         }
                         LineState::HasText => false,
