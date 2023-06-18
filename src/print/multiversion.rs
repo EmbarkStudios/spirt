@@ -114,7 +114,7 @@ impl Versions<pretty::FragmentPostLayout> {
     }
     SCOPE>tbody>tr>th {
         /* HACK(eddyb) these are relative to `pretty`'s own HTML styles. */
-        font-size: 17px;
+        font-size: 19px;
         font-weight: 700;
 
         font-style: italic;
