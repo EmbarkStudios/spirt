@@ -310,7 +310,7 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
         margin: 1ch;
 
         /* HACK(eddyb) avoid unnecessarily small or thin text. */
-        font-size: 15px;
+        font-size: 17px;
         font-weight: 500;
     }
     SCOPE a {
