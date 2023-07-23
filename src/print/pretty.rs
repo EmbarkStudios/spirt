@@ -329,6 +329,12 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
     SCOPE sub, SCOPE sup {
         line-height: 0;
     }
+
+    /* HACK(eddyb) using a class (instead of an inline style) so that hovering
+       over a multiversion table cell can disable its desaturation/dimming */
+    SCOPE:not(:hover) .unchanged {
+        filter: saturate(0.3) opacity(0.5);
+    }
 </style>
 "
         .replace("SCOPE", &format!("pre.{ROOT_CLASS_NAME}"));
@@ -392,11 +398,12 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
                             write!(css_style, "vertical-align:middle;").unwrap();
                         }
                     }
-                    if desaturate_and_dim_for_unchanged_multiversion_line {
-                        write!(css_style, "filter:saturate(0.3)opacity(0.5);").unwrap();
-                    }
                     if !css_style.is_empty() {
                         push_attr(&mut body, "style", &css_style);
+                    }
+
+                    if desaturate_and_dim_for_unchanged_multiversion_line {
+                        push_attr(&mut body, "class", "unchanged");
                     }
                 }
 
