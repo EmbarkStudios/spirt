@@ -411,11 +411,14 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
             }
             TextOp::PushAnchor { is_def, anchor } => {
                 body += "<a";
+
+                // HACK(eddyb) this avoids `push_attr` because anchors are pre-escaped.
+                // FIXME(eddyb) should escaping anchors be left to here?
+                assert!(anchor.chars().all(|c| c != '"'));
                 if is_def {
-                    push_attr(&mut body, "id", anchor);
+                    write!(body, " id=\"{anchor}\"").unwrap();
                 }
-                push_attr(&mut body, "href", &format!("#{anchor}"));
-                body += ">";
+                write!(body, " href=\"#{anchor}\">").unwrap();
             }
             TextOp::PopAnchor { .. } => body += "</a>",
             TextOp::Text(text) => {

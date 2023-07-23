@@ -1467,9 +1467,9 @@ impl Use {
                 }
 
                 impl Suffix<'_> {
-                    /// Format `self` into `w`, escaping (`Sufix::Name`) `char`s
-                    /// wherever needed, to limit the charset to `[A-Za-z0-9_]`
-                    /// (plus `\`, `{` and `}` for escape sequences alone).
+                    /// Format `self` into `w`, minimally escaping (`Sufix::Name`)
+                    /// `char`s as `&#...;` HTML entities, to limit the charset
+                    /// to `[A-Za-z0-9_]` (plus `[&#;]`, for escapes alone).
                     fn write_escaped_to(&self, w: &mut impl fmt::Write) -> fmt::Result {
                         match *self {
                             Suffix::Num(idx) => write!(w, "{idx}"),
@@ -1496,7 +1496,7 @@ impl Use {
                                     let mut chars = name.chars();
                                     if let Some(c) = chars.next() {
                                         assert!(!is_valid(c));
-                                        write!(w, "{}", c.escape_unicode())?;
+                                        write!(w, "&#{};", c as u32)?;
                                     }
                                     name = chars.as_str();
                                 }
