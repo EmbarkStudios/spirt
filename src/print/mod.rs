@@ -3249,6 +3249,9 @@ impl Print for FuncAt<'_, DataInst> {
                 let lowercase_ext_set_name = ext_set_name.to_ascii_lowercase();
                 let (ext_set_alias, known_inst_desc) = (spv_spec
                     .get_ext_inst_set_by_lowercase_name(&lowercase_ext_set_name))
+                .or_else(|| {
+                    printer.cx.get_custom_ext_inst_set_by_lowercase_name(&lowercase_ext_set_name)
+                })
                 .map_or((&None, None), |ext_inst_set| {
                     // FIXME(eddyb) check that these aliases are unique
                     // across the entire output before using them!
