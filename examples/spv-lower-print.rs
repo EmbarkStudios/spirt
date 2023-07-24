@@ -10,20 +10,14 @@ fn main() -> std::io::Result<()> {
 
                 let save_print_plan = |suffix: &str, plan: spirt::print::Plan| {
                     let pretty = plan.pretty_print();
-                    let ext = if suffix.is_empty() {
-                        "spirt".into()
-                    } else {
-                        format!("{suffix}.spirt")
-                    };
+                    let ext =
+                        if suffix.is_empty() { "spirt".into() } else { format!("{suffix}.spirt") };
 
                     // FIXME(eddyb) don't allocate whole `String`s here.
                     fs::write(in_file_path.with_extension(&ext), pretty.to_string())?;
                     fs::write(
                         in_file_path.with_extension(ext + ".html"),
-                        pretty
-                            .render_to_html()
-                            .with_dark_mode_support()
-                            .to_html_doc(),
+                        pretty.render_to_html().with_dark_mode_support().to_html_doc(),
                     )
                 };
 

@@ -113,10 +113,9 @@ impl FuncAt<'_, Value> {
             Value::ControlRegionInput { region, input_idx } => {
                 self.at(region).def().inputs[input_idx as usize].ty
             }
-            Value::ControlNodeOutput {
-                control_node,
-                output_idx,
-            } => self.at(control_node).def().outputs[output_idx as usize].ty,
+            Value::ControlNodeOutput { control_node, output_idx } => {
+                self.at(control_node).def().outputs[output_idx as usize].ty
+            }
             Value::DataInstOutput(inst) => cx[self.at(inst).def().form].output_type.unwrap(),
         }
     }
@@ -159,18 +158,8 @@ impl<'a, P: Copy> FuncAtMut<'a, P> {
     //
     // FIXME(eddyb) maybe find a better name for this?
     pub fn freeze(self) -> FuncAt<'a, P> {
-        let FuncAtMut {
-            control_regions,
-            control_nodes,
-            data_insts,
-            position,
-        } = self;
-        FuncAt {
-            control_regions,
-            control_nodes,
-            data_insts,
-            position,
-        }
+        let FuncAtMut { control_regions, control_nodes, data_insts, position } = self;
+        FuncAt { control_regions, control_nodes, data_insts, position }
     }
 }
 

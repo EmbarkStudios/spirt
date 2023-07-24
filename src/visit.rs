@@ -171,14 +171,7 @@ impl<'a, T: InnerVisit, V: Visitor<'a>> DynInnerVisit<'a, V> for T {
 impl InnerVisit for Module {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         // FIXME(eddyb) this can't be exhaustive because of the private `cx` field.
-        let Self {
-            dialect,
-            debug_info,
-            global_vars: _,
-            funcs: _,
-            exports,
-            ..
-        } = self;
+        let Self { dialect, debug_info, global_vars: _, funcs: _, exports, .. } = self;
 
         visitor.visit_module_dialect(dialect);
         visitor.visit_module_debug_info(debug_info);
@@ -212,10 +205,7 @@ impl InnerVisit for ExportKey {
         match self {
             Self::LinkName(_) => {}
 
-            Self::SpvEntryPoint {
-                imms: _,
-                interface_global_vars,
-            } => {
+            Self::SpvEntryPoint { imms: _, interface_global_vars } => {
                 for &gv in interface_global_vars {
                     visitor.visit_global_var_use(gv);
                 }
@@ -252,14 +242,10 @@ impl InnerVisit for Attr {
             | Attr::SpvBitflagsOperand(_) => {}
 
             Attr::QPtr(attr) => match attr {
-                QPtrAttr::ToSpvPtrInput {
-                    input_idx: _,
-                    pointee,
+                QPtrAttr::ToSpvPtrInput { input_idx: _, pointee }
+                | QPtrAttr::FromSpvPtrOutput { addr_space: _, pointee } => {
+                    visitor.visit_type_use(pointee.0);
                 }
-                | QPtrAttr::FromSpvPtrOutput {
-                    addr_space: _,
-                    pointee,
-                } => visitor.visit_type_use(pointee.0),
 
                 QPtrAttr::Usage(usage) => usage.0.inner_visit_with(visitor),
             },
@@ -325,11 +311,7 @@ impl InnerVisit for QPtrMemUsageKind {
 
 impl InnerVisit for TypeDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            attrs,
-            ctor,
-            ctor_args,
-        } = self;
+        let Self { attrs, ctor, ctor_args } = self;
 
         visitor.visit_attr_set_use(*attrs);
         match ctor {
@@ -346,12 +328,7 @@ impl InnerVisit for TypeDef {
 
 impl InnerVisit for ConstDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            attrs,
-            ty,
-            ctor,
-            ctor_args,
-        } = self;
+        let Self { attrs, ty, ctor, ctor_args } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ty);
@@ -376,13 +353,7 @@ impl<D: InnerVisit> InnerVisit for DeclDef<D> {
 
 impl InnerVisit for GlobalVarDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            attrs,
-            type_of_ptr_to,
-            shape,
-            addr_space,
-            def,
-        } = self;
+        let Self { attrs, type_of_ptr_to, shape, addr_space, def } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*type_of_ptr_to);
@@ -412,12 +383,7 @@ impl InnerVisit for GlobalVarDefBody {
 
 impl InnerVisit for FuncDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            attrs,
-            ret_type,
-            params,
-            def,
-        } = self;
+        let Self { attrs, ret_type, params, def } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ret_type);
@@ -458,11 +424,7 @@ impl InnerVisit for FuncDefBody {
 // requirement, whereas this has `'a` in `self: FuncAt<'a, ControlRegion>`.
 impl<'a> FuncAt<'a, ControlRegion> {
     pub fn inner_visit_with(self, visitor: &mut impl Visitor<'a>) {
-        let ControlRegionDef {
-            inputs,
-            children,
-            outputs,
-        } = self.def();
+        let ControlRegionDef { inputs, children, outputs } = self.def();
 
         for input in inputs {
             input.inner_visit_with(visitor);
@@ -515,11 +477,7 @@ impl<'a> FuncAt<'a, ControlNode> {
                     visitor.visit_control_region_def(self.at(case));
                 }
             }
-            ControlNodeKind::Loop {
-                initial_inputs,
-                body,
-                repeat_condition,
-            } => {
+            ControlNodeKind::Loop { initial_inputs, body, repeat_condition } => {
                 for v in initial_inputs {
                     visitor.visit_value_use(v);
                 }
@@ -544,11 +502,7 @@ impl InnerVisit for ControlNodeOutputDecl {
 
 impl InnerVisit for DataInstDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            attrs,
-            form,
-            inputs,
-        } = self;
+        let Self { attrs, form, inputs } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_data_inst_form_use(*form);
@@ -584,13 +538,7 @@ impl InnerVisit for DataInstFormDef {
 
 impl InnerVisit for cfg::ControlInst {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self {
-            attrs,
-            kind,
-            inputs,
-            targets: _,
-            target_inputs,
-        } = self;
+        let Self { attrs, kind, inputs, targets: _, target_inputs } = self;
 
         visitor.visit_attr_set_use(*attrs);
         match kind {
@@ -617,14 +565,8 @@ impl InnerVisit for Value {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         match *self {
             Self::Const(ct) => visitor.visit_const_use(ct),
-            Self::ControlRegionInput {
-                region: _,
-                input_idx: _,
-            }
-            | Self::ControlNodeOutput {
-                control_node: _,
-                output_idx: _,
-            }
+            Self::ControlRegionInput { region: _, input_idx: _ }
+            | Self::ControlNodeOutput { control_node: _, output_idx: _ }
             | Self::DataInstOutput(_) => {}
         }
     }

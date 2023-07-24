@@ -14,10 +14,7 @@ use std::{fs, io, iter, slice};
 enum KnownIdDef {
     TypeInt(NonZeroU32),
     TypeFloat(NonZeroU32),
-    Uncategorized {
-        opcode: spec::Opcode,
-        result_type_id: Option<spv::Id>,
-    },
+    Uncategorized { opcode: spec::Opcode, result_type_id: Option<spv::Id> },
 }
 
 impl KnownIdDef {
@@ -127,9 +124,8 @@ impl InstParser<'_> {
                 self.inst.imms.push(spv::Imm::Short(kind, word));
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
-                    let bit_def = bits
-                        .get(bit_idx)
-                        .ok_or(Error::UnsupportedEnumerand(kind, word))?;
+                    let bit_def =
+                        bits.get(bit_idx).ok_or(Error::UnsupportedEnumerand(kind, word))?;
                     self.enumerant_params(bit_def)?;
                 }
             }
@@ -149,14 +145,10 @@ impl InstParser<'_> {
                 self.inst.ids.push(id);
             }
 
-            spec::OperandKindDef::Literal {
-                size: spec::LiteralSize::Word,
-            } => {
+            spec::OperandKindDef::Literal { size: spec::LiteralSize::Word } => {
                 self.inst.imms.push(spv::Imm::Short(kind, word));
             }
-            spec::OperandKindDef::Literal {
-                size: spec::LiteralSize::NulTerminated,
-            } => {
+            spec::OperandKindDef::Literal { size: spec::LiteralSize::NulTerminated } => {
                 let has_nul = |word: u32| word.to_le_bytes().contains(&0);
                 if has_nul(word) {
                     self.inst.imms.push(spv::Imm::Short(kind, word));
@@ -170,9 +162,7 @@ impl InstParser<'_> {
                     }
                 }
             }
-            spec::OperandKindDef::Literal {
-                size: spec::LiteralSize::FromContextualType,
-            } => {
+            spec::OperandKindDef::Literal { size: spec::LiteralSize::FromContextualType } => {
                 let contextual_type = self
                     .inst
                     .result_type_id
@@ -217,12 +207,7 @@ impl InstParser<'_> {
         {
             // FIXME(eddyb) should this be a method?
             let mut id = || {
-                self.words
-                    .next()
-                    .ok_or(Error::NotEnoughWords)?
-                    .try_into()
-                    .ok()
-                    .ok_or(Error::IdZero)
+                self.words.next().ok_or(Error::NotEnoughWords)?.try_into().ok().ok_or(Error::IdZero)
             };
             self.inst.result_type_id = def.has_result_type_id.then(&mut id).transpose()?;
             self.inst.result_id = def.has_result_id.then(&mut id).transpose()?;
@@ -269,10 +254,7 @@ pub struct ModuleParser {
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
 fn invalid(reason: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V ({reason})"),
-    )
+    io::Error::new(io::ErrorKind::InvalidData, format!("malformed SPIR-V ({reason})"))
 }
 
 impl ModuleParser {
@@ -363,9 +345,7 @@ impl Iterator for ModuleParser {
                 KnownIdDef::TypeInt(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
                         assert_eq!(kind, wk.LiteralInteger);
-                        n.try_into()
-                            .ok()
-                            .ok_or_else(|| invalid("Width cannot be 0"))?
+                        n.try_into().ok().ok_or_else(|| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
@@ -373,24 +353,17 @@ impl Iterator for ModuleParser {
                 KnownIdDef::TypeFloat(match inst.imms[0] {
                     spv::Imm::Short(kind, n) => {
                         assert_eq!(kind, wk.LiteralInteger);
-                        n.try_into()
-                            .ok()
-                            .ok_or_else(|| invalid("Width cannot be 0"))?
+                        n.try_into().ok().ok_or_else(|| invalid("Width cannot be 0"))?
                     }
                     _ => unreachable!(),
                 })
             } else {
-                KnownIdDef::Uncategorized {
-                    opcode,
-                    result_type_id: inst.result_type_id,
-                }
+                KnownIdDef::Uncategorized { opcode, result_type_id: inst.result_type_id }
             };
 
             let old = self.known_ids.insert(id, known_id_def);
             if old.is_some() {
-                return Err(invalid(&format!(
-                    "ID %{id} is a result of multiple instructions"
-                )));
+                return Err(invalid(&format!("ID %{id} is a result of multiple instructions")));
             }
 
             Ok(())

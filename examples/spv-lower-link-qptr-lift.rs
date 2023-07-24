@@ -15,10 +15,7 @@ fn main() -> std::io::Result<()> {
                 fs::write(in_file_path.with_extension(&ext), pretty.to_string())?;
                 fs::write(
                     in_file_path.with_extension(ext + ".html"),
-                    pretty
-                        .render_to_html()
-                        .with_dark_mode_support()
-                        .to_html_doc(),
+                    pretty.render_to_html().with_dark_mode_support().to_html_doc(),
                 )
             };
 

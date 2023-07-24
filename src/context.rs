@@ -107,9 +107,7 @@ mod sealed {
         fn default() -> Self {
             // NOTE(eddyb) always skip chunk `0`, as a sort of "null page",
             // to allow using `NonZeroU32` instead of merely `u32`.
-            Self(Cell::new(E::from_non_zero_u32(
-                NonZeroU32::new(E::CHUNK_SIZE).unwrap(),
-            )))
+            Self(Cell::new(E::from_non_zero_u32(NonZeroU32::new(E::CHUNK_SIZE).unwrap())))
         }
     }
 
@@ -248,9 +246,7 @@ impl<E: sealed::Entity> EntityDefs<E> {
             {
                 incomplete_flattened_base
             }
-            _ => *self
-                .complete_chunk_start_to_flattened_base
-                .get(&chunk_start)?,
+            _ => *self.complete_chunk_start_to_flattened_base.get(&chunk_start)?,
         };
         Some(flattened_base + intra_chunk_idx)
     }
@@ -260,17 +256,13 @@ impl<E: sealed::Entity> std::ops::Index<E> for EntityDefs<E> {
     type Output = E::Def;
 
     fn index(&self, entity: E) -> &Self::Output {
-        self.entity_to_flattened(entity)
-            .and_then(|i| self.flattened.get(i))
-            .unwrap()
+        self.entity_to_flattened(entity).and_then(|i| self.flattened.get(i)).unwrap()
     }
 }
 
 impl<E: sealed::Entity> std::ops::IndexMut<E> for EntityDefs<E> {
     fn index_mut(&mut self, entity: E) -> &mut Self::Output {
-        self.entity_to_flattened(entity)
-            .and_then(|i| self.flattened.get_mut(i))
-            .unwrap()
+        self.entity_to_flattened(entity).and_then(|i| self.flattened.get_mut(i)).unwrap()
     }
 }
 
@@ -392,9 +384,7 @@ impl<K: Copy + Eq + Hash, V: Default> SmallFxHashMap<K, V> {
 
 impl<K: EntityOrientedMapKey<V>, V> Default for EntityOrientedDenseMap<K, V> {
     fn default() -> Self {
-        Self {
-            chunk_start_to_value_slots: Default::default(),
-        }
+        Self { chunk_start_to_value_slots: Default::default() }
     }
 }
 
@@ -408,9 +398,8 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
     pub fn entry(&mut self, key: K) -> &mut Option<V> {
         let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
-        let chunk_value_slots = self
-            .chunk_start_to_value_slots
-            .get_mut_or_insert_default(chunk_start);
+        let chunk_value_slots =
+            self.chunk_start_to_value_slots.get_mut_or_insert_default(chunk_start);
 
         // Ensure there are enough slots for the new entry.
         let needed_len = intra_chunk_idx + 1;
@@ -429,10 +418,7 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
     pub fn get(&self, key: K) -> Option<&V> {
         let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
-        let value_slots = self
-            .chunk_start_to_value_slots
-            .get(chunk_start)?
-            .get(intra_chunk_idx)?;
+        let value_slots = self.chunk_start_to_value_slots.get(chunk_start)?.get(intra_chunk_idx)?;
         K::get_dense_value_slot(key, value_slots).as_ref()
     }
 
@@ -448,10 +434,8 @@ impl<K: EntityOrientedMapKey<V>, V> EntityOrientedDenseMap<K, V> {
     fn get_slot_mut(&mut self, key: K) -> Option<&mut Option<V>> {
         let entity = K::to_entity(key);
         let (chunk_start, intra_chunk_idx) = entity.to_chunk_start_and_intra_chunk_idx();
-        let value_slots = self
-            .chunk_start_to_value_slots
-            .get_mut(chunk_start)?
-            .get_mut(intra_chunk_idx)?;
+        let value_slots =
+            self.chunk_start_to_value_slots.get_mut(chunk_start)?.get_mut(intra_chunk_idx)?;
         Some(K::get_dense_value_slot_mut(key, value_slots))
     }
 }
@@ -501,10 +485,7 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
     }
 
     pub fn iter(self) -> EntityListIter<E> {
-        EntityListIter {
-            first: self.0.map(|list| list.first),
-            last: self.0.map(|list| list.last),
-        }
+        EntityListIter { first: self.0.map(|list| list.first), last: self.0.map(|list| list.last) }
     }
 
     /// Insert `new_node` (defined in `defs`) at the start of `self`.
@@ -524,18 +505,13 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             // involves the `EntityListNode`s links, which should be unforgeable,
             // but it's still possible to keep around outdated `EntityList`s
             // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
-            assert!(
-                old_first_def.prev.is_none(),
-                "invalid EntityList: `first->prev != None`"
-            );
+            assert!(old_first_def.prev.is_none(), "invalid EntityList: `first->prev != None`");
 
             old_first_def.prev = Some(new_node);
         }
 
-        self.0 = Some(FirstLast {
-            first: new_node,
-            last: self.0.map_or(new_node, |this| this.last),
-        });
+        self.0 =
+            Some(FirstLast { first: new_node, last: self.0.map_or(new_node, |this| this.last) });
     }
 
     /// Insert `new_node` (defined in `defs`) at the end of `self`.
@@ -555,18 +531,13 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             // involves the `EntityListNode`s links, which should be unforgeable,
             // but it's still possible to keep around outdated `EntityList`s
             // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
-            assert!(
-                old_last_def.next.is_none(),
-                "invalid EntityList: `last->next != None`"
-            );
+            assert!(old_last_def.next.is_none(), "invalid EntityList: `last->next != None`");
 
             old_last_def.next = Some(new_node);
         }
 
-        self.0 = Some(FirstLast {
-            first: self.0.map_or(new_node, |this| this.first),
-            last: new_node,
-        });
+        self.0 =
+            Some(FirstLast { first: self.0.map_or(new_node, |this| this.first), last: new_node });
     }
 
     /// Insert `new_node` (defined in `defs`) into `self`, before `next`.
@@ -639,10 +610,7 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             // involves the `EntityListNode`s links, which should be unforgeable,
             // but it's still possible to keep around outdated `EntityList`s
             // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
-            assert!(
-                a_last_def.next.is_none(),
-                "invalid EntityList: `last->next != None`"
-            );
+            assert!(a_last_def.next.is_none(), "invalid EntityList: `last->next != None`");
 
             a_last_def.next = Some(b.first);
         }
@@ -653,18 +621,12 @@ impl<E: sealed::Entity<Def = EntityListNode<E, D>>, D> EntityList<E> {
             // involves the `EntityListNode`s links, which should be unforgeable,
             // but it's still possible to keep around outdated `EntityList`s
             // (should `EntityList` not implement `Copy`/`Clone` *at all*?)
-            assert!(
-                b_first_def.prev.is_none(),
-                "invalid EntityList: `first->prev != None`"
-            );
+            assert!(b_first_def.prev.is_none(), "invalid EntityList: `first->prev != None`");
 
             b_first_def.prev = Some(a.last);
         }
 
-        Self(Some(FirstLast {
-            first: a.first,
-            last: b.last,
-        }))
+        Self(Some(FirstLast { first: a.first, last: b.last }))
     }
 
     /// Remove `node` (defined in `defs`) from `self`.
@@ -805,11 +767,7 @@ pub struct EntityListNode<E: sealed::Entity<Def = Self>, D> {
 
 impl<E: sealed::Entity<Def = Self>, D> From<D> for EntityListNode<E, D> {
     fn from(inner_def: D) -> Self {
-        Self {
-            prev: None,
-            next: None,
-            inner_def,
-        }
+        Self { prev: None, next: None, inner_def }
     }
 }
 

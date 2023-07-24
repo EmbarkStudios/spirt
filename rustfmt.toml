@@ -1,3 +1,6 @@
 # HACK(eddyb) needed to format array/slice patterns at all, because it was a
 # breaking change (see https://github.com/rust-lang/rustfmt/pull/4994).
 version = "Two"
+
+# HACK(eddyb) avoid random spilling of e.g. method call chains onto many lines.
+use_small_heuristics = "Max"

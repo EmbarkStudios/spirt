@@ -49,9 +49,7 @@ pub struct TokensForOperand<ID> {
 
 impl<ID> Default for TokensForOperand<ID> {
     fn default() -> Self {
-        Self {
-            tokens: SmallVec::new(),
-        }
+        Self { tokens: SmallVec::new() }
     }
 }
 
@@ -101,9 +99,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 break;
             }
 
-            self.out
-                .tokens
-                .push(Token::Punctuation(if first { "(" } else { ", " }));
+            self.out.tokens.push(Token::Punctuation(if first { "(" } else { ", " }));
             first = false;
 
             let (name, kind) = name_and_kind.name_and_kind();
@@ -139,11 +135,8 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                 Err(e) => Token::Error(format!("/* {e} in {bytes:?} */")),
             }
         } else {
-            let mut words_msb_to_lsb = words
-                .into_iter()
-                .rev()
-                .skip_while(|&word| word == 0)
-                .peekable();
+            let mut words_msb_to_lsb =
+                words.into_iter().rev().skip_while(|&word| word == 0).peekable();
             let most_significant_word = words_msb_to_lsb.next().unwrap_or(0);
 
             // FIXME(eddyb) use a more advanced decision procedure for picking
@@ -172,9 +165,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 
         // FIXME(eddyb) should this be a hard error?
         let emit_missing_error = |this: &mut Self| {
-            this.out
-                .tokens
-                .push(Token::Error(format!("/* missing {name} */")));
+            this.out.tokens.push(Token::Error(format!("/* missing {name} */")));
         };
 
         let mut maybe_get_enum_word = || match self.imms.next() {
@@ -193,9 +184,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
                     None => return emit_missing_error(self),
                 };
 
-                self.out
-                    .tokens
-                    .push(Token::OperandKindNamespacePrefix(name));
+                self.out.tokens.push(Token::OperandKindNamespacePrefix(name));
                 if word == 0 {
                     self.out.tokens.push(Token::EnumerandName(empty_name));
                 } else if let Some(bit_idx) = spec::BitIdx::of_single_set_bit(word) {
@@ -256,17 +245,14 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
     }
 
     fn inst_operands(mut self, opcode: spec::Opcode) -> impl Iterator<Item = TokensForOperand<ID>> {
-        opcode
-            .def()
-            .all_operands_with_names()
-            .map_while(move |(mode, name_and_kind)| {
-                if mode == spec::OperandMode::Optional && self.is_exhausted() {
-                    return None;
-                }
-                let (name, kind) = name_and_kind.name_and_kind();
-                self.operand(name, kind);
-                Some(mem::take(&mut self.out))
-            })
+        opcode.def().all_operands_with_names().map_while(move |(mode, name_and_kind)| {
+            if mode == spec::OperandMode::Optional && self.is_exhausted() {
+                return None;
+            }
+            let (name, kind) = name_and_kind.name_and_kind();
+            self.operand(name, kind);
+            Some(mem::take(&mut self.out))
+        })
     }
 }
 

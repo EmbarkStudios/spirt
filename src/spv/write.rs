@@ -100,9 +100,8 @@ impl OperandEmitter<'_> {
                 self.out.push(word);
 
                 for bit_idx in spec::BitIdx::of_all_set_bits(word) {
-                    let bit_def = bits
-                        .get(bit_idx)
-                        .ok_or(Error::UnsupportedEnumerand(kind, word))?;
+                    let bit_def =
+                        bits.get(bit_idx).ok_or(Error::UnsupportedEnumerand(kind, word))?;
                     self.enumerant_params(bit_def)?;
                 }
             }
@@ -117,8 +116,7 @@ impl OperandEmitter<'_> {
                 self.enumerant_params(variant_def)?;
             }
             spec::OperandKindDef::Id => {
-                self.out
-                    .push(self.ids.next().ok_or(Error::NotEnoughIds)?.get());
+                self.out.push(self.ids.next().ok_or(Error::NotEnoughIds)?.get());
             }
             spec::OperandKindDef::Literal { .. } => {
                 match self.imms.next().ok_or(Error::NotEnoughImms)? {
@@ -181,18 +179,13 @@ pub struct ModuleEmitter {
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
 fn invalid(reason: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V ({reason})"),
-    )
+    io::Error::new(io::ErrorKind::InvalidData, format!("malformed SPIR-V ({reason})"))
 }
 
 impl ModuleEmitter {
     pub fn with_header(header: [u32; spec::HEADER_LEN]) -> Self {
         // FIXME(eddyb) sanity-check the provided header words.
-        Self {
-            words: header.into(),
-        }
+        Self { words: header.into() }
     }
 
     // FIXME(eddyb) sanity-check the operands against the definition of `inst.opcode`.
