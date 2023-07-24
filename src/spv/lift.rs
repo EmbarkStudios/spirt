@@ -50,32 +50,28 @@ impl spv::Dialect {
 impl spv::ModuleDebugInfo {
     fn source_extension_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
         let wk = &spec::Spec::get().well_known;
-        self.source_extensions
-            .iter()
-            .map(move |ext| spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode: wk.OpSourceExtension,
-                    imms: spv::encode_literal_string(ext).collect(),
-                },
-                result_type_id: None,
-                result_id: None,
-                ids: [].into_iter().collect(),
-            })
+        self.source_extensions.iter().map(move |ext| spv::InstWithIds {
+            without_ids: spv::Inst {
+                opcode: wk.OpSourceExtension,
+                imms: spv::encode_literal_string(ext).collect(),
+            },
+            result_type_id: None,
+            result_id: None,
+            ids: [].into_iter().collect(),
+        })
     }
 
     fn module_processed_insts(&self) -> impl Iterator<Item = spv::InstWithIds> + '_ {
         let wk = &spec::Spec::get().well_known;
-        self.module_processes
-            .iter()
-            .map(move |proc| spv::InstWithIds {
-                without_ids: spv::Inst {
-                    opcode: wk.OpModuleProcessed,
-                    imms: spv::encode_literal_string(proc).collect(),
-                },
-                result_type_id: None,
-                result_id: None,
-                ids: [].into_iter().collect(),
-            })
+        self.module_processes.iter().map(move |proc| spv::InstWithIds {
+            without_ids: spv::Inst {
+                opcode: wk.OpModuleProcessed,
+                imms: spv::encode_literal_string(proc).collect(),
+            },
+            result_type_id: None,
+            result_id: None,
+            ids: [].into_iter().collect(),
+        })
     }
 }
 
@@ -157,12 +153,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             // in the module than any `OpConstant*`, it needs to be special-cased,
             // without visiting its type, or an entry in `self.globals`.
             ConstCtor::SpvStringLiteralForExtInst(s) => {
-                let ConstDef {
-                    attrs,
-                    ty,
-                    ctor: _,
-                    ctor_args,
-                } = ct_def;
+                let ConstDef { attrs, ty, ctor: _, ctor_args } = ct_def;
 
                 assert!(*attrs == AttrSet::default());
                 assert!(
@@ -208,8 +199,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
         for sources in debug_info.source_languages.values() {
             // The file operand of `OpSource` has to point to an `OpString`.
-            self.debug_strings
-                .extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
+            self.debug_strings.extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
         }
     }
     fn visit_attr(&mut self, attr: &Attr) {
@@ -384,17 +374,11 @@ impl<'a> NeedsIdsCollector<'a> {
                 .into_iter()
                 .map(|s| Ok((s, alloc_id()?)))
                 .collect::<Result<_, _>>()?,
-            globals: globals
-                .into_iter()
-                .map(|g| Ok((g, alloc_id()?)))
-                .collect::<Result<_, _>>()?,
+            globals: globals.into_iter().map(|g| Ok((g, alloc_id()?))).collect::<Result<_, _>>()?,
             funcs: funcs
                 .into_iter()
                 .map(|func| {
-                    Ok((
-                        func,
-                        FuncLifting::from_func_decl(cx, &module.funcs[func], &mut alloc_id)?,
-                    ))
+                    Ok((func, FuncLifting::from_func_decl(cx, &module.funcs[func], &mut alloc_id)?))
                 })
                 .collect::<Result<_, _>>()?,
         })
@@ -496,23 +480,14 @@ impl<'a> FuncAt<'a, ControlRegion> {
         parent: Option<&CfgCursor<'_, ControlParent>>,
     ) -> Result<(), E> {
         let region = self.position;
-        f(CfgCursor {
-            point: CfgPoint::RegionEntry(region),
-            parent,
-        })?;
+        f(CfgCursor { point: CfgPoint::RegionEntry(region), parent })?;
         for func_at_control_node in self.at_children() {
             func_at_control_node.rev_post_order_try_for_each_inner(
                 f,
-                &CfgCursor {
-                    point: ControlParent::Region(region),
-                    parent,
-                },
+                &CfgCursor { point: ControlParent::Region(region), parent },
             )?;
         }
-        f(CfgCursor {
-            point: CfgPoint::RegionExit(region),
-            parent,
-        })
+        f(CfgCursor { point: CfgPoint::RegionExit(region), parent })
     }
 }
 
@@ -530,23 +505,14 @@ impl<'a> FuncAt<'a, ControlNode> {
 
         let control_node = self.position;
         let parent = Some(parent);
-        f(CfgCursor {
-            point: CfgPoint::ControlNodeEntry(control_node),
-            parent,
-        })?;
+        f(CfgCursor { point: CfgPoint::ControlNodeEntry(control_node), parent })?;
         for &region in child_regions {
             self.at(region).rev_post_order_try_for_each_inner(
                 f,
-                Some(&CfgCursor {
-                    point: ControlParent::ControlNode(control_node),
-                    parent,
-                }),
+                Some(&CfgCursor { point: ControlParent::ControlNode(control_node), parent }),
             )?;
         }
-        f(CfgCursor {
-            point: CfgPoint::ControlNodeExit(control_node),
-            parent,
-        })
+        f(CfgCursor { point: CfgPoint::ControlNodeExit(control_node), parent })
     }
 }
 
@@ -559,11 +525,7 @@ impl<'a> FuncLifting<'a> {
         let wk = &spec::Spec::get().well_known;
 
         let func_id = alloc_id()?;
-        let param_ids = func_decl
-            .params
-            .iter()
-            .map(|_| alloc_id())
-            .collect::<Result<_, _>>()?;
+        let param_ids = func_decl.params.iter().map(|_| alloc_id()).collect::<Result<_, _>>()?;
 
         let func_def_body = match &func_decl.def {
             DeclDef::Imported(_) => {
@@ -618,11 +580,7 @@ impl<'a> FuncLifting<'a> {
                         // The backedge of a SPIR-V structured loop points to
                         // the "loop header", i.e. the `Entry` of the `Loop`,
                         // so that's where `body` `inputs` phis have to go.
-                        ControlNodeKind::Loop {
-                            initial_inputs,
-                            body,
-                            ..
-                        } => {
+                        ControlNodeKind::Loop { initial_inputs, body, .. } => {
                             let loop_body_def = func_def_body.at(*body).def();
                             let loop_body_inputs = &loop_body_def.inputs;
 
@@ -688,13 +646,8 @@ impl<'a> FuncLifting<'a> {
                         .as_ref()
                         .and_then(|cfg| cfg.control_inst_on_exit_from.get(region));
                     if let Some(terminator) = unstructured_terminator {
-                        let cfg::ControlInst {
-                            attrs,
-                            kind,
-                            inputs,
-                            targets,
-                            target_inputs,
-                        } = terminator;
+                        let cfg::ControlInst { attrs, kind, inputs, targets, target_inputs } =
+                            terminator;
                         Terminator {
                             attrs: *attrs,
                             kind: Cow::Borrowed(kind),
@@ -734,11 +687,7 @@ impl<'a> FuncLifting<'a> {
                             unreachable!()
                         }
 
-                        ControlNodeKind::Select {
-                            kind,
-                            scrutinee,
-                            cases,
-                        } => Terminator {
+                        ControlNodeKind::Select { kind, scrutinee, cases } => Terminator {
                             attrs: AttrSet::default(),
                             kind: Cow::Owned(cfg::ControlInstKind::SelectBranch(kind.clone())),
                             inputs: [*scrutinee].into_iter().collect(),
@@ -750,28 +699,26 @@ impl<'a> FuncLifting<'a> {
                             merge: Some(Merge::Selection(CfgPoint::ControlNodeExit(control_node))),
                         },
 
-                        ControlNodeKind::Loop {
-                            initial_inputs: _,
-                            body,
-                            repeat_condition: _,
-                        } => Terminator {
-                            attrs: AttrSet::default(),
-                            kind: Cow::Owned(cfg::ControlInstKind::Branch),
-                            inputs: [].into_iter().collect(),
-                            targets: [CfgPoint::RegionEntry(*body)].into_iter().collect(),
-                            target_phi_values: FxIndexMap::default(),
-                            merge: Some(Merge::Loop {
-                                loop_merge: CfgPoint::ControlNodeExit(control_node),
-                                // NOTE(eddyb) see the note on `Merge::Loop`'s
-                                // `loop_continue` field - in particular, for
-                                // SPIR-T loops, we *could* pick any point
-                                // before/after/between `body`'s `children`
-                                // and it should be valid *but* that had to be
-                                // reverted because it's only true in the absence
-                                // of divergence within the loop body itself!
-                                loop_continue: CfgPoint::RegionExit(*body),
-                            }),
-                        },
+                        ControlNodeKind::Loop { initial_inputs: _, body, repeat_condition: _ } => {
+                            Terminator {
+                                attrs: AttrSet::default(),
+                                kind: Cow::Owned(cfg::ControlInstKind::Branch),
+                                inputs: [].into_iter().collect(),
+                                targets: [CfgPoint::RegionEntry(*body)].into_iter().collect(),
+                                target_phi_values: FxIndexMap::default(),
+                                merge: Some(Merge::Loop {
+                                    loop_merge: CfgPoint::ControlNodeExit(control_node),
+                                    // NOTE(eddyb) see the note on `Merge::Loop`'s
+                                    // `loop_continue` field - in particular, for
+                                    // SPIR-T loops, we *could* pick any point
+                                    // before/after/between `body`'s `children`
+                                    // and it should be valid *but* that had to be
+                                    // reverted because it's only true in the absence
+                                    // of divergence within the loop body itself!
+                                    loop_continue: CfgPoint::RegionExit(*body),
+                                }),
+                            }
+                        }
                     }
                 }
 
@@ -803,11 +750,7 @@ impl<'a> FuncLifting<'a> {
                             merge: None,
                         },
 
-                        ControlNodeKind::Loop {
-                            initial_inputs: _,
-                            body: _,
-                            repeat_condition,
-                        } => {
+                        ControlNodeKind::Loop { initial_inputs: _, body: _, repeat_condition } => {
                             let backedge = CfgPoint::ControlNodeEntry(parent_node);
                             let target_phi_values = region_outputs
                                 .map(|outputs| (backedge, outputs))
@@ -863,26 +806,15 @@ impl<'a> FuncLifting<'a> {
                 }
             };
 
-            blocks.insert(
-                point,
-                BlockLifting {
-                    phis,
-                    insts,
-                    terminator,
-                },
-            );
+            blocks.insert(point, BlockLifting { phis, insts, terminator });
 
             Ok(())
         };
         match &func_def_body.unstructured_cfg {
-            None => func_def_body
-                .at_body()
-                .rev_post_order_try_for_each(visit_cfg_point)?,
+            None => func_def_body.at_body().rev_post_order_try_for_each(visit_cfg_point)?,
             Some(cfg) => {
                 for region in cfg.rev_post_order(func_def_body) {
-                    func_def_body
-                        .at(region)
-                        .rev_post_order_try_for_each(&mut visit_cfg_point)?;
+                    func_def_body.at(region).rev_post_order_try_for_each(&mut visit_cfg_point)?;
                 }
             }
         }
@@ -894,11 +826,8 @@ impl<'a> FuncLifting<'a> {
         // FIXME(eddyb) use `EntityOrientedDenseMap` here.
         let mut use_counts = FxHashMap::default();
         use_counts.reserve(blocks.len());
-        let all_edges = blocks
-            .first()
-            .map(|(&entry_point, _)| entry_point)
-            .into_iter()
-            .chain(blocks.values().flat_map(|block| {
+        let all_edges = blocks.first().map(|(&entry_point, _)| entry_point).into_iter().chain(
+            blocks.values().flat_map(|block| {
                 block
                     .terminator
                     .merge
@@ -906,16 +835,14 @@ impl<'a> FuncLifting<'a> {
                     .flat_map(|merge| {
                         let (a, b) = match merge {
                             Merge::Selection(a) => (a, None),
-                            Merge::Loop {
-                                loop_merge: a,
-                                loop_continue: b,
-                            } => (a, Some(b)),
+                            Merge::Loop { loop_merge: a, loop_continue: b } => (a, Some(b)),
                         };
                         [a].into_iter().chain(b)
                     })
                     .chain(&block.terminator.targets)
                     .copied()
-            }));
+            }),
+        );
         for target in all_edges {
             *use_counts.entry(target).or_default() += 1;
         }
@@ -935,20 +862,11 @@ impl<'a> FuncLifting<'a> {
         // HACK(eddyb) this takes advantage of `blocks` being an `IndexMap`,
         // to iterate at the same time as mutating other entries.
         for block_idx in (0..blocks.len()).rev() {
-            let BlockLifting {
-                terminator: original_terminator,
-                ..
-            } = &blocks[block_idx];
+            let BlockLifting { terminator: original_terminator, .. } = &blocks[block_idx];
 
             let is_trivial_branch = {
-                let Terminator {
-                    attrs,
-                    kind,
-                    inputs,
-                    targets,
-                    target_phi_values,
-                    merge,
-                } = original_terminator;
+                let Terminator { attrs, kind, inputs, targets, target_phi_values, merge } =
+                    original_terminator;
 
                 *attrs == AttrSet::default()
                     && matches!(**kind, cfg::ControlInstKind::Branch)
@@ -1008,20 +926,14 @@ impl<'a> FuncLifting<'a> {
             for target in targets {
                 let source_values = {
                     let (_, source_block) = blocks.get_index(source_block_idx).unwrap();
-                    source_block
-                        .terminator
-                        .target_phi_values
-                        .get(&target)
-                        .copied()
+                    source_block.terminator.target_phi_values.get(&target).copied()
                 };
                 let target_block = blocks.get_mut(&target).unwrap();
                 for (i, target_phi) in target_block.phis.iter_mut().enumerate() {
                     use indexmap::map::Entry;
 
-                    let source_value = source_values
-                        .map(|values| values[i])
-                        .or(target_phi.default_value)
-                        .unwrap();
+                    let source_value =
+                        source_values.map(|values| values[i]).or(target_phi.default_value).unwrap();
                     match target_phi.cases.entry(source_point) {
                         Entry::Vacant(entry) => {
                             entry.insert(source_value);
@@ -1137,20 +1049,12 @@ impl LazyInst<'_, '_> {
             }
             Self::OpFunctionParameter { param_id, param } => (Some(param_id), param.attrs, None),
             Self::OpLabel { label_id } => (Some(label_id), AttrSet::default(), None),
-            Self::OpPhi {
-                parent_func: _,
-                phi,
-            } => (Some(phi.result_id), phi.attrs, None),
-            Self::DataInst {
-                parent_func: _,
-                result_id,
-                data_inst_def,
-            } => (result_id, data_inst_def.attrs, None),
+            Self::OpPhi { parent_func: _, phi } => (Some(phi.result_id), phi.attrs, None),
+            Self::DataInst { parent_func: _, result_id, data_inst_def } => {
+                (result_id, data_inst_def.attrs, None)
+            }
             Self::Merge(_) => (None, AttrSet::default(), None),
-            Self::Terminator {
-                parent_func: _,
-                terminator,
-            } => (None, terminator.attrs, None),
+            Self::Terminator { parent_func: _, terminator } => (None, terminator.attrs, None),
             Self::OpFunctionEnd => (None, AttrSet::default(), None),
         }
     }
@@ -1182,10 +1086,7 @@ impl LazyInst<'_, '_> {
                     }
                 }
             }
-            Value::ControlNodeOutput {
-                control_node,
-                output_idx,
-            } => {
+            Value::ControlNodeOutput { control_node, output_idx } => {
                 parent_func.blocks[&CfgPoint::ControlNodeExit(control_node)].phis
                     [usize::try_from(output_idx).unwrap()]
                 .result_id
@@ -1272,10 +1173,7 @@ impl LazyInst<'_, '_> {
                     }
                 }
             },
-            Self::OpFunction {
-                func_id: _,
-                func_decl,
-            } => {
+            Self::OpFunction { func_id: _, func_decl } => {
                 // FIXME(eddyb) make this less of a search and more of a
                 // lookup by splitting attrs into key and value parts.
                 let func_ctrl = cx[attrs]
@@ -1322,18 +1220,11 @@ impl LazyInst<'_, '_> {
                     .cases
                     .iter()
                     .flat_map(|(&source_point, &v)| {
-                        [
-                            value_to_id(parent_func, v),
-                            parent_func.label_ids[&source_point],
-                        ]
+                        [value_to_id(parent_func, v), parent_func.label_ids[&source_point]]
                     })
                     .collect(),
             },
-            Self::DataInst {
-                parent_func,
-                result_id: _,
-                data_inst_def,
-            } => {
+            Self::DataInst { parent_func, result_id: _, data_inst_def } => {
                 let DataInstFormDef { kind, output_type } = &cx[data_inst_def.form];
                 let (inst, extra_initial_id_operand) = match kind {
                     // Disallowed while visiting.
@@ -1358,21 +1249,14 @@ impl LazyInst<'_, '_> {
                     result_id,
                     ids: extra_initial_id_operand
                         .into_iter()
-                        .chain(
-                            data_inst_def
-                                .inputs
-                                .iter()
-                                .map(|&v| value_to_id(parent_func, v)),
-                        )
+                        .chain(data_inst_def.inputs.iter().map(|&v| value_to_id(parent_func, v)))
                         .collect(),
                 }
             }
             Self::Merge(Merge::Selection(merge_label_id)) => spv::InstWithIds {
                 without_ids: spv::Inst {
                     opcode: wk.OpSelectionMerge,
-                    imms: [spv::Imm::Short(wk.SelectionControl, 0)]
-                        .into_iter()
-                        .collect(),
+                    imms: [spv::Imm::Short(wk.SelectionControl, 0)].into_iter().collect(),
                 },
                 result_type_id: None,
                 result_id: None,
@@ -1390,10 +1274,7 @@ impl LazyInst<'_, '_> {
                 result_id: None,
                 ids: [merge_label_id, continue_label_id].into_iter().collect(),
             },
-            Self::Terminator {
-                parent_func,
-                terminator,
-            } => {
+            Self::Terminator { parent_func, terminator } => {
                 let inst = match &*terminator.kind {
                     cfg::ControlInstKind::Unreachable => wk.OpUnreachable.into(),
                     cfg::ControlInstKind::Return => {
@@ -1425,10 +1306,7 @@ impl LazyInst<'_, '_> {
                         .iter()
                         .map(|&v| value_to_id(parent_func, v))
                         .chain(
-                            terminator
-                                .targets
-                                .iter()
-                                .map(|&target| parent_func.label_ids[&target]),
+                            terminator.targets.iter().map(|&target| parent_func.label_ids[&target]),
                         )
                         .collect(),
                 }
@@ -1463,10 +1341,7 @@ impl Module {
             // `spv::Dialect`, or by taking it as additional input.
             #[allow(unreachable_patterns)]
             _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "not a SPIR-V module",
-                ));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "not a SPIR-V module"));
             }
         };
 
@@ -1497,9 +1372,7 @@ impl Module {
             Global::Const(ptr_to_global_var)
         };
         for &gv in &needs_ids_collector.global_vars_seen {
-            needs_ids_collector
-                .globals
-                .insert(global_var_to_id_giving_global(gv));
+            needs_ids_collector.globals.insert(global_var_to_id_giving_global(gv));
         }
 
         // IDs can be allocated once we have the full sets needing them, whether
@@ -1525,77 +1398,61 @@ impl Module {
         // without causing unwanted moves out of them.
         let (cx, ids) = (&*cx, &ids);
 
-        let global_and_func_insts =
-            ids.globals
-                .keys()
-                .copied()
-                .map(LazyInst::Global)
-                .chain(ids.funcs.iter().flat_map(|(&func, func_lifting)| {
-                    let func_decl = &self.funcs[func];
-                    let func_def_body = match &func_decl.def {
-                        DeclDef::Imported(_) => None,
-                        DeclDef::Present(def) => Some(def),
-                    };
+        let global_and_func_insts = ids.globals.keys().copied().map(LazyInst::Global).chain(
+            ids.funcs.iter().flat_map(|(&func, func_lifting)| {
+                let func_decl = &self.funcs[func];
+                let func_def_body = match &func_decl.def {
+                    DeclDef::Imported(_) => None,
+                    DeclDef::Present(def) => Some(def),
+                };
 
-                    iter::once(LazyInst::OpFunction {
-                        func_id: func_lifting.func_id,
-                        func_decl,
-                    })
+                iter::once(LazyInst::OpFunction { func_id: func_lifting.func_id, func_decl })
                     .chain(func_lifting.param_ids.iter().zip(&func_decl.params).map(
                         |(&param_id, param)| LazyInst::OpFunctionParameter { param_id, param },
                     ))
                     .chain(func_lifting.blocks.iter().flat_map(move |(point, block)| {
-                        let BlockLifting {
-                            phis,
-                            insts,
-                            terminator,
-                        } = block;
+                        let BlockLifting { phis, insts, terminator } = block;
 
-                        iter::once(LazyInst::OpLabel {
-                            label_id: func_lifting.label_ids[point],
-                        })
-                        .chain(phis.iter().map(|phi| LazyInst::OpPhi {
-                            parent_func: func_lifting,
-                            phi,
-                        }))
-                        .chain(
-                            insts
-                                .iter()
-                                .copied()
-                                .flat_map(move |insts| func_def_body.unwrap().at(insts))
-                                .map(move |func_at_inst| {
-                                    let data_inst_def = func_at_inst.def();
-                                    LazyInst::DataInst {
-                                        parent_func: func_lifting,
-                                        result_id: cx[data_inst_def.form].output_type.map(|_| {
-                                            func_lifting.data_inst_output_ids
-                                                [&func_at_inst.position]
-                                        }),
-                                        data_inst_def,
+                        iter::once(LazyInst::OpLabel { label_id: func_lifting.label_ids[point] })
+                            .chain(
+                                phis.iter()
+                                    .map(|phi| LazyInst::OpPhi { parent_func: func_lifting, phi }),
+                            )
+                            .chain(
+                                insts
+                                    .iter()
+                                    .copied()
+                                    .flat_map(move |insts| func_def_body.unwrap().at(insts))
+                                    .map(move |func_at_inst| {
+                                        let data_inst_def = func_at_inst.def();
+                                        LazyInst::DataInst {
+                                            parent_func: func_lifting,
+                                            result_id: cx[data_inst_def.form].output_type.map(
+                                                |_| {
+                                                    func_lifting.data_inst_output_ids
+                                                        [&func_at_inst.position]
+                                                },
+                                            ),
+                                            data_inst_def,
+                                        }
+                                    }),
+                            )
+                            .chain(terminator.merge.map(|merge| {
+                                LazyInst::Merge(match merge {
+                                    Merge::Selection(merge) => {
+                                        Merge::Selection(func_lifting.label_ids[&merge])
                                     }
-                                }),
-                        )
-                        .chain(terminator.merge.map(|merge| {
-                            LazyInst::Merge(match merge {
-                                Merge::Selection(merge) => {
-                                    Merge::Selection(func_lifting.label_ids[&merge])
-                                }
-                                Merge::Loop {
-                                    loop_merge,
-                                    loop_continue,
-                                } => Merge::Loop {
-                                    loop_merge: func_lifting.label_ids[&loop_merge],
-                                    loop_continue: func_lifting.label_ids[&loop_continue],
-                                },
-                            })
-                        }))
-                        .chain([LazyInst::Terminator {
-                            parent_func: func_lifting,
-                            terminator,
-                        }])
+                                    Merge::Loop { loop_merge, loop_continue } => Merge::Loop {
+                                        loop_merge: func_lifting.label_ids[&loop_merge],
+                                        loop_continue: func_lifting.label_ids[&loop_continue],
+                                    },
+                                })
+                            }))
+                            .chain([LazyInst::Terminator { parent_func: func_lifting, terminator }])
                     }))
                     .chain([LazyInst::OpFunctionEnd])
-                }));
+            }),
+        );
 
         let reserved_inst_schema = 0;
         let header = [
@@ -1723,10 +1580,7 @@ impl Module {
                         ids: iter::once(target_id).collect(),
                     });
                 }
-                ExportKey::SpvEntryPoint {
-                    imms,
-                    interface_global_vars,
-                } => {
+                ExportKey::SpvEntryPoint { imms, interface_global_vars } => {
                     entry_point_insts.push(spv::InstWithIds {
                         without_ids: spv::Inst {
                             opcode: wk.OpEntryPoint,
@@ -1775,10 +1629,7 @@ impl Module {
             };
             if sources.file_contents.is_empty() {
                 emitter.push_inst(&spv::InstWithIds {
-                    without_ids: spv::Inst {
-                        opcode: wk.OpSource,
-                        imms: lang_imms().collect(),
-                    },
+                    without_ids: spv::Inst { opcode: wk.OpSource, imms: lang_imms().collect() },
                     result_type_id: None,
                     result_id: None,
                     ids: [].into_iter().collect(),
@@ -1868,11 +1719,9 @@ impl Module {
             // FIXME(eddyb) make this less of a search and more of a
             // lookup by splitting attrs into key and value parts.
             let new_debug_line = cx[attrs].attrs.iter().find_map(|attr| match *attr {
-                Attr::SpvDebugLine {
-                    file_path,
-                    line,
-                    col,
-                } => Some((ids.debug_strings[&cx[file_path.0]], line, col)),
+                Attr::SpvDebugLine { file_path, line, col } => {
+                    Some((ids.debug_strings[&cx[file_path.0]], line, col))
+                }
                 _ => None,
             });
             if current_debug_line != new_debug_line {
@@ -1887,11 +1736,7 @@ impl Module {
                         .collect(),
                         iter::once(file_path_id).collect(),
                     ),
-                    None => (
-                        wk.OpNoLine,
-                        [].into_iter().collect(),
-                        [].into_iter().collect(),
-                    ),
+                    None => (wk.OpNoLine, [].into_iter().collect(), [].into_iter().collect()),
                 };
                 emitter.push_inst(&spv::InstWithIds {
                     without_ids: spv::Inst { opcode, imms },

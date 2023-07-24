@@ -269,8 +269,7 @@ impl InstructionDef {
     /// or that an operand's absence signals the end of operands (`Optional`),
     /// which is also the exit signal for the "rest operands" infinite iterators.
     pub fn all_operands(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
-        self.all_operands_with_names()
-            .map(|(mode, name_and_kind)| (mode, name_and_kind.kind()))
+        self.all_operands_with_names().map(|(mode, name_and_kind)| (mode, name_and_kind.kind()))
     }
 
     /// Like `all_operands`, but providing access to the operand names as well.
@@ -296,16 +295,10 @@ impl InstructionDef {
                     RestOperandsUnit::Two([a_kind, b_kind]) => (a_kind, Some(b_kind)),
                 };
                 iter::repeat(
-                    iter::once((
-                        OperandMode::Optional,
-                        PackedOperandNameAndKind::unnamed(opt_a),
-                    ))
-                    .chain(req_b.map(|kind| {
-                        (
-                            OperandMode::Required,
-                            PackedOperandNameAndKind::unnamed(kind),
-                        )
-                    })),
+                    iter::once((OperandMode::Optional, PackedOperandNameAndKind::unnamed(opt_a)))
+                        .chain(req_b.map(|kind| {
+                            (OperandMode::Required, PackedOperandNameAndKind::unnamed(kind))
+                        })),
                 )
                 .flatten()
             }))
@@ -376,10 +369,7 @@ impl PackedOperandNameAndKind {
 
     #[inline]
     fn unpack(self) -> (usize, OperandKind) {
-        (
-            (self.0 >> 6) as usize,
-            OperandKind((self.0 & ((1 << 6) - 1)) as u8),
-        )
+        ((self.0 >> 6) as usize, OperandKind((self.0 & ((1 << 6) - 1)) as u8))
     }
 
     /// Unpack this `PackedOperandNameAndKind` into just its `OperandKind`.
@@ -418,11 +408,7 @@ pub struct BitIdx(pub u8);
 impl BitIdx {
     /// Returns `Some(BitIdx(i))` if and only if `x == (1 << i)`.
     pub fn of_single_set_bit(x: u32) -> Option<Self> {
-        if x.is_power_of_two() {
-            Some(Self(x.trailing_zeros() as u8))
-        } else {
-            None
-        }
+        if x.is_power_of_two() { Some(Self(x.trailing_zeros() as u8)) } else { None }
     }
 
     /// Returns an iterator of [`BitIdx`]s, from which `x` can be reconstructed
@@ -467,24 +453,18 @@ impl Enumerant {
     /// or that an operand's absence signals the end of operands (`Optional`),
     /// which is also the exit signal for the "rest operands" infinite iterators.
     pub fn all_params(&self) -> impl Iterator<Item = (OperandMode, OperandKind)> + '_ {
-        self.all_params_with_names()
-            .map(|(mode, name_and_kind)| (mode, name_and_kind.kind()))
+        self.all_params_with_names().map(|(mode, name_and_kind)| (mode, name_and_kind.kind()))
     }
 
     /// Like `all_params`, but providing access to the operand names as well.
     pub fn all_params_with_names(
         &self,
     ) -> impl Iterator<Item = (OperandMode, PackedOperandNameAndKind)> + '_ {
-        self.req_params
-            .iter()
-            .copied()
-            .map(|kind| (OperandMode::Required, kind))
-            .chain(self.rest_params.into_iter().flat_map(|kind| {
-                iter::repeat((
-                    OperandMode::Optional,
-                    PackedOperandNameAndKind::unnamed(kind),
-                ))
-            }))
+        self.req_params.iter().copied().map(|kind| (OperandMode::Required, kind)).chain(
+            self.rest_params.into_iter().flat_map(|kind| {
+                iter::repeat((OperandMode::Optional, PackedOperandNameAndKind::unnamed(kind)))
+            }),
+        )
     }
 }
 
@@ -548,10 +528,7 @@ impl Spec {
         // HACK(eddyb) ad-hoc interning, to reduce the cost of tracking operand names
         // down to a single extra byte per operand (see `PackedOperandNameAndKind`).
         let mut operand_names = FxIndexSet::default();
-        assert_eq!(
-            operand_names.insert_full("").0,
-            PackedOperandNameAndKind::EMPTY_NAME_IDX
-        );
+        assert_eq!(operand_names.insert_full("").0, PackedOperandNameAndKind::EMPTY_NAME_IDX);
         let mut pack_operand_name_and_kind = |name: &Option<raw::CowStr<'static>>, kind| {
             let name = name
                 .as_ref()
@@ -759,10 +736,8 @@ impl Spec {
 
         // FIXME(eddyb) automate this in `indexed::NamedIdxMap`.
         assert_eq!(operand_kind_by_name.len(), operand_kinds.len());
-        let operand_kinds = indexed::NamedIdxMap {
-            idx_by_name: operand_kind_by_name,
-            storage: operand_kinds,
-        };
+        let operand_kinds =
+            indexed::NamedIdxMap { idx_by_name: operand_kind_by_name, storage: operand_kinds };
 
         let operand_kind_pairs_by_name: FxHashMap<_, _> = raw_core_grammar
             .operand_kinds
@@ -1246,9 +1221,8 @@ pub mod indexed {
             };
             let next_block = block.map_or(0, |b| b + 1);
 
-            let seg_start = block.map_or(Some(0), |b| {
-                self.block_starts.get(b).copied().map(usize::from)
-            })?;
+            let seg_start =
+                block.map_or(Some(0), |b| self.block_starts.get(b).copied().map(usize::from))?;
             let seg_end = self
                 .block_starts
                 .get(next_block)
@@ -1340,11 +1314,7 @@ pub mod indexed {
             let (seg_range, intra_seg_idx) =
                 storage.idx_to_segmented(idx.to_usize().try_into().ok()?)?;
 
-            storage
-                .flattened
-                .get(seg_range)?
-                .get(intra_seg_idx)?
-                .as_ref()
+            storage.flattened.get(seg_range)?.get(intra_seg_idx)?.as_ref()
         }
     }
 

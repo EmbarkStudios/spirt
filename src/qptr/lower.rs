@@ -42,9 +42,7 @@ impl<'a> LowerFromSpvPtrs<'a> {
     pub fn lower_global_var(&self, global_var_decl: &mut GlobalVarDecl) {
         let wk = self.wk;
 
-        let (_, pointee_type) = self
-            .as_spv_ptr_type(global_var_decl.type_of_ptr_to)
-            .unwrap();
+        let (_, pointee_type) = self.as_spv_ptr_type(global_var_decl.type_of_ptr_to).unwrap();
         let handle_layout_to_handle = |handle_layout: HandleLayout| match handle_layout {
             shapes::Handle::Opaque(ty) => shapes::Handle::Opaque(ty),
             shapes::Handle::Buffer(addr_space, buf) => {
@@ -203,9 +201,7 @@ impl<'a> LowerFromSpvPtrs<'a> {
 
     /// Attempt to compute a `TypeLayout` for a given (SPIR-V) `Type`.
     fn layout_of(&self, ty: Type) -> Result<TypeLayout, LowerError> {
-        self.layout_cache
-            .layout_of(ty)
-            .map_err(|LayoutError(err)| LowerError(err))
+        self.layout_cache.layout_of(ty).map_err(|LayoutError(err)| LowerError(err))
     }
 }
 
@@ -302,7 +298,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             let (mut op, component_layout) = match layout {
                 TypeLayout::Handle(shapes::Handle::Opaque(_)) => {
                     return Err(LowerError(Diag::bug([
-                        "opaque handles have no sub-components".into(),
+                        "opaque handles have no sub-components".into()
                     ])));
                 }
                 TypeLayout::Handle(shapes::Handle::Buffer(_, buffer_data_layout)) => {
@@ -318,11 +314,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                         ])));
                     }
                     // FIXME(eddyb) handle the weird `OpTypeMatrix` layout when `RowMajor`.
-                    Components::Elements {
-                        stride,
-                        elem,
-                        fixed_len,
-                    } => (
+                    Components::Elements { stride, elem, fixed_len } => (
                         QPtrOp::DynOffset {
                             stride: *stride,
                             // FIXME(eddyb) even without a fixed length, logical
@@ -374,16 +366,10 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             };
 
             // Constant-fold dynamic indexing, whenever possible.
-            if let QPtrOp::DynOffset {
-                stride,
-                index_bounds,
-            } = &op
-            {
+            if let QPtrOp::DynOffset { stride, index_bounds } = &op {
                 let const_offset = const_idx_as_i32(dyn_idx.unwrap())
                     .filter(|const_idx| {
-                        index_bounds
-                            .as_ref()
-                            .map_or(true, |bounds| bounds.contains(const_idx))
+                        index_bounds.as_ref().map_or(true, |bounds| bounds.contains(const_idx))
                     })
                     .and_then(|const_idx| i32::try_from(stride.get()).ok()?.checked_mul(const_idx));
                 if let Some(const_offset) = const_offset {
@@ -428,10 +414,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         let func = func_at_data_inst_frozen.at(());
 
         let mut attrs = data_inst_def.attrs;
-        let DataInstFormDef {
-            ref kind,
-            output_type,
-        } = cx[data_inst_def.form];
+        let DataInstFormDef { ref kind, output_type } = cx[data_inst_def.form];
 
         let spv_inst = match kind {
             DataInstKind::SpvInst(spv_inst) => spv_inst,
@@ -440,10 +423,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
 
         let replacement_kind_and_inputs = if spv_inst.opcode == wk.OpVariable {
             assert!(data_inst_def.inputs.len() <= 1);
-            let (_, var_data_type) = self
-                .lowerer
-                .as_spv_ptr_type(output_type.unwrap())
-                .ok_or_else(|| {
+            let (_, var_data_type) =
+                self.lowerer.as_spv_ptr_type(output_type.unwrap()).ok_or_else(|| {
                     LowerError(Diag::bug(["output type not an `OpTypePointer`".into()]))
                 })?;
             match self.lowerer.layout_of(var_data_type)? {
@@ -476,10 +457,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             };
             assert_eq!(data_inst_def.inputs.len(), 1);
             let ptr = data_inst_def.inputs[0];
-            let (_, pointee_type) = self
-                .lowerer
-                .as_spv_ptr_type(func.at(ptr).type_of(cx))
-                .ok_or_else(|| {
+            let (_, pointee_type) =
+                self.lowerer.as_spv_ptr_type(func.at(ptr).type_of(cx)).ok_or_else(|| {
                     LowerError(Diag::bug(["pointer input not an `OpTypePointer`".into()]))
                 })?;
 
@@ -503,17 +482,13 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                     })?,
 
                 _ => {
-                    return Err(LowerError(Diag::bug([
-                        "buffer data not an `OpTypeStruct`".into()
-                    ])));
+                    return Err(LowerError(Diag::bug(
+                        ["buffer data not an `OpTypeStruct`".into()],
+                    )));
                 }
             };
             let array_stride = match field_layout.components {
-                Components::Elements {
-                    stride,
-                    fixed_len: None,
-                    ..
-                } => stride,
+                Components::Elements { stride, fixed_len: None, .. } => stride,
 
                 _ => {
                     return Err(LowerError(Diag::bug([format!(
@@ -527,10 +502,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             assert_eq!(field_layout.mem_layout.fixed_base.size, 0);
             assert_eq!(field_layout.mem_layout.dyn_unit_stride, Some(array_stride));
             assert_eq!(buf_data_layout.mem_layout.fixed_base.size, field_offset);
-            assert_eq!(
-                buf_data_layout.mem_layout.dyn_unit_stride,
-                Some(array_stride)
-            );
+            assert_eq!(buf_data_layout.mem_layout.dyn_unit_stride, Some(array_stride));
 
             (
                 QPtrOp::BufferDynLen {
@@ -550,10 +522,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         {
             // FIXME(eddyb) avoid erasing the "inbounds" qualifier.
             let base_ptr = data_inst_def.inputs[0];
-            let (_, base_pointee_type) = self
-                .lowerer
-                .as_spv_ptr_type(func.at(base_ptr).type_of(cx))
-                .ok_or_else(|| {
+            let (_, base_pointee_type) =
+                self.lowerer.as_spv_ptr_type(func.at(base_ptr).type_of(cx)).ok_or_else(|| {
                     LowerError(Diag::bug(["pointer input not an `OpTypePointer`".into()]))
                 })?;
 
@@ -574,10 +544,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                 self.try_lower_access_chain(access_chain_base_layout, &data_inst_def.inputs[1..])?;
             // HACK(eddyb) noop cases should probably not use any `DataInst`s at all,
             // but that would require the ability to replace all uses of a `Value`.
-            let final_step = steps.pop().unwrap_or(QPtrChainStep {
-                op: QPtrOp::Offset(0),
-                dyn_idx: None,
-            });
+            let final_step =
+                steps.pop().unwrap_or(QPtrChainStep { op: QPtrOp::Offset(0), dyn_idx: None });
 
             let mut ptr = base_ptr;
             for step in steps {
@@ -615,18 +583,12 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         } else if spv_inst.opcode == wk.OpBitcast {
             let input = data_inst_def.inputs[0];
             // Pointer-to-pointer casts are noops on `qptr`.
-            if self
-                .lowerer
-                .as_spv_ptr_type(func.at(input).type_of(cx))
-                .is_some()
+            if self.lowerer.as_spv_ptr_type(func.at(input).type_of(cx)).is_some()
                 && self.lowerer.as_spv_ptr_type(output_type.unwrap()).is_some()
             {
                 // HACK(eddyb) noop cases should not use any `DataInst`s at all,
                 // but that would require the ability to replace all uses of a `Value`.
-                let noop_step = QPtrChainStep {
-                    op: QPtrOp::Offset(0),
-                    dyn_idx: None,
-                };
+                let noop_step = QPtrChainStep { op: QPtrOp::Offset(0), dyn_idx: None };
 
                 // HACK(eddyb) since we're not removing the `DataInst` entirely,
                 // at least get rid of its attributes to clearly mark it as synthetic.
@@ -646,10 +608,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             // FIXME(eddyb) because this is now interned, it might be better to
             // temporarily track the old output types in a map, and not actually
             // intern the non-`qptr`-output `qptr.*` instructions.
-            form: cx.intern(DataInstFormDef {
-                kind: new_kind,
-                output_type,
-            }),
+            form: cx.intern(DataInstFormDef { kind: new_kind, output_type }),
             inputs: new_inputs,
         }))
     }
@@ -676,43 +635,33 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         }
 
         let mut old_and_new_attrs = None;
-        let get_old_attrs = || AttrSetDef {
-            attrs: cx[data_inst_def.attrs].attrs.clone(),
-        };
+        let get_old_attrs = || AttrSetDef { attrs: cx[data_inst_def.attrs].attrs.clone() };
 
         for (input_idx, &v) in data_inst_def.inputs.iter().enumerate() {
             if let Some((_, pointee)) = self.lowerer.as_spv_ptr_type(func.at(v).type_of(cx)) {
-                old_and_new_attrs
-                    .get_or_insert_with(get_old_attrs)
-                    .attrs
-                    .insert(
-                        QPtrAttr::ToSpvPtrInput {
-                            input_idx: input_idx.try_into().unwrap(),
-                            pointee: OrdAssertEq(pointee),
-                        }
-                        .into(),
-                    );
+                old_and_new_attrs.get_or_insert_with(get_old_attrs).attrs.insert(
+                    QPtrAttr::ToSpvPtrInput {
+                        input_idx: input_idx.try_into().unwrap(),
+                        pointee: OrdAssertEq(pointee),
+                    }
+                    .into(),
+                );
             }
         }
         if let Some(output_type) = data_inst_form_def.output_type {
             if let Some((addr_space, pointee)) = self.lowerer.as_spv_ptr_type(output_type) {
-                old_and_new_attrs
-                    .get_or_insert_with(get_old_attrs)
-                    .attrs
-                    .insert(
-                        QPtrAttr::FromSpvPtrOutput {
-                            addr_space: OrdAssertEq(addr_space),
-                            pointee: OrdAssertEq(pointee),
-                        }
-                        .into(),
-                    );
+                old_and_new_attrs.get_or_insert_with(get_old_attrs).attrs.insert(
+                    QPtrAttr::FromSpvPtrOutput {
+                        addr_space: OrdAssertEq(addr_space),
+                        pointee: OrdAssertEq(pointee),
+                    }
+                    .into(),
+                );
             }
         }
 
         if let Some(LowerError(e)) = extra_error {
-            old_and_new_attrs
-                .get_or_insert_with(get_old_attrs)
-                .push_diag(e);
+            old_and_new_attrs.get_or_insert_with(get_old_attrs).push_diag(e);
         }
 
         if let Some(attrs) = old_and_new_attrs {
@@ -734,9 +683,7 @@ impl Transformer for LowerFromSpvPtrInstsInFunc<'_> {
         &mut self,
         mut func_at_control_node: FuncAtMut<'_, ControlNode>,
     ) {
-        func_at_control_node
-            .reborrow()
-            .inner_in_place_transform_with(self);
+        func_at_control_node.reborrow().inner_in_place_transform_with(self);
 
         let control_node = func_at_control_node.position;
         if let ControlNodeKind::Block { insts } = func_at_control_node.reborrow().def().kind {

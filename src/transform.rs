@@ -240,14 +240,7 @@ pub trait InnerInPlaceTransform {
 impl InnerInPlaceTransform for Module {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         // FIXME(eddyb) this can't be exhaustive because of the private `cx` field.
-        let Self {
-            dialect,
-            debug_info,
-            global_vars: _,
-            funcs: _,
-            exports,
-            ..
-        } = self;
+        let Self { dialect, debug_info, global_vars: _, funcs: _, exports, .. } = self;
 
         transformer.in_place_transform_module_dialect(dialect);
         transformer.in_place_transform_module_debug_info(debug_info);
@@ -256,9 +249,7 @@ impl InnerInPlaceTransform for Module {
         // to be able to use in-place mutable iteration for the former, and
         // `Transformed::map_iter` (i.e. immutable iteration) for the latter.
         for exportee in exports.values_mut() {
-            exportee
-                .inner_transform_with(transformer)
-                .apply_to(exportee);
+            exportee.inner_transform_with(transformer).apply_to(exportee);
         }
         Transformed::map_iter(exports.keys(), |export_key| {
             export_key.inner_transform_with(transformer)
@@ -294,10 +285,7 @@ impl InnerTransform for ExportKey {
         match self {
             Self::LinkName(_) => Transformed::Unchanged,
 
-            Self::SpvEntryPoint {
-                imms,
-                interface_global_vars,
-            } => transform!({
+            Self::SpvEntryPoint { imms, interface_global_vars } => transform!({
                 imms -> Transformed::Unchanged,
                 interface_global_vars -> Transformed::map_iter(
                     interface_global_vars.iter(),
@@ -431,11 +419,7 @@ impl InnerTransform for QPtrMemUsageKind {
 
 impl InnerTransform for TypeDef {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
-        let Self {
-            attrs,
-            ctor,
-            ctor_args,
-        } = self;
+        let Self { attrs, ctor, ctor_args } = self;
 
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
@@ -463,12 +447,7 @@ impl InnerTransform for TypeDef {
 
 impl InnerTransform for ConstDef {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
-        let Self {
-            attrs,
-            ty,
-            ctor,
-            ctor_args,
-        } = self;
+        let Self { attrs, ty, ctor, ctor_args } = self;
 
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
@@ -507,18 +486,10 @@ impl<D: InnerInPlaceTransform> InnerInPlaceTransform for DeclDef<D> {
 
 impl InnerInPlaceTransform for GlobalVarDecl {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self {
-            attrs,
-            type_of_ptr_to,
-            shape,
-            addr_space,
-            def,
-        } = self;
+        let Self { attrs, type_of_ptr_to, shape, addr_space, def } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
-        transformer
-            .transform_type_use(*type_of_ptr_to)
-            .apply_to(type_of_ptr_to);
+        transformer.transform_type_use(*type_of_ptr_to).apply_to(type_of_ptr_to);
         if let Some(shape) = shape {
             match shape {
                 qptr::shapes::GlobalVarShape::TypedInterface(ty) => {
@@ -540,21 +511,14 @@ impl InnerInPlaceTransform for GlobalVarDefBody {
         let Self { initializer } = self;
 
         if let Some(initializer) = initializer {
-            transformer
-                .transform_const_use(*initializer)
-                .apply_to(initializer);
+            transformer.transform_const_use(*initializer).apply_to(initializer);
         }
     }
 }
 
 impl InnerInPlaceTransform for FuncDecl {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self {
-            attrs,
-            ret_type,
-            params,
-            def,
-        } = self;
+        let Self { attrs, ret_type, params, def } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         transformer.transform_type_use(*ret_type).apply_to(ret_type);
@@ -582,16 +546,13 @@ impl InnerTransform for FuncParam {
 impl InnerInPlaceTransform for FuncDefBody {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         match &self.unstructured_cfg {
-            None => self
-                .at_mut_body()
-                .inner_in_place_transform_with(transformer),
+            None => self.at_mut_body().inner_in_place_transform_with(transformer),
             Some(cfg) => {
                 // HACK(eddyb) have to compute this before borrowing any `self` fields.
                 let rpo = cfg.rev_post_order(self);
 
                 for region in rpo {
-                    self.at_mut(region)
-                        .inner_in_place_transform_with(transformer);
+                    self.at_mut(region).inner_in_place_transform_with(transformer);
 
                     let cfg = self.unstructured_cfg.as_mut().unwrap();
                     if let Some(control_inst) = cfg.control_inst_on_exit_from.get_mut(region) {
@@ -607,25 +568,14 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlRegion> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
         // HACK(eddyb) handle the fields of `ControlRegion` separately, to
         // allow reborrowing `FuncAtMut` (for recursing into `ControlNode`s).
-        let ControlRegionDef {
-            inputs,
-            children: _,
-            outputs: _,
-        } = self.reborrow().def();
+        let ControlRegionDef { inputs, children: _, outputs: _ } = self.reborrow().def();
         for input in inputs {
             input.inner_transform_with(transformer).apply_to(input);
         }
 
-        self.reborrow()
-            .at_children()
-            .into_iter()
-            .inner_in_place_transform_with(transformer);
+        self.reborrow().at_children().into_iter().inner_in_place_transform_with(transformer);
 
-        let ControlRegionDef {
-            inputs: _,
-            children: _,
-            outputs,
-        } = self.reborrow().def();
+        let ControlRegionDef { inputs: _, children: _, outputs } = self.reborrow().def();
         for v in outputs {
             transformer.transform_value_use(v).apply_to(v);
         }
@@ -682,15 +632,9 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
                 scrutinee,
                 cases: _,
             } => {
-                transformer
-                    .transform_value_use(scrutinee)
-                    .apply_to(scrutinee);
+                transformer.transform_value_use(scrutinee).apply_to(scrutinee);
             }
-            ControlNodeKind::Loop {
-                initial_inputs,
-                body: _,
-                repeat_condition: _,
-            } => {
+            ControlNodeKind::Loop { initial_inputs, body: _, repeat_condition: _ } => {
                 for v in initial_inputs {
                     transformer.transform_value_use(v).apply_to(v);
                 }
@@ -701,9 +645,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
         // in a `Vec` (or `SmallVec`), which requires workarounds like this.
         for child_region_idx in 0..self.child_regions().len() {
             let child_region = self.child_regions()[child_region_idx];
-            self.reborrow()
-                .at(child_region)
-                .inner_in_place_transform_with(transformer);
+            self.reborrow().at(child_region).inner_in_place_transform_with(transformer);
         }
 
         let ControlNodeDef { kind, outputs } = self.reborrow().def();
@@ -711,20 +653,10 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
         match kind {
             // Fully handled above, before recursing into any child regions.
             ControlNodeKind::Block { insts: _ }
-            | ControlNodeKind::Select {
-                kind: _,
-                scrutinee: _,
-                cases: _,
-            } => {}
+            | ControlNodeKind::Select { kind: _, scrutinee: _, cases: _ } => {}
 
-            ControlNodeKind::Loop {
-                initial_inputs: _,
-                body: _,
-                repeat_condition,
-            } => {
-                transformer
-                    .transform_value_use(repeat_condition)
-                    .apply_to(repeat_condition);
+            ControlNodeKind::Loop { initial_inputs: _, body: _, repeat_condition } => {
+                transformer.transform_value_use(repeat_condition).apply_to(repeat_condition);
             }
         };
 
@@ -750,16 +682,10 @@ impl InnerTransform for ControlNodeOutputDecl {
 
 impl InnerInPlaceTransform for FuncAtMut<'_, DataInst> {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let DataInstDef {
-            attrs,
-            form,
-            inputs,
-        } = self.reborrow().def();
+        let DataInstDef { attrs, form, inputs } = self.reborrow().def();
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
-        transformer
-            .transform_data_inst_form_use(*form)
-            .apply_to(form);
+        transformer.transform_data_inst_form_use(*form).apply_to(form);
         for v in inputs {
             transformer.transform_value_use(v).apply_to(v);
         }
@@ -798,13 +724,7 @@ impl InnerTransform for DataInstFormDef {
 
 impl InnerInPlaceTransform for cfg::ControlInst {
     fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
-        let Self {
-            attrs,
-            kind,
-            inputs,
-            targets: _,
-            target_inputs,
-        } = self;
+        let Self { attrs, kind, inputs, targets: _, target_inputs } = self;
 
         transformer.transform_attr_set_use(*attrs).apply_to(attrs);
         match kind {
@@ -834,14 +754,8 @@ impl InnerTransform for Value {
                 ct -> transformer.transform_const_use(*ct),
             } => Self::Const(ct)),
 
-            Self::ControlRegionInput {
-                region: _,
-                input_idx: _,
-            }
-            | Self::ControlNodeOutput {
-                control_node: _,
-                output_idx: _,
-            }
+            Self::ControlRegionInput { region: _, input_idx: _ }
+            | Self::ControlNodeOutput { control_node: _, output_idx: _ }
             | Self::DataInstOutput(_) => Transformed::Unchanged,
         }
     }

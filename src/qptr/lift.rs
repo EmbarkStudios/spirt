@@ -103,17 +103,10 @@ impl<'a> LiftToSpvPtrs<'a> {
 
         let qptr_usage = self.find_qptr_usage_attr(global_var_decl.attrs)?;
 
-        let shape = global_var_decl
-            .shape
-            .ok_or_else(|| LiftError(Diag::bug(["missing shape".into()])))?;
+        let shape =
+            global_var_decl.shape.ok_or_else(|| LiftError(Diag::bug(["missing shape".into()])))?;
         let (storage_class, pointee_type) = match (global_var_decl.addr_space, shape) {
-            (
-                AddrSpace::Handles,
-                shapes::GlobalVarShape::Handles {
-                    handle,
-                    fixed_count,
-                },
-            ) => {
+            (AddrSpace::Handles, shapes::GlobalVarShape::Handles { handle, fixed_count }) => {
                 let (storage_class, handle_type) = match handle {
                     shapes::Handle::Opaque(ty) => {
                         if self.pointee_type_for_usage(qptr_usage)? != ty {
@@ -159,9 +152,7 @@ impl<'a> LiftToSpvPtrs<'a> {
                 shapes::GlobalVarShape::UntypedData(_) | shapes::GlobalVarShape::TypedInterface(_),
             )
             | (AddrSpace::SpvStorageClass(_), shapes::GlobalVarShape::Handles { .. }) => {
-                return Err(LiftError(Diag::bug([
-                    "mismatched `addr_space` and `shape`".into(),
-                ])));
+                return Err(LiftError(Diag::bug(["mismatched `addr_space` and `shape`".into()])));
             }
         };
         let addr_space = AddrSpace::SpvStorageClass(storage_class);
@@ -200,9 +191,7 @@ impl<'a> LiftToSpvPtrs<'a> {
             attrs: AttrSet::default(),
             ctor: TypeCtor::SpvInst(spv::Inst {
                 opcode: wk.OpTypePointer,
-                imms: [spv::Imm::Short(wk.StorageClass, storage_class)]
-                    .into_iter()
-                    .collect(),
+                imms: [spv::Imm::Short(wk.StorageClass, storage_class)].into_iter().collect(),
             }),
             ctor_args: [TypeCtorArg::Type(pointee_type)].into_iter().collect(),
         })
@@ -216,9 +205,7 @@ impl<'a> LiftToSpvPtrs<'a> {
             QPtrUsage::Handles(shapes::Handle::Buffer(_, data_usage)) => {
                 let attr_spv_decorate_block = Attr::SpvAnnotation(spv::Inst {
                     opcode: wk.OpDecorate,
-                    imms: [spv::Imm::Short(wk.Decoration, wk.Block)]
-                        .into_iter()
-                        .collect(),
+                    imms: [spv::Imm::Short(wk.Decoration, wk.Block)].into_iter().collect(),
                 });
                 match &data_usage.kind {
                     QPtrMemUsageKind::Unused => {
@@ -296,11 +283,7 @@ impl<'a> LiftToSpvPtrs<'a> {
             })
         });
 
-        let spv_opcode = if fixed_len.is_some() {
-            wk.OpTypeArray
-        } else {
-            wk.OpTypeRuntimeArray
-        };
+        let spv_opcode = if fixed_len.is_some() { wk.OpTypeArray } else { wk.OpTypeRuntimeArray };
 
         Ok(self.cx.intern(TypeDef {
             attrs: stride_attrs.unwrap_or_default(),
@@ -375,9 +358,7 @@ impl<'a> LiftToSpvPtrs<'a> {
             ty: self.u32_type(),
             ctor: ConstCtor::SpvInst(spv::Inst {
                 opcode: wk.OpConstant,
-                imms: [spv::Imm::Short(wk.LiteralContextDependentNumber, x)]
-                    .into_iter()
-                    .collect(),
+                imms: [spv::Imm::Short(wk.LiteralContextDependentNumber, x)].into_iter().collect(),
             }),
             ctor_args: [].into_iter().collect(),
         })
@@ -385,9 +366,7 @@ impl<'a> LiftToSpvPtrs<'a> {
 
     /// Attempt to compute a `TypeLayout` for a given (SPIR-V) `Type`.
     fn layout_of(&self, ty: Type) -> Result<TypeLayout, LiftError> {
-        self.layout_cache
-            .layout_of(ty)
-            .map_err(|LayoutError(err)| LiftError(err))
+        self.layout_cache.layout_of(ty).map_err(|LayoutError(err)| LiftError(err))
     }
 }
 
@@ -507,9 +486,9 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                         return Err(LiftError(Diag::bug(["cannot index single Handle".into()])));
                     }
                     TypeLayout::Concrete(_) => {
-                        return Err(LiftError(Diag::bug([
-                            "cannot index memory as handles".into()
-                        ])));
+                        return Err(LiftError(Diag::bug(
+                            ["cannot index memory as handles".into()],
+                        )));
                     }
                 };
                 let handle_type = match handle {
@@ -555,10 +534,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     ..data_inst_def.clone()
                 }
             }
-            &DataInstKind::QPtr(QPtrOp::BufferDynLen {
-                fixed_base_size,
-                dyn_unit_stride,
-            }) => {
+            &DataInstKind::QPtr(QPtrOp::BufferDynLen { fixed_base_size, dyn_unit_stride }) => {
                 let buf_ptr = data_inst_def.inputs[0];
                 let (_, buf_layout) = type_of_val_as_spv_ptr_with_layout(buf_ptr)?;
 
@@ -576,10 +552,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                                         == Some(dyn_unit_stride)
                                     && matches!(
                                         last_field.components,
-                                        Components::Elements {
-                                            fixed_len: None,
-                                            ..
-                                        }
+                                        Components::Elements { fixed_len: None, .. }
                                     )
                             }) =>
                     {
@@ -659,10 +632,9 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     };
 
                     let idx_as_i32 = i32::try_from(idx).ok().ok_or_else(|| {
-                        LiftError(Diag::bug([format!(
-                            "{idx} not representable as a positive s32"
-                        )
-                        .into()]))
+                        LiftError(Diag::bug([
+                            format!("{idx} not representable as a positive s32").into()
+                        ]))
                     })?;
                     access_chain_inputs
                         .push(Value::Const(self.lifter.const_u32(idx_as_i32 as u32)));
@@ -713,10 +685,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     }
                 }
             }
-            DataInstKind::QPtr(QPtrOp::DynOffset {
-                stride,
-                index_bounds,
-            }) => {
+            DataInstKind::QPtr(QPtrOp::DynOffset { stride, index_bounds }) => {
                 let base_ptr = data_inst_def.inputs[0];
                 let (addr_space, layout) = type_of_val_as_spv_ptr_with_layout(base_ptr)?;
                 let mut layout = match layout {
@@ -728,11 +697,8 @@ impl LiftToSpvPtrInstsInFunc<'_> {
 
                 let mut access_chain_inputs: SmallVec<_> = [base_ptr].into_iter().collect();
                 loop {
-                    if let Components::Elements {
-                        stride: layout_stride,
-                        elem,
-                        fixed_len,
-                    } = &layout.components
+                    if let Components::Elements { stride: layout_stride, elem, fixed_len } =
+                        &layout.components
                     {
                         if layout_stride == stride
                             && Ok(index_bounds.clone())
@@ -779,10 +745,9 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     };
 
                     let idx_as_i32 = i32::try_from(idx).ok().ok_or_else(|| {
-                        LiftError(Diag::bug([format!(
-                            "{idx} not representable as a positive s32"
-                        )
-                        .into()]))
+                        LiftError(Diag::bug([
+                            format!("{idx} not representable as a positive s32").into()
+                        ]))
                     })?;
                     access_chain_inputs
                         .push(Value::Const(self.lifter.const_u32(idx_as_i32 as u32)));
@@ -895,10 +860,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                                     .push((input_idx, access_chain_data_inst_def));
                             }
                         }
-                        Attr::QPtr(QPtrAttr::FromSpvPtrOutput {
-                            addr_space,
-                            pointee,
-                        }) => {
+                        Attr::QPtr(QPtrAttr::FromSpvPtrOutput { addr_space, pointee }) => {
                             assert!(from_spv_ptr_output.is_none());
                             from_spv_ptr_output = Some((addr_space.0, pointee.0));
                         }
@@ -987,9 +949,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                 return Err(LiftError(Diag::bug(["cannot access whole Buffer".into()])));
             }
             (_, TypeLayout::HandleArray(..)) => {
-                return Err(LiftError(Diag::bug([
-                    "cannot access whole HandleArray".into()
-                ])));
+                return Err(LiftError(Diag::bug(["cannot access whole HandleArray".into()])));
             }
             (_, TypeLayout::Concrete(access_layout))
                 if access_layout.mem_layout.dyn_unit_stride.is_some() =>
@@ -1000,14 +960,10 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                 return Err(LiftError(Diag::bug(["cannot access into Buffer".into()])));
             }
             (TypeLayout::Handle(_), TypeLayout::Concrete(_)) => {
-                return Err(LiftError(Diag::bug([
-                    "cannot access Handle as memory".into()
-                ])));
+                return Err(LiftError(Diag::bug(["cannot access Handle as memory".into()])));
             }
             (TypeLayout::Concrete(_), TypeLayout::Handle(_)) => {
-                return Err(LiftError(Diag::bug([
-                    "cannot access memory as Handle".into()
-                ])));
+                return Err(LiftError(Diag::bug(["cannot access memory as Handle".into()])));
             }
 
             (
@@ -1026,9 +982,8 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                 while pointee_layout.original_type != access_layout.original_type {
                     let idx = {
                         let offset_range = 0..access_layout.mem_layout.fixed_base.size;
-                        let mut component_indices = pointee_layout
-                            .components
-                            .find_components_containing(offset_range);
+                        let mut component_indices =
+                            pointee_layout.components.find_components_containing(offset_range);
                         match (component_indices.next(), component_indices.next()) {
                             (None, _) => {
                                 return Err(LiftError(Diag::bug([
@@ -1048,10 +1003,9 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     };
 
                     let idx_as_i32 = i32::try_from(idx).ok().ok_or_else(|| {
-                        LiftError(Diag::bug([format!(
-                            "{idx} not representable as a positive s32"
-                        )
-                        .into()]))
+                        LiftError(Diag::bug([
+                            format!("{idx} not representable as a positive s32").into()
+                        ]))
                     })?;
                     access_chain_inputs
                         .push(Value::Const(self.lifter.const_u32(idx_as_i32 as u32)));
@@ -1157,9 +1111,7 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
         &mut self,
         mut func_at_control_node: FuncAtMut<'_, ControlNode>,
     ) {
-        func_at_control_node
-            .reborrow()
-            .inner_in_place_transform_with(self);
+        func_at_control_node.reborrow().inner_in_place_transform_with(self);
 
         let control_node = func_at_control_node.position;
         if let ControlNodeKind::Block { insts } = func_at_control_node.reborrow().def().kind {
@@ -1170,9 +1122,8 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
                     let data_inst_def = func_at_inst.reborrow().def();
                     let data_inst_form_def = &self.lifter.cx[data_inst_def.form];
                     if let DataInstKind::QPtr(_) = data_inst_form_def.kind {
-                        lifted = Err(LiftError(Diag::bug([
-                            "unimplemented qptr instruction".into()
-                        ])));
+                        lifted =
+                            Err(LiftError(Diag::bug(["unimplemented qptr instruction".into()])));
                     } else if let Some(ty) = data_inst_form_def.output_type {
                         if matches!(self.lifter.cx[ty].ctor, TypeCtor::QPtr) {
                             lifted = Err(LiftError(Diag::bug([
@@ -1198,10 +1149,8 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
                         // HACK(eddyb) do not add redundant errors to `qptr::analyze` bugs.
                         self.func_has_qptr_analysis_bug_diags = self
                             .func_has_qptr_analysis_bug_diags
-                            || self.lifter.cx[data_inst_def.attrs]
-                                .attrs
-                                .iter()
-                                .any(|attr| match attr {
+                            || self.lifter.cx[data_inst_def.attrs].attrs.iter().any(|attr| {
+                                match attr {
                                     Attr::Diagnostics(diags) => {
                                         diags.0.iter().any(|diag| match diag.level {
                                             DiagLevel::Bug(loc) => {
@@ -1212,7 +1161,8 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
                                         })
                                     }
                                     _ => false,
-                                });
+                                }
+                            });
 
                         if !self.func_has_qptr_analysis_bug_diags {
                             data_inst_def.attrs.push_diag(&self.lifter.cx, e);

@@ -153,9 +153,7 @@ pub fn resolve_imports(module: &mut Module) {
 
     // Seed the queues starting from the module exports.
     for exportee in module.exports.values_mut() {
-        exportee
-            .inner_transform_with(&mut resolver)
-            .apply_to(exportee);
+        exportee.inner_transform_with(&mut resolver).apply_to(exportee);
     }
 
     // Process the queues until they're all empty.
@@ -265,9 +263,8 @@ impl Transformer for ImportResolver<'_> {
         if let Some(&cached) = self.transformed_types.get(&ty) {
             return cached;
         }
-        let transformed = self
-            .transform_type_def(&self.cx[ty])
-            .map(|ty_def| self.cx.intern(ty_def));
+        let transformed =
+            self.transform_type_def(&self.cx[ty]).map(|ty_def| self.cx.intern(ty_def));
         self.transformed_types.insert(ty, transformed);
         transformed
     }
@@ -275,9 +272,8 @@ impl Transformer for ImportResolver<'_> {
         if let Some(&cached) = self.transformed_consts.get(&ct) {
             return cached;
         }
-        let transformed = self
-            .transform_const_def(&self.cx[ct])
-            .map(|ct_def| self.cx.intern(ct_def));
+        let transformed =
+            self.transform_const_def(&self.cx[ct]).map(|ct_def| self.cx.intern(ct_def));
         self.transformed_consts.insert(ct, transformed);
         transformed
     }
@@ -291,8 +287,7 @@ impl Transformer for ImportResolver<'_> {
         let transformed = self
             .transform_data_inst_form_def(&self.cx[data_inst_form])
             .map(|data_inst_form_def| self.cx.intern(data_inst_form_def));
-        self.transformed_data_inst_forms
-            .insert(data_inst_form, transformed);
+        self.transformed_data_inst_forms.insert(data_inst_form, transformed);
         transformed
     }
 

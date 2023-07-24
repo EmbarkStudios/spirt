@@ -33,10 +33,7 @@ pub enum QPtrAttr {
     /// (i.e. logical pointer semantics, unsuited for e.g. `OpPtrAccessChain`).
     //
     // FIXME(eddyb) reduce usage by modeling more of SPIR-V inside SPIR-T.
-    ToSpvPtrInput {
-        input_idx: u32,
-        pointee: OrdAssertEq<Type>,
-    },
+    ToSpvPtrInput { input_idx: u32, pointee: OrdAssertEq<Type> },
 
     /// When applied to a `DataInst` with a `QPtr`-typed output value,
     /// this describes the original `OpTypePointer` produced by an unknown
@@ -95,10 +92,7 @@ pub struct QPtrMemUsage {
 }
 
 impl QPtrMemUsage {
-    pub const UNUSED: Self = Self {
-        max_size: Some(0),
-        kind: QPtrMemUsageKind::Unused,
-    };
+    pub const UNUSED: Self = Self { max_size: Some(0), kind: QPtrMemUsageKind::Unused };
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]

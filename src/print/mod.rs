@@ -197,14 +197,8 @@ enum Use {
 
     // FIXME(eddyb) these are `Value`'s variants except `Const`, maybe `Use`
     // should just use `Value` and assert it's never `Const`?
-    ControlRegionInput {
-        region: ControlRegion,
-        input_idx: u32,
-    },
-    ControlNodeOutput {
-        control_node: ControlNode,
-        output_idx: u32,
-    },
+    ControlRegionInput { region: ControlRegion, input_idx: u32 },
+    ControlNodeOutput { control_node: ControlNode, output_idx: u32 },
     DataInstOutput(DataInst),
 
     // NOTE(eddyb) these overlap somewhat with other cases, but they're always
@@ -221,13 +215,9 @@ impl From<Value> for Use {
             Value::ControlRegionInput { region, input_idx } => {
                 Use::ControlRegionInput { region, input_idx }
             }
-            Value::ControlNodeOutput {
-                control_node,
-                output_idx,
-            } => Use::ControlNodeOutput {
-                control_node,
-                output_idx,
-            },
+            Value::ControlNodeOutput { control_node, output_idx } => {
+                Use::ControlNodeOutput { control_node, output_idx }
+            }
             Value::DataInstOutput(inst) => Use::DataInstOutput(inst),
         }
     }
@@ -286,10 +276,7 @@ impl<'a> Plan<'a> {
     pub fn for_versions(
         cx: &'a Context,
         versions: impl IntoIterator<
-            Item = (
-                impl Into<String>,
-                &'a (impl Visit + Print<Output = pretty::Fragment> + 'a),
-            ),
+            Item = (impl Into<String>, &'a (impl Visit + Print<Output = pretty::Fragment> + 'a)),
         >,
     ) -> Self {
         let mut plan = Self {
@@ -326,9 +313,8 @@ impl<'a> Plan<'a> {
             // Merge per-`AttrSet` unique `OpName`s (from second version onward).
             if !combined_attrs_to_unique_spv_name.is_empty() {
                 for (attrs, unique_spv_name) in plan.attrs_to_unique_spv_name.drain() {
-                    let combined = combined_attrs_to_unique_spv_name
-                        .entry(attrs)
-                        .or_insert(unique_spv_name);
+                    let combined =
+                        combined_attrs_to_unique_spv_name.entry(attrs).or_insert(unique_spv_name);
 
                     *combined = match (*combined, unique_spv_name) {
                         // HACK(eddyb) can use pointer comparison because both
@@ -370,10 +356,7 @@ impl<'a> Plan<'a> {
         }
 
         // Group all `CxInterned`s in a single top-level `Node`.
-        *self
-            .use_counts
-            .entry(Use::Node(Node::AllCxInterned))
-            .or_default() += 1;
+        *self.use_counts.entry(Use::Node(Node::AllCxInterned)).or_default() += 1;
 
         *self.use_counts.entry(use_kind).or_default() += 1;
     }
@@ -415,8 +398,7 @@ impl<'a> Plan<'a> {
                 assert!(
                     old_ptr_eq_new,
                     "print: same `{}` node has multiple distinct definitions in `Plan`",
-                    node.keyword_and_name_prefix()
-                        .map_or_else(|s| s, |(_, s)| s)
+                    node.keyword_and_name_prefix().map_or_else(|s| s, |(_, s)| s)
                 );
                 return;
             }
@@ -467,8 +449,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
                     }
 
                     // Invalidate the old user of this SPIR-V `OpName`.
-                    self.attrs_to_unique_spv_name
-                        .insert(claimant, Err(AmbiguousName));
+                    self.attrs_to_unique_spv_name.insert(claimant, Err(AmbiguousName));
                 }
 
                 // Either we just found a conflict, or one already existed.
@@ -601,10 +582,8 @@ impl<'a> Visitor<'a> for Plan<'a> {
                 for region in cfg.rev_post_order(func_def_body) {
                     if let Some(control_inst) = cfg.control_inst_on_exit_from.get(region) {
                         for &target in &control_inst.targets {
-                            *self
-                                .use_counts
-                                .entry(Use::ControlRegionLabel(target))
-                                .or_default() += 1;
+                            *self.use_counts.entry(Use::ControlRegionLabel(target)).or_default() +=
+                                1;
                         }
                     }
                 }
@@ -643,20 +622,15 @@ impl Plan<'_> {
     /// and the "root" itself (useful for nesting pretty-printed SPIR-T elsewhere).
     pub fn pretty_print_deps_and_root_separately(
         &self,
-    ) -> (
-        Versions<pretty::FragmentPostLayout>,
-        Versions<pretty::FragmentPostLayout>,
-    ) {
+    ) -> (Versions<pretty::FragmentPostLayout>, Versions<pretty::FragmentPostLayout>) {
         let printer = Printer::new(self);
         (
-            self.print_all_nodes_and_or_root(&printer, true, false)
-                .map_pretty_fragments(|fragment| {
-                    fragment.layout_with_max_line_width(MAX_LINE_WIDTH)
-                }),
-            self.print_all_nodes_and_or_root(&printer, false, true)
-                .map_pretty_fragments(|fragment| {
-                    fragment.layout_with_max_line_width(MAX_LINE_WIDTH)
-                }),
+            self.print_all_nodes_and_or_root(&printer, true, false).map_pretty_fragments(
+                |fragment| fragment.layout_with_max_line_width(MAX_LINE_WIDTH),
+            ),
+            self.print_all_nodes_and_or_root(&printer, false, true).map_pretty_fragments(
+                |fragment| fragment.layout_with_max_line_width(MAX_LINE_WIDTH),
+            ),
         )
     }
 }
@@ -795,13 +769,7 @@ impl<'a> Printer<'a> {
                     Node::AllCxInterned | Node::ModuleDialect | Node::ModuleDebugInfo,
                 ) = use_kind
                 {
-                    return (
-                        use_kind,
-                        UseStyle::Anon {
-                            parent_func: None,
-                            idx: 0,
-                        },
-                    );
+                    return (use_kind, UseStyle::Anon { parent_func: None, idx: 0 });
                 }
 
                 let mut deduped_attrs_across_versions = SmallSet::<_, 8>::default();
@@ -834,13 +802,7 @@ impl<'a> Printer<'a> {
                 if let Some(name) =
                     try_claim_name_from_attrs_across_versions(deduped_attrs_across_versions.iter())
                 {
-                    return (
-                        use_kind,
-                        UseStyle::Named {
-                            parent_func: None,
-                            name,
-                        },
-                    );
+                    return (use_kind, UseStyle::Named { parent_func: None, name });
                 }
 
                 let inline = match use_kind {
@@ -924,22 +886,16 @@ impl<'a> Printer<'a> {
                     };
                     let idx = *counter;
                     *counter += 1;
-                    UseStyle::Anon {
-                        parent_func: None,
-                        idx,
-                    }
+                    UseStyle::Anon { parent_func: None, idx }
                 };
                 (use_kind, style)
             })
             .collect();
 
-        let all_funcs = plan
-            .use_counts
-            .keys()
-            .filter_map(|&use_kind| match use_kind {
-                Use::Node(Node::Func(func)) => Some(func),
-                _ => None,
-            });
+        let all_funcs = plan.use_counts.keys().filter_map(|&use_kind| match use_kind {
+            Use::Node(Node::Func(func)) => Some(func),
+            _ => None,
+        });
         for func in all_funcs {
             assert!(matches!(
                 use_styles.get(&Use::Node(Node::Func(func))),
@@ -961,10 +917,9 @@ impl<'a> Printer<'a> {
 
             let func_def_bodies_across_versions = plan.versions.iter().filter_map(|version| {
                 match version.node_defs.get(&Node::Func(func))? {
-                    NodeDef::Func(FuncDecl {
-                        def: DeclDef::Present(func_def_body),
-                        ..
-                    }) => Some(func_def_body),
+                    NodeDef::Func(FuncDecl { def: DeclDef::Present(func_def_body), .. }) => {
+                        Some(func_def_body)
+                    }
 
                     _ => None,
                 }
@@ -984,18 +939,12 @@ impl<'a> Printer<'a> {
                     // FIXME(eddyb) should labels have names?
                     define(Use::ControlRegionLabel(region), None);
 
-                    let ControlRegionDef {
-                        inputs,
-                        children,
-                        outputs: _,
-                    } = func_def_body.at(region).def();
+                    let ControlRegionDef { inputs, children, outputs: _ } =
+                        func_def_body.at(region).def();
 
                     for (i, input_decl) in inputs.iter().enumerate() {
                         define(
-                            Use::ControlRegionInput {
-                                region,
-                                input_idx: i.try_into().unwrap(),
-                            },
+                            Use::ControlRegionInput { region, input_idx: i.try_into().unwrap() },
                             Some(input_decl.attrs),
                         );
                     }
@@ -1067,10 +1016,9 @@ impl<'a> Printer<'a> {
             // but only if it's actually used (or is an alignment anchor).
             for (use_kind, def) in intra_func_defs_across_versions {
                 let (counter, use_style_slot) = match use_kind {
-                    Use::ControlRegionLabel(_) => (
-                        &mut control_region_label_counter,
-                        use_styles.get_mut(&use_kind),
-                    ),
+                    Use::ControlRegionLabel(_) => {
+                        (&mut control_region_label_counter, use_styles.get_mut(&use_kind))
+                    }
 
                     Use::ControlRegionInput { .. }
                     | Use::ControlNodeOutput { .. }
@@ -1103,11 +1051,7 @@ impl<'a> Printer<'a> {
             }
         }
 
-        Self {
-            cx,
-            use_styles,
-            attrs_with_spv_name_in_use,
-        }
+        Self { cx, use_styles, attrs_with_spv_name_in_use }
     }
 
     pub fn cx(&self) -> &'a Context {
@@ -1161,10 +1105,7 @@ impl Printer<'_> {
         pretty::Styles::color(pretty::palettes::simple::ORANGE)
     }
     fn spv_op_style(&self) -> pretty::Styles {
-        pretty::Styles {
-            thickness: Some(3),
-            ..self.spv_base_style()
-        }
+        pretty::Styles { thickness: Some(3), ..self.spv_base_style() }
     }
     fn spv_enumerand_name_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::CYAN)
@@ -1241,9 +1182,7 @@ impl<'a> Printer<'a> {
     /// Pretty-print a `name: ` style "named argument" prefix.
     fn pretty_named_argument_prefix(&self, name: impl Into<Cow<'static, str>>) -> pretty::Fragment {
         // FIXME(eddyb) avoid the cost of allocating here.
-        self.named_argument_label_style()
-            .apply(format!("{}: ", name.into()))
-            .into()
+        self.named_argument_label_style().apply(format!("{}: ", name.into())).into()
     }
 
     /// Pretty-print a `: T` style "type ascription" suffix.
@@ -1261,8 +1200,7 @@ impl<'a> Printer<'a> {
         opcode: spv::spec::Opcode,
     ) -> pretty::Fragment {
         pretty::Fragment::new([
-            self.demote_style_for_namespace_prefix(self.spv_base_style())
-                .apply("spv."),
+            self.demote_style_for_namespace_prefix(self.spv_base_style()).apply("spv."),
             opcode_name_style.apply(opcode.name()),
         ])
     }
@@ -1372,10 +1310,7 @@ impl<'a> Printer<'a> {
         )
         .filter_map(|operand| match operand.tokens[..] {
             [spv::print::Token::Id(None)]
-            | [
-                spv::print::Token::OperandName(_),
-                spv::print::Token::Id(None),
-            ] => None,
+            | [spv::print::Token::OperandName(_), spv::print::Token::Id(None)] => None,
 
             _ => Some(self.pretty_spv_print_tokens_for_operand(operand)),
         })
@@ -1413,21 +1348,14 @@ impl AttrsAndDef {
     /// gets hoised to before (some non-empty) `attrs`, so that navigating to that
     /// anchor doesn't "hide" those attributes (requiring scrolling to see them).
     fn insert_name_before_def(self, name: impl Into<pretty::Fragment>) -> pretty::Fragment {
-        let Self {
-            attrs,
-            def_without_name,
-        } = self;
+        let Self { attrs, def_without_name } = self;
 
         let mut maybe_hoisted_anchor = pretty::Fragment::default();
         let mut maybe_def_start_anchor = pretty::Fragment::default();
         let mut maybe_def_end_anchor = pretty::Fragment::default();
         let mut name = name.into();
         if let [
-            pretty::Node::Anchor {
-                is_def: ref mut original_anchor_is_def @ true,
-                anchor,
-                text: _,
-            },
+            pretty::Node::Anchor { is_def: ref mut original_anchor_is_def @ true, anchor, text: _ },
             ..,
         ] = &mut name.nodes[..]
         {
@@ -1446,14 +1374,9 @@ impl AttrsAndDef {
             // in use), to help with `multiversion` alignment, as long as
             // there's no alignment anchor already starting the definition.
             let has_alignment_anchor = match &def_without_name.nodes[..] {
-                [
-                    pretty::Node::Anchor {
-                        is_def: true,
-                        anchor,
-                        text,
-                    },
-                    ..,
-                ] => anchor.contains(Use::ANCHOR_ALIGNMENT_NAME_PREFIX) && text.is_empty(),
+                [pretty::Node::Anchor { is_def: true, anchor, text }, ..] => {
+                    anchor.contains(Use::ANCHOR_ALIGNMENT_NAME_PREFIX) && text.is_empty()
+                }
 
                 _ => false,
             };
@@ -1499,14 +1422,7 @@ impl Use {
     fn print_as_ref_or_def(&self, printer: &Printer<'_>, is_def: bool) -> pretty::Fragment {
         let style = printer.use_styles.get(self).unwrap_or(&UseStyle::Inline);
         match style {
-            &UseStyle::Anon {
-                parent_func,
-                idx: _,
-            }
-            | &UseStyle::Named {
-                parent_func,
-                name: _,
-            } => {
+            &UseStyle::Anon { parent_func, idx: _ } | &UseStyle::Named { parent_func, name: _ } => {
                 // FIXME(eddyb) should this be used as part of `UseStyle`'s definition?
                 #[derive(Debug, PartialEq, Eq)]
                 enum Suffix<'a> {
@@ -1582,9 +1498,7 @@ impl Use {
                     // prepending a prefix of the form `F123.`.
                     let func = Use::Node(Node::Func(func));
                     write!(anchor, "{}", func.keyword_and_name_prefix().1).unwrap();
-                    suffix_of(&printer.use_styles[&func])
-                        .write_escaped_to(&mut anchor)
-                        .unwrap();
+                    suffix_of(&printer.use_styles[&func]).write_escaped_to(&mut anchor).unwrap();
                     anchor += ".";
                 }
                 anchor += name_prefix;
@@ -1631,15 +1545,14 @@ impl Use {
                 mk_anchor(anchor, name).into()
             }
             UseStyle::Inline => match *self {
-                Self::CxInterned(interned) => interned
-                    .print(printer)
-                    .insert_name_before_def(pretty::Fragment::default()),
+                Self::CxInterned(interned) => {
+                    interned.print(printer).insert_name_before_def(pretty::Fragment::default())
+                }
                 Self::Node(node) => printer
                     .error_style()
                     .apply(format!(
                         "/* undefined {} */_",
-                        node.keyword_and_name_prefix()
-                            .map_or_else(|s| s, |(s, _)| s)
+                        node.keyword_and_name_prefix().map_or_else(|s| s, |(s, _)| s)
                     ))
                     .into(),
                 Self::ControlRegionLabel(_)
@@ -1867,15 +1780,9 @@ impl Print for spv::Dialect {
                 "(",
                 [pretty::Fragment::new([
                     printer.pretty_named_argument_prefix("version"),
-                    printer
-                        .numeric_literal_style()
-                        .apply(format!("{version_major}"))
-                        .into(),
+                    printer.numeric_literal_style().apply(format!("{version_major}")).into(),
                     ".".into(),
-                    printer
-                        .numeric_literal_style()
-                        .apply(format!("{version_minor}"))
-                        .into(),
+                    printer.numeric_literal_style().apply(format!("{version_minor}")).into(),
                 ])]
                 .into_iter()
                 .chain((!extensions.is_empty()).then(|| {
@@ -1883,9 +1790,7 @@ impl Print for spv::Dialect {
                         printer.pretty_named_argument_prefix("extensions"),
                         pretty::join_comma_sep(
                             "{",
-                            extensions
-                                .iter()
-                                .map(|ext| printer.pretty_string_literal(ext)),
+                            extensions.iter().map(|ext| printer.pretty_string_literal(ext)),
                             "}",
                         ),
                     ])
@@ -2112,10 +2017,7 @@ impl Print for ExportKey {
 
             // HACK(eddyb) `interface_global_vars` should be recomputed by
             // `spv::lift` anyway, so hiding them here mimics that.
-            Self::SpvEntryPoint {
-                imms,
-                interface_global_vars: _,
-            } => {
+            Self::SpvEntryPoint { imms, interface_global_vars: _ } => {
                 let wk = &spv::spec::Spec::get().well_known;
 
                 printer.pretty_spv_inst(printer.spv_op_style(), wk.OpEntryPoint, imms, [None])
@@ -2146,12 +2048,10 @@ impl CxInterned {
                 _ => None,
             })
             .map(|interned| {
-                interned
-                    .print(printer)
-                    .insert_name_before_def(pretty::Fragment::new([
-                        Use::CxInterned(interned).print_as_def(printer),
-                        " = ".into(),
-                    ]))
+                interned.print(printer).insert_name_before_def(pretty::Fragment::new([
+                    Use::CxInterned(interned).print_as_def(printer),
+                    " = ".into(),
+                ]))
             })
             .intersperse({
                 // Separate top-level definitions with empty lines.
@@ -2298,10 +2198,7 @@ impl Print for Attr {
                         )]),
                     ),
 
-                    QPtrAttr::FromSpvPtrOutput {
-                        addr_space,
-                        pointee,
-                    } => (
+                    QPtrAttr::FromSpvPtrOutput { addr_space, pointee } => (
                         "from_spv_ptr_output",
                         pretty::join_comma_sep(
                             "(",
@@ -2310,10 +2207,9 @@ impl Print for Attr {
                         ),
                     ),
 
-                    QPtrAttr::Usage(usage) => (
-                        "usage",
-                        pretty::join_comma_sep("(", [usage.0.print(printer)], ")"),
-                    ),
+                    QPtrAttr::Usage(usage) => {
+                        ("usage", pretty::join_comma_sep("(", [usage.0.print(printer)], ")"))
+                    }
                 };
                 pretty::Fragment::new([
                     printer
@@ -2343,11 +2239,7 @@ impl Print for Attr {
                     printer.pretty_spv_inst(printer.attr_style(), *opcode, imms, [None])
                 }
             }
-            &Attr::SpvDebugLine {
-                file_path,
-                line,
-                col,
-            } => {
+            &Attr::SpvDebugLine { file_path, line, col } => {
                 // HACK(eddyb) Rust-GPU's column numbers seem
                 // off-by-one wrt what e.g. VSCode expects
                 // for `:line:col` syntax, but it's hard to
@@ -2395,10 +2287,7 @@ impl Print for QPtrUsage {
             QPtrUsage::Handles(qptr::shapes::Handle::Opaque(ty)) => ty.print(printer),
             QPtrUsage::Handles(qptr::shapes::Handle::Buffer(_, data_usage)) => {
                 pretty::Fragment::new([
-                    printer
-                        .declarative_keyword_style()
-                        .apply("buffer_data")
-                        .into(),
+                    printer.declarative_keyword_style().apply("buffer_data").into(),
                     pretty::join_comma_sep("(", [data_usage.print(printer)], ")"),
                 ])
             }
@@ -2461,11 +2350,7 @@ impl Print for QPtrMemUsage {
 impl Print for TypeDef {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self {
-            attrs,
-            ctor,
-            ctor_args,
-        } = self;
+        let Self { attrs, ctor, ctor_args } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
@@ -2483,11 +2368,7 @@ impl Print for TypeDef {
                     _ => unreachable!(),
                 };
 
-                Some(if signed {
-                    kw(format!("s{width}"))
-                } else {
-                    kw(format!("u{width}"))
-                })
+                Some(if signed { kw(format!("s{width}")) } else { kw(format!("u{width}")) })
             } else if opcode == wk.OpTypeFloat {
                 let width = match imms[..] {
                     [spv::Imm::Short(_, width)] => width,
@@ -2506,10 +2387,7 @@ impl Print for TypeDef {
                 Some(pretty::Fragment::new([
                     elem_ty.print(printer),
                     "×".into(),
-                    printer
-                        .numeric_literal_style()
-                        .apply(format!("{elem_count}"))
-                        .into(),
+                    printer.numeric_literal_style().apply(format!("{elem_count}")).into(),
                 ]))
             } else {
                 None
@@ -2551,12 +2429,7 @@ impl Print for TypeDef {
 impl Print for ConstDef {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self {
-            attrs,
-            ty,
-            ctor,
-            ctor_args,
-        } = self;
+        let Self { attrs, ty, ctor, ctor_args } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
@@ -2588,10 +2461,7 @@ impl Print for ConstDef {
 
                 if let (
                     Some(raw_bits),
-                    &TypeCtor::SpvInst(spv::Inst {
-                        opcode: ty_opcode,
-                        imms: ref ty_imms,
-                    }),
+                    &TypeCtor::SpvInst(spv::Inst { opcode: ty_opcode, imms: ref ty_imms }),
                 ) = (raw_bits, &printer.cx[*ty].ctor)
                 {
                     if ty_opcode == wk.OpTypeInt {
@@ -2716,13 +2586,7 @@ impl Print for Import {
 impl Print for GlobalVarDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self {
-            attrs,
-            type_of_ptr_to,
-            shape,
-            addr_space,
-            def,
-        } = self;
+        let Self { attrs, type_of_ptr_to, shape, addr_space, def } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
@@ -2733,10 +2597,7 @@ impl Print for GlobalVarDecl {
 
             match &type_of_ptr_to_def.ctor {
                 TypeCtor::QPtr if shape.is_some() => match shape.unwrap() {
-                    qptr::shapes::GlobalVarShape::Handles {
-                        handle,
-                        fixed_count,
-                    } => {
+                    qptr::shapes::GlobalVarShape::Handles { handle, fixed_count } => {
                         let handle = match handle {
                             qptr::shapes::Handle::Opaque(ty) => ty.print(printer),
                             qptr::shapes::Handle::Buffer(addr_space, buf) => {
@@ -2872,10 +2733,7 @@ impl Print for GlobalVarDecl {
 
         let def_without_name = pretty::Fragment::new([header, pretty::join_space("", body)]);
 
-        AttrsAndDef {
-            attrs: attrs.print(printer),
-            def_without_name,
-        }
+        AttrsAndDef { attrs: attrs.print(printer), def_without_name }
     }
 }
 
@@ -2895,12 +2753,7 @@ impl Print for AddrSpace {
 impl Print for FuncDecl {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self {
-            attrs,
-            ret_type,
-            params,
-            def,
-        } = self;
+        let Self { attrs, ret_type, params, def } = self;
 
         let sig = pretty::Fragment::new([
             pretty::join_comma_sep(
@@ -2990,10 +2843,7 @@ impl Print for FuncDecl {
             ]),
         };
 
-        AttrsAndDef {
-            attrs: attrs.print(printer),
-            def_without_name,
-        }
+        AttrsAndDef { attrs: attrs.print(printer), def_without_name }
     }
 }
 
@@ -3012,11 +2862,7 @@ impl Print for FuncParam {
 impl Print for FuncAt<'_, ControlRegion> {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        let ControlRegionDef {
-            inputs: _,
-            children,
-            outputs,
-        } = self.def();
+        let ControlRegionDef { inputs: _, children, outputs } = self.def();
 
         // NOTE(eddyb) `inputs` are always printed by the parent.
 
@@ -3111,21 +2957,14 @@ impl Print for FuncAt<'_, ControlNode> {
                         .flat_map(|entry| [pretty::Node::ForceLineSeparation.into(), entry]),
                 )
             }
-            ControlNodeKind::Select {
-                kind,
-                scrutinee,
-                cases,
-            } => kind.print_with_scrutinee_and_cases(
-                printer,
-                kw_style,
-                *scrutinee,
-                cases.iter().map(|&case| self.at(case).print(printer)),
-            ),
-            ControlNodeKind::Loop {
-                initial_inputs,
-                body,
-                repeat_condition,
-            } => {
+            ControlNodeKind::Select { kind, scrutinee, cases } => kind
+                .print_with_scrutinee_and_cases(
+                    printer,
+                    kw_style,
+                    *scrutinee,
+                    cases.iter().map(|&case| self.at(case).print(printer)),
+                ),
+            ControlNodeKind::Loop { initial_inputs, body, repeat_condition } => {
                 assert!(outputs.is_empty());
 
                 let inputs = &self.at(*body).def().inputs;
@@ -3242,11 +3081,7 @@ impl Print for ControlNodeOutputDecl {
 impl Print for DataInstDef {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self {
-            attrs,
-            form,
-            inputs,
-        } = self;
+        let Self { attrs, form, inputs } = self;
 
         let attrs = attrs.print(printer);
 
@@ -3309,10 +3144,7 @@ impl Print for DataInstDef {
                         assert_eq!(extra_inputs.len(), 0);
                         ("buffer_data", [].into_iter().collect())
                     }
-                    &QPtrOp::BufferDynLen {
-                        fixed_base_size,
-                        dyn_unit_stride,
-                    } => {
+                    &QPtrOp::BufferDynLen { fixed_base_size, dyn_unit_stride } => {
                         assert_eq!(extra_inputs.len(), 0);
 
                         // FIXME(eddyb) this isn't very nice, but without mapping
@@ -3344,28 +3176,19 @@ impl Print for DataInstDef {
                         assert_eq!(extra_inputs.len(), 0);
                         (
                             "offset",
-                            [printer
-                                .numeric_literal_style()
-                                .apply(format!("{offset}"))
-                                .into()]
-                            .into_iter()
-                            .collect(),
+                            [printer.numeric_literal_style().apply(format!("{offset}")).into()]
+                                .into_iter()
+                                .collect(),
                         )
                     }
-                    &QPtrOp::DynOffset {
-                        stride,
-                        index_bounds: _,
-                    } => {
+                    &QPtrOp::DynOffset { stride, index_bounds: _ } => {
                         assert_eq!(extra_inputs.len(), 1);
                         (
                             "dyn_offset",
                             [pretty::Fragment::new([
                                 extra_inputs[0].print(printer),
                                 " × ".into(),
-                                printer
-                                    .numeric_literal_style()
-                                    .apply(format!("{stride}"))
-                                    .into(),
+                                printer.numeric_literal_style().apply(format!("{stride}")).into(),
                             ])]
                             .into_iter()
                             .collect(),
@@ -3378,10 +3201,7 @@ impl Print for DataInstDef {
                     }
                     QPtrOp::Store => {
                         assert_eq!(extra_inputs.len(), 1);
-                        (
-                            "store",
-                            [extra_inputs[0].print(printer)].into_iter().collect(),
-                        )
+                        ("store", [extra_inputs[0].print(printer)].into_iter().collect())
                     }
                 };
 
@@ -3393,10 +3213,7 @@ impl Print for DataInstDef {
                     printer.declarative_keyword_style().apply(name).into(),
                     pretty::join_comma_sep(
                         "(",
-                        qptr_input
-                            .map(|v| v.print(printer))
-                            .into_iter()
-                            .chain(extra_inputs),
+                        qptr_input.map(|v| v.print(printer)).into_iter().chain(extra_inputs),
                         ")",
                     ),
                 ])
@@ -3424,10 +3241,7 @@ impl Print for DataInstDef {
                                 printer.pretty_string_literal(&printer.cx[ext_set]),
                                 ")".into(),
                             ]),
-                            printer
-                                .numeric_literal_style()
-                                .apply(format!("{inst}"))
-                                .into(),
+                            printer.numeric_literal_style().apply(format!("{inst}")).into(),
                         ]
                         .into_iter()
                         .chain(inputs.iter().map(|v| v.print(printer))),
@@ -3439,28 +3253,17 @@ impl Print for DataInstDef {
 
         let def_without_name = pretty::Fragment::new([
             def_without_type,
-            output_type
-                .map(|ty| printer.pretty_type_ascription_suffix(ty))
-                .unwrap_or_default(),
+            output_type.map(|ty| printer.pretty_type_ascription_suffix(ty)).unwrap_or_default(),
         ]);
 
-        AttrsAndDef {
-            attrs,
-            def_without_name,
-        }
+        AttrsAndDef { attrs, def_without_name }
     }
 }
 
 impl Print for cfg::ControlInst {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
-        let Self {
-            attrs,
-            kind,
-            inputs,
-            targets,
-            target_inputs,
-        } = self;
+        let Self { attrs, kind, inputs, targets, target_inputs } = self;
 
         let attrs = attrs.print(printer);
 

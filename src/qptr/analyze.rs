@@ -35,10 +35,7 @@ struct MergeResult<T> {
 
 impl<T> MergeResult<T> {
     fn ok(merged: T) -> Self {
-        Self {
-            merged,
-            error: None,
-        }
+        Self { merged, error: None }
     }
 
     fn into_result(self) -> Result<T, AnalysisError> {
@@ -194,10 +191,7 @@ impl UsageMerger<'_> {
                 let mut ab = a;
                 let mut all_errors = None;
                 for (b_offset, b_sub_usage) in b_entries {
-                    let MergeResult {
-                        merged,
-                        error: new_error,
-                    } = self.merge_mem_at(
+                    let MergeResult { merged, error: new_error } = self.merge_mem_at(
                         ab,
                         b_offset.checked_add(b_offset_in_a).unwrap(),
                         b_sub_usage,
@@ -206,10 +200,8 @@ impl UsageMerger<'_> {
 
                     // FIXME(eddyb) move some of this into `MergeResult`!
                     if let Some(AnalysisError(e)) = new_error {
-                        let all_errors = &mut all_errors
-                            .get_or_insert(AnalysisError(Diag::bug([])))
-                            .0
-                            .message;
+                        let all_errors =
+                            &mut all_errors.get_or_insert(AnalysisError(Diag::bug([]))).0.message;
                         // FIXME(eddyb) should this mean `MergeResult` should
                         // use `errors: Vec<AnalysisError>` instead of `Option`?
                         if !all_errors.is_empty() {
@@ -280,10 +272,9 @@ impl UsageMerger<'_> {
                         };
                         match supports_usage {
                             Ok(false) => None,
-                            Ok(true) | Err(_) => Some(MergeResult {
-                                merged: ty,
-                                error: supports_usage.err(),
-                            }),
+                            Ok(true) | Err(_) => {
+                                Some(MergeResult { merged: ty, error: supports_usage.err() })
+                            }
                         }
                     };
 
@@ -324,10 +315,7 @@ impl UsageMerger<'_> {
                 }
             }
 
-            QPtrMemUsageKind::DynOffsetBase {
-                element: mut a_element,
-                stride: a_stride,
-            } => {
+            QPtrMemUsageKind::DynOffsetBase { element: mut a_element, stride: a_stride } => {
                 let b_offset_in_a_element = b_offset_in_a % a_stride;
 
                 // Array-like dynamic offsetting needs to always merge any usage that
@@ -421,9 +409,8 @@ impl UsageMerger<'_> {
 
                 // FIXME(eddyb) this is a bit inefficient but we don't have
                 // cursors, so we have to buffer the `BTreeMap` keys here.
-                let overlapping_offsets: SmallVec<[u32; 16]> = overlapping_entries
-                    .map(|(&a_sub_offset, _)| a_sub_offset)
-                    .collect();
+                let overlapping_offsets: SmallVec<[u32; 16]> =
+                    overlapping_entries.map(|(&a_sub_offset, _)| a_sub_offset).collect();
                 let a_entries_mut = Rc::make_mut(&mut a_entries);
                 let mut all_errors = None;
                 let (mut b_offset_in_a, mut b) = (b_offset_in_a, b);
@@ -436,9 +423,7 @@ impl UsageMerger<'_> {
                     // enough that we can do this for now.
                     let is_illegal = a_sub_offset != b_offset_in_a && {
                         let (a_sub_total_max_size, b_total_max_size) = (
-                            a_sub_usage
-                                .max_size
-                                .map(|a| a.checked_add(a_sub_offset).unwrap()),
+                            a_sub_usage.max_size.map(|a| a.checked_add(a_sub_offset).unwrap()),
                             b.max_size.map(|b| b.checked_add(b_offset_in_a).unwrap()),
                         );
                         let total_max_size_merged = match (a_sub_total_max_size, b_total_max_size) {
@@ -478,35 +463,28 @@ impl UsageMerger<'_> {
                     }
 
                     let new_error;
-                    (
-                        b_offset_in_a,
-                        MergeResult {
-                            merged: b,
-                            error: new_error,
-                        },
-                    ) = if a_sub_offset < b_offset_in_a {
-                        (
-                            a_sub_offset,
-                            self.merge_mem_at(a_sub_usage, b_offset_in_a - a_sub_offset, b),
-                        )
-                    } else {
-                        // FIXME(eddyb) remove this silliness by making `merge_mem_at` do symmetrical sorting.
-                        if a_sub_offset - b_offset_in_a == 0 {
-                            (b_offset_in_a, self.merge_mem(b, a_sub_usage))
-                        } else {
+                    (b_offset_in_a, MergeResult { merged: b, error: new_error }) =
+                        if a_sub_offset < b_offset_in_a {
                             (
-                                b_offset_in_a,
-                                self.merge_mem_at(b, a_sub_offset - b_offset_in_a, a_sub_usage),
+                                a_sub_offset,
+                                self.merge_mem_at(a_sub_usage, b_offset_in_a - a_sub_offset, b),
                             )
-                        }
-                    };
+                        } else {
+                            // FIXME(eddyb) remove this silliness by making `merge_mem_at` do symmetrical sorting.
+                            if a_sub_offset - b_offset_in_a == 0 {
+                                (b_offset_in_a, self.merge_mem(b, a_sub_usage))
+                            } else {
+                                (
+                                    b_offset_in_a,
+                                    self.merge_mem_at(b, a_sub_offset - b_offset_in_a, a_sub_usage),
+                                )
+                            }
+                        };
 
                     // FIXME(eddyb) move some of this into `MergeResult`!
                     if let Some(AnalysisError(e)) = new_error {
-                        let all_errors = &mut all_errors
-                            .get_or_insert(AnalysisError(Diag::bug([])))
-                            .0
-                            .message;
+                        let all_errors =
+                            &mut all_errors.get_or_insert(AnalysisError(Diag::bug([]))).0.message;
                         // FIXME(eddyb) should this mean `MergeResult` should
                         // use `errors: Vec<AnalysisError>` instead of `Option`?
                         if !all_errors.is_empty() {
@@ -535,9 +513,7 @@ impl UsageMerger<'_> {
 
     /// Attempt to compute a `TypeLayout` for a given (SPIR-V) `Type`.
     fn layout_of(&self, ty: Type) -> Result<TypeLayout, AnalysisError> {
-        self.layout_cache
-            .layout_of(ty)
-            .map_err(|LayoutError(err)| AnalysisError(err))
+        self.layout_cache.layout_of(ty).map_err(|LayoutError(err)| AnalysisError(err))
     }
 }
 
@@ -586,17 +562,17 @@ impl MemTypeLayout {
 
             // FIXME(eddyb) `find_components_containing` is linear today but
             // could be made logarithmic (via binary search).
-            self.components
-                .find_components_containing(min_usage_offset_range)
-                .any(|idx| match &self.components {
+            self.components.find_components_containing(min_usage_offset_range).any(
+                |idx| match &self.components {
                     Components::Scalar => unreachable!(),
                     Components::Elements { stride, elem, .. } => {
                         elem.supports_usage_at_offset(usage_offset % stride.get(), usage)
                     }
-                    Components::Fields {
-                        offsets, layouts, ..
-                    } => layouts[idx].supports_usage_at_offset(usage_offset - offsets[idx], usage),
-                })
+                    Components::Fields { offsets, layouts, .. } => {
+                        layouts[idx].supports_usage_at_offset(usage_offset - offsets[idx], usage)
+                    }
+                },
+            )
         };
         match &usage.kind {
             _ if any_component_supports(usage_offset, usage) => true,
@@ -609,31 +585,26 @@ impl MemTypeLayout {
                 entries.iter().all(|(&sub_offset, sub_usage)| {
                     // FIXME(eddyb) maybe this overflow should be propagated up,
                     // as a sign that `usage` is malformed?
-                    usage_offset
-                        .checked_add(sub_offset)
-                        .map_or(false, |combined_offset| {
-                            // NOTE(eddyb) the reason this is only applicable to
-                            // offset `0` is that *in all other cases*, every
-                            // individual `OffsetBase` requires its own type, to
-                            // allow performing offsets *in steps* (even if the
-                            // offsets could easily be constant-folded, they'd
-                            // *have to* be constant-folded *before* analysis,
-                            // to ensure there is no need for the intermediaries).
-                            if combined_offset == 0 {
-                                self.supports_usage_at_offset(0, sub_usage)
-                            } else {
-                                any_component_supports(combined_offset, sub_usage)
-                            }
-                        })
+                    usage_offset.checked_add(sub_offset).map_or(false, |combined_offset| {
+                        // NOTE(eddyb) the reason this is only applicable to
+                        // offset `0` is that *in all other cases*, every
+                        // individual `OffsetBase` requires its own type, to
+                        // allow performing offsets *in steps* (even if the
+                        // offsets could easily be constant-folded, they'd
+                        // *have to* be constant-folded *before* analysis,
+                        // to ensure there is no need for the intermediaries).
+                        if combined_offset == 0 {
+                            self.supports_usage_at_offset(0, sub_usage)
+                        } else {
+                            any_component_supports(combined_offset, sub_usage)
+                        }
+                    })
                 })
             }
 
             // Finding an array entirely nested in a component was handled above,
             // so here `layout` can only be a matching array (same stride and length).
-            QPtrMemUsageKind::DynOffsetBase {
-                element: usage_elem,
-                stride: usage_stride,
-            } => {
+            QPtrMemUsageKind::DynOffsetBase { element: usage_elem, stride: usage_stride } => {
                 let usage_fixed_len = usage
                     .max_size
                     .map(|size| {
@@ -730,10 +701,7 @@ impl<'a> InferUsage<'a> {
             // Ensure even unused interface variables get their `qptr.usage`.
             match export_key {
                 ExportKey::LinkName(_) => {}
-                ExportKey::SpvEntryPoint {
-                    imms: _,
-                    interface_global_vars,
-                } => {
+                ExportKey::SpvEntryPoint { imms: _, interface_global_vars } => {
                     for &gv in interface_global_vars {
                         self.global_var_usages.entry(gv).or_insert_with(|| {
                             Some(Ok(match module.global_vars[gv].shape {
@@ -780,10 +748,8 @@ impl<'a> InferUsage<'a> {
             match state {
                 FuncInferUsageState::InProgress => unreachable!(),
                 FuncInferUsageState::Complete(func_results) => {
-                    let FuncInferUsageResults {
-                        param_usages,
-                        usage_or_err_attrs_to_attach,
-                    } = Rc::try_unwrap(func_results).ok().unwrap();
+                    let FuncInferUsageResults { param_usages, usage_or_err_attrs_to_attach } =
+                        Rc::try_unwrap(func_results).ok().unwrap();
 
                     let func_decl = &mut module.funcs[func];
                     for (param_decl, usage) in func_decl.params.iter_mut().zip(param_usages) {
@@ -821,10 +787,7 @@ impl<'a> InferUsage<'a> {
                                 &mut func_def_body.at_mut(region).def().inputs[input_idx as usize]
                                     .attrs
                             }
-                            Value::ControlNodeOutput {
-                                control_node,
-                                output_idx,
-                            } => {
+                            Value::ControlNodeOutput { control_node, output_idx } => {
                                 &mut func_def_body.at_mut(control_node).def().outputs
                                     [output_idx as usize]
                                     .attrs
@@ -861,8 +824,7 @@ impl<'a> InferUsage<'a> {
             return cached;
         }
 
-        self.func_states
-            .insert(func, FuncInferUsageState::InProgress);
+        self.func_states.insert(func, FuncInferUsageState::InProgress);
 
         let completed_state =
             FuncInferUsageState::Complete(Rc::new(self.infer_usage_in_func_uncached(module, func)));
@@ -893,10 +855,7 @@ impl<'a> InferUsage<'a> {
                         ]))));
                     }
                 }
-                return FuncInferUsageResults {
-                    param_usages,
-                    usage_or_err_attrs_to_attach,
-                };
+                return FuncInferUsageResults { param_usages, usage_or_err_attrs_to_attach };
             }
         };
 
@@ -939,11 +898,9 @@ impl<'a> InferUsage<'a> {
                     };
                     *slot = Some(match slot.take() {
                         Some(old) => old.and_then(|old| {
-                            UsageMerger {
-                                layout_cache: &this.layout_cache,
-                            }
-                            .merge(old, new_usage?)
-                            .into_result()
+                            UsageMerger { layout_cache: &this.layout_cache }
+                                .merge(old, new_usage?)
+                                .into_result()
                         }),
                         None => new_usage,
                     });
@@ -952,10 +909,8 @@ impl<'a> InferUsage<'a> {
                     &DataInstKind::FuncCall(callee) => {
                         match self.infer_usage_in_func(module, callee) {
                             FuncInferUsageState::Complete(callee_results) => {
-                                for (&arg, param_usage) in data_inst_def
-                                    .inputs
-                                    .iter()
-                                    .zip(&callee_results.param_usages)
+                                for (&arg, param_usage) in
+                                    data_inst_def.inputs.iter().zip(&callee_results.param_usages)
                                 {
                                     if let Some(param_usage) = param_usage {
                                         generate_usage(self, arg, param_usage.clone());
@@ -1097,10 +1052,7 @@ impl<'a> InferUsage<'a> {
                                 }),
                         );
                     }
-                    DataInstKind::QPtr(QPtrOp::DynOffset {
-                        stride,
-                        index_bounds,
-                    }) => {
+                    DataInstKind::QPtr(QPtrOp::DynOffset { stride, index_bounds }) => {
                         generate_usage(
                             self,
                             data_inst_def.inputs[0],
@@ -1158,10 +1110,9 @@ impl<'a> InferUsage<'a> {
                     DataInstKind::QPtr(op @ (QPtrOp::Load | QPtrOp::Store)) => {
                         let (op_name, access_type) = match op {
                             QPtrOp::Load => ("Load", data_inst_form_def.output_type.unwrap()),
-                            QPtrOp::Store => (
-                                "Store",
-                                func_at_inst.at(data_inst_def.inputs[1]).type_of(&cx),
-                            ),
+                            QPtrOp::Store => {
+                                ("Store", func_at_inst.at(data_inst_def.inputs[1]).type_of(&cx))
+                            }
                             _ => unreachable!(),
                         };
                         generate_usage(
@@ -1286,10 +1237,7 @@ impl<'a> InferUsage<'a> {
             }
         }
 
-        FuncInferUsageResults {
-            param_usages,
-            usage_or_err_attrs_to_attach,
-        }
+        FuncInferUsageResults { param_usages, usage_or_err_attrs_to_attach }
     }
 }
 

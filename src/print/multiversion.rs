@@ -37,10 +37,7 @@ impl fmt::Display for Versions<pretty::FragmentPostLayout> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Single(fragment) => fragment.fmt(f),
-            Self::Multiple {
-                version_names,
-                per_row_versions_with_repeat_count,
-            } => {
+            Self::Multiple { version_names, per_row_versions_with_repeat_count } => {
                 let mut first = true;
 
                 // HACK(eddyb) this is not the nicest output, but multi-version
@@ -95,10 +92,7 @@ impl Versions<pretty::FragmentPostLayout> {
     pub fn render_to_html(&self) -> pretty::HtmlSnippet {
         match self {
             Self::Single(fragment) => fragment.render_to_html(),
-            Self::Multiple {
-                version_names,
-                per_row_versions_with_repeat_count,
-            } => {
+            Self::Multiple { version_names, per_row_versions_with_repeat_count } => {
                 // HACK(eddyb) using an UUID as a class name in lieu of "scoped <style>".
                 const TABLE_CLASS_NAME: &str = "spirt-table-90c2056d-5b38-4644-824a-b4be1c82f14d";
 
@@ -300,21 +294,20 @@ impl<PF> Versions<PF> {
     pub fn map_pretty_fragments<PF2>(self, f: impl Fn(PF) -> PF2) -> Versions<PF2> {
         match self {
             Versions::Single(fragment) => Versions::Single(f(fragment)),
-            Versions::Multiple {
-                version_names,
-                per_row_versions_with_repeat_count,
-            } => Versions::Multiple {
-                version_names,
-                per_row_versions_with_repeat_count: per_row_versions_with_repeat_count
-                    .into_iter()
-                    .map(|versions_with_repeat_count| {
-                        versions_with_repeat_count
-                            .into_iter()
-                            .map(|(fragment, repeat_count)| (f(fragment), repeat_count))
-                            .collect()
-                    })
-                    .collect(),
-            },
+            Versions::Multiple { version_names, per_row_versions_with_repeat_count } => {
+                Versions::Multiple {
+                    version_names,
+                    per_row_versions_with_repeat_count: per_row_versions_with_repeat_count
+                        .into_iter()
+                        .map(|versions_with_repeat_count| {
+                            versions_with_repeat_count
+                                .into_iter()
+                                .map(|(fragment, repeat_count)| (f(fragment), repeat_count))
+                                .collect()
+                        })
+                        .collect(),
+                }
+            }
         }
     }
 }
@@ -375,10 +368,7 @@ impl<'a> FromInternalIterator<TextOp<'a>> for AAColumn<'a> {
     where
         T: IntoInternalIterator<Item = TextOp<'a>>,
     {
-        let mut column = AAColumn {
-            text_ops: vec![],
-            line_lengths: vec![0],
-        };
+        let mut column = AAColumn { text_ops: vec![], line_lengths: vec![0] };
         text_ops.into_internal_iter().for_each(|op| {
             if let TextOp::Text("\n") = op {
                 column.line_lengths.push(0);
@@ -407,10 +397,8 @@ struct AAMergedColumn<'a, 'b> {
 impl<'a, 'b> AAMergedColumn<'a, 'b> {
     fn lines(&self) -> impl Iterator<Item = &'b [TextOp<'a>]> + '_ {
         let column_idx = self.column_idx;
-        let line_lengths = self
-            .merged_lines
-            .iter()
-            .map(move |line| line.per_column_line_lengths[column_idx]);
+        let line_lengths =
+            self.merged_lines.iter().map(move |line| line.per_column_line_lengths[column_idx]);
         self.original_column.lines(line_lengths)
     }
 }
@@ -418,26 +406,19 @@ impl<'a, 'b> AAMergedColumn<'a, 'b> {
 impl<'a> AnchorAligner<'a> {
     /// Flatten all columns to `TextOp`s (including line separators).
     fn merged_columns(&self) -> impl Iterator<Item = AAMergedColumn<'a, '_>> {
-        self.original_columns
-            .iter()
-            .enumerate()
-            .map(|(column_idx, original_column)| {
-                let mut merged_lines = &self.merged_lines[..];
+        self.original_columns.iter().enumerate().map(|(column_idx, original_column)| {
+            let mut merged_lines = &self.merged_lines[..];
 
-                // Trim all trailing lines that are empty in this column.
-                while let Some((last, before_last)) = merged_lines.split_last() {
-                    if last.per_column_line_lengths[column_idx] > 0 {
-                        break;
-                    }
-                    merged_lines = before_last;
+            // Trim all trailing lines that are empty in this column.
+            while let Some((last, before_last)) = merged_lines.split_last() {
+                if last.per_column_line_lengths[column_idx] > 0 {
+                    break;
                 }
+                merged_lines = before_last;
+            }
 
-                AAMergedColumn {
-                    original_column,
-                    column_idx,
-                    merged_lines,
-                }
-            })
+            AAMergedColumn { original_column, column_idx, merged_lines }
+        })
     }
 
     /// Merge `new_column` into the current set of columns, aligning as many
@@ -451,19 +432,12 @@ impl<'a> AnchorAligner<'a> {
 
         // Index all the anchor definitions in the new column.
         let mut new_anchor_def_to_line_idx = FxIndexMap::default();
-        for (new_line_idx, new_line_text_ops) in new_column
-            .lines(new_column.line_lengths.iter().copied())
-            .enumerate()
+        for (new_line_idx, new_line_text_ops) in
+            new_column.lines(new_column.line_lengths.iter().copied()).enumerate()
         {
             for op in new_line_text_ops {
-                if let TextOp::PushAnchor {
-                    is_def: true,
-                    anchor,
-                } = *op
-                {
-                    new_anchor_def_to_line_idx
-                        .entry(anchor)
-                        .or_insert(new_line_idx);
+                if let TextOp::PushAnchor { is_def: true, anchor } = *op {
+                    new_anchor_def_to_line_idx.entry(anchor).or_insert(new_line_idx);
                 }
             }
         }
@@ -511,12 +485,7 @@ impl<'a> AnchorAligner<'a> {
         // Build the merged lines using (partially) lockstep iteration to pull
         // the relevant data out of either side, and update "new" line indices.
         let mut old_lines = old_lines.into_iter().enumerate().peekable();
-        let mut new_lines = new_column
-            .line_lengths
-            .iter()
-            .copied()
-            .enumerate()
-            .peekable();
+        let mut new_lines = new_column.line_lengths.iter().copied().enumerate().peekable();
         let mut monotonic_common_anchors = monotonic_common_anchors.into_iter().peekable();
         let mut fixup_new_to_merged = new_anchor_def_to_line_idx.values_mut().peekable();
         while old_lines.len() > 0 || new_lines.len() > 0 {

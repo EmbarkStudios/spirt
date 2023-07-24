@@ -53,16 +53,12 @@ impl LayoutConfig {
         abstract_bool_size_align: (1, 1),
         logical_ptr_size_align: (1, 1),
     };
-    pub const VULKAN_STANDARD_LAYOUT: Self = Self {
-        ignore_legacy_align: false,
-        ..Self::VULKAN_SCALAR_LAYOUT
-    };
+    pub const VULKAN_STANDARD_LAYOUT: Self =
+        Self { ignore_legacy_align: false, ..Self::VULKAN_SCALAR_LAYOUT };
     // FIXME(eddyb) is this even useful? (all the storage classes that have any
     // kind of alignment requirements, require explicit offsets)
-    pub const VULKAN_EXTENDED_ALIGN_UBO_LAYOUT: Self = Self {
-        min_aggregate_legacy_align: 16,
-        ..Self::VULKAN_STANDARD_LAYOUT
-    };
+    pub const VULKAN_EXTENDED_ALIGN_UBO_LAYOUT: Self =
+        Self { min_aggregate_legacy_align: 16, ..Self::VULKAN_STANDARD_LAYOUT };
 }
 
 pub(super) struct LayoutError(pub(super) Diag);
@@ -117,11 +113,7 @@ impl Components {
     ) -> impl Iterator<Item = usize> + '_ {
         match self {
             Components::Scalar => Either::Left(None.into_iter()),
-            Components::Elements {
-                stride,
-                elem,
-                fixed_len,
-            } => {
+            Components::Elements { stride, elem, fixed_len } => {
                 Either::Left(
                     Some(offset_range.start / stride.get())
                         .and_then(|elem_idx| {
@@ -187,14 +179,7 @@ pub(super) struct LayoutCache<'a> {
 
 impl<'a> LayoutCache<'a> {
     pub(super) fn new(cx: Rc<Context>, config: &'a LayoutConfig) -> Self {
-        Self {
-            cx,
-            wk: &spv::spec::Spec::get().well_known,
-
-            config,
-
-            cache: Default::default(),
-        }
+        Self { cx, wk: &spv::spec::Spec::get().well_known, config, cache: Default::default() }
     }
 
     // FIXME(eddyb) properly distinguish between zero-extension and sign-extension.
@@ -225,14 +210,14 @@ impl<'a> LayoutCache<'a> {
         let spv_inst = match &ty_def.ctor {
             // FIXME(eddyb) treat `QPtr`s as scalars.
             TypeCtor::QPtr => {
-                return Err(LayoutError(Diag::bug([
-                    "`layout_of(qptr)` (already lowered?)".into(),
-                ])));
+                return Err(LayoutError(Diag::bug(
+                    ["`layout_of(qptr)` (already lowered?)".into()],
+                )));
             }
             TypeCtor::SpvInst(spv_inst) => spv_inst,
             TypeCtor::SpvStringLiteralForExtInst => {
                 return Err(LayoutError(Diag::bug([
-                    "`layout_of(type_of(OpString<\"...\">))`".into(),
+                    "`layout_of(type_of(OpString<\"...\">))`".into()
                 ])));
             }
         };
@@ -241,11 +226,7 @@ impl<'a> LayoutCache<'a> {
             TypeLayout::Concrete(Rc::new(MemTypeLayout {
                 original_type: ty,
                 mem_layout: shapes::MaybeDynMemLayout {
-                    fixed_base: shapes::MemLayout {
-                        align,
-                        legacy_align: align,
-                        size,
-                    },
+                    fixed_base: shapes::MemLayout { align, legacy_align: align, size },
                     dyn_unit_stride: None,
                 },
                 components: Components::Scalar,
@@ -260,10 +241,9 @@ impl<'a> LayoutCache<'a> {
         let align_to = |size: u32, align: u32| {
             assert!(align.is_power_of_two() && align > 0);
             Ok(size.checked_add(align - 1).ok_or_else(|| {
-                LayoutError(Diag::bug([format!(
-                    "`align_to({size}, {align})` overflowed `u32`"
-                )
-                .into()]))
+                LayoutError(Diag::bug([
+                    format!("`align_to({size}, {align})` overflowed `u32`").into()
+                ]))
             })? & !(align - 1))
         };
         // HACK(eddyb) named arguments for the `array` closure.
@@ -305,11 +285,8 @@ impl<'a> LayoutCache<'a> {
                     let stride = match known_stride {
                         Some(stride) => stride,
                         None => {
-                            let shapes::MemLayout {
-                                align,
-                                legacy_align,
-                                size,
-                            } = elem.mem_layout.fixed_base;
+                            let shapes::MemLayout { align, legacy_align, size } =
+                                elem.mem_layout.fixed_base;
                             let (stride, legacy_stride) =
                                 (align_to(size, align)?, align_to(size, legacy_align)?);
 
@@ -355,17 +332,9 @@ impl<'a> LayoutCache<'a> {
                                     .transpose()?
                                     .map_or(0, |size| size.get()),
                             },
-                            dyn_unit_stride: if fixed_len.is_none() {
-                                Some(stride)
-                            } else {
-                                None
-                            },
+                            dyn_unit_stride: if fixed_len.is_none() { Some(stride) } else { None },
                         },
-                        components: Components::Elements {
-                            stride,
-                            elem,
-                            fixed_len,
-                        },
+                        components: Components::Elements { stride, elem, fixed_len },
                     })))
                 }
             }
@@ -421,9 +390,9 @@ impl<'a> LayoutCache<'a> {
                         TypeCtorArg::Type(_) => unreachable!(),
                     };
                     self.const_as_u32(len).ok_or_else(|| {
-                        LayoutError(Diag::bug([
-                            "specialization constants not supported yet".into()
-                        ]))
+                        LayoutError(Diag::bug(
+                            ["specialization constants not supported yet".into()],
+                        ))
                     })
                 })
                 .transpose()?;
@@ -467,7 +436,7 @@ impl<'a> LayoutCache<'a> {
                 .map(|field_type| match self.layout_of(field_type)? {
                     TypeLayout::Handle(_) | TypeLayout::HandleArray(..) => {
                         Err(LayoutError(Diag::bug([
-                            "handles cannot be placed in a struct field".into(),
+                            "handles cannot be placed in a struct field".into()
                         ])))
                     }
                     TypeLayout::Concrete(field_layout) => Ok(field_layout),
@@ -545,20 +514,16 @@ impl<'a> LayoutCache<'a> {
 
                     mem_layout.fixed_base.align =
                         mem_layout.fixed_base.align.max(field.fixed_base.align);
-                    mem_layout.fixed_base.legacy_align = mem_layout
-                        .fixed_base
-                        .legacy_align
-                        .max(field.fixed_base.legacy_align);
+                    mem_layout.fixed_base.legacy_align =
+                        mem_layout.fixed_base.legacy_align.max(field.fixed_base.legacy_align);
                     mem_layout.fixed_base.size = mem_layout.fixed_base.size.max(
-                        field_offset
-                            .checked_add(field.fixed_base.size)
-                            .ok_or_else(|| {
-                                LayoutError(Diag::bug([format!(
-                                    "`{} + {}` overflowed `u32`",
-                                    field_offset, field.fixed_base.size
-                                )
-                                .into()]))
-                            })?,
+                        field_offset.checked_add(field.fixed_base.size).ok_or_else(|| {
+                            LayoutError(Diag::bug([format!(
+                                "`{} + {}` overflowed `u32`",
+                                field_offset, field.fixed_base.size
+                            )
+                            .into()]))
+                        })?,
                     );
 
                     // FIXME(eddyb) validate sized-vs-unsized fields, too.
@@ -603,10 +568,8 @@ impl<'a> LayoutCache<'a> {
 
                     mem_layout.fixed_base.align =
                         mem_layout.fixed_base.align.max(field.fixed_base.align);
-                    mem_layout.fixed_base.legacy_align = mem_layout
-                        .fixed_base
-                        .legacy_align
-                        .max(field.fixed_base.legacy_align);
+                    mem_layout.fixed_base.legacy_align =
+                        mem_layout.fixed_base.legacy_align.max(field.fixed_base.legacy_align);
                     mem_layout.fixed_base.size =
                         offset.checked_add(field.fixed_base.size).ok_or_else(|| {
                             LayoutError(Diag::bug([format!(
@@ -629,10 +592,7 @@ impl<'a> LayoutCache<'a> {
             let concrete = Rc::new(MemTypeLayout {
                 original_type: ty,
                 mem_layout,
-                components: Components::Fields {
-                    offsets: field_offsets,
-                    layouts: field_layouts,
-                },
+                components: Components::Fields { offsets: field_offsets, layouts: field_layouts },
             });
             let mut is_interface_block = false;
             for attr in &cx[ty_def.attrs].attrs {

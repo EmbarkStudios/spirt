@@ -82,10 +82,7 @@ struct IntraFuncInst {
 
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
 fn invalid(reason: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("malformed SPIR-V ({reason})"),
-    )
+    io::Error::new(io::ErrorKind::InvalidData, format!("malformed SPIR-V ({reason})"))
 }
 
 // FIXME(eddyb) provide more information about any normalization that happened:
@@ -117,23 +114,13 @@ impl Module {
         let storage_class_function_imm = spv::Imm::Short(wk.StorageClass, wk.Function);
 
         let mut module = {
-            let [
-                magic,
-                version,
-                generator_magic,
-                id_bound,
-                reserved_inst_schema,
-            ] = parser.header;
+            let [magic, version, generator_magic, id_bound, reserved_inst_schema] = parser.header;
 
             // Ensured above (this is the value after any endianness swapping).
             assert_eq!(magic, spv_spec.magic);
 
-            let [
-                version_reserved_hi,
-                version_major,
-                version_minor,
-                version_reserved_lo,
-            ] = version.to_be_bytes();
+            let [version_reserved_hi, version_major, version_minor, version_reserved_lo] =
+                version.to_be_bytes();
 
             if (version_reserved_lo, version_reserved_hi) != (0, 0) {
                 return Err(invalid(&format!(
@@ -258,10 +245,8 @@ impl Module {
             }
             current_block_id = new_block_id;
 
-            let mut attrs = inst
-                .result_id
-                .and_then(|id| pending_attrs.remove(&id))
-                .unwrap_or_default();
+            let mut attrs =
+                inst.result_id.and_then(|id| pending_attrs.remove(&id)).unwrap_or_default();
 
             if let Some((file_path, line, col)) = current_debug_line {
                 // FIXME(eddyb) use `get_or_insert_default` once that's stabilized.
@@ -382,11 +367,7 @@ impl Module {
             } else if opcode == wk.OpSource {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (lang, version) = match inst.imms[..] {
-                    [
-                        spv::Imm::Short(l_kind, lang),
-                        spv::Imm::Short(v_kind, version),
-                        ..,
-                    ] => {
+                    [spv::Imm::Short(l_kind, lang), spv::Imm::Short(v_kind, version), ..] => {
                         assert_eq!([l_kind, v_kind], [wk.SourceLanguage, wk.LiteralInteger]);
                         (lang, version)
                     }
@@ -549,16 +530,10 @@ impl Module {
                 } else {
                     Seq::Decoration
                 }
-            } else if [
-                wk.OpDecorationGroup,
-                wk.OpGroupDecorate,
-                wk.OpGroupMemberDecorate,
-            ]
-            .contains(&opcode)
+            } else if [wk.OpDecorationGroup, wk.OpGroupDecorate, wk.OpGroupMemberDecorate]
+                .contains(&opcode)
             {
-                return Err(invalid(
-                    "unsupported decoration groups (officially deprecated)",
-                ));
+                return Err(invalid("unsupported decoration groups (officially deprecated)"));
             } else if opcode == wk.OpTypeForwardPointer {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (id, sc) = match (&inst.imms[..], &inst.ids[..]) {
@@ -571,10 +546,7 @@ impl Module {
                 // serves as a first approximation for a "deferred error".
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst(spv::Inst {
-                        opcode,
-                        imms: [sc].into_iter().collect(),
-                    }),
+                    ctor: TypeCtor::SpvInst(spv::Inst { opcode, imms: [sc].into_iter().collect() }),
                     ctor_args: [].into_iter().collect(),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
@@ -740,9 +712,7 @@ impl Module {
                         _ => None,
                     }
                     .ok_or_else(|| {
-                        invalid(&format!(
-                            "function type %{func_type_id} not an `OpTypeFunction`"
-                        ))
+                        invalid(&format!("function type %{func_type_id} not an `OpTypeFunction`"))
                     })?;
 
                 if func_ret_type != func_type_ret_type {
@@ -794,21 +764,14 @@ impl Module {
                         attrs: mem::take(&mut attrs),
                         ret_type: func_ret_type,
                         params: func_type_param_types
-                            .map(|ty| FuncParam {
-                                attrs: AttrSet::default(),
-                                ty,
-                            })
+                            .map(|ty| FuncParam { attrs: AttrSet::default(), ty })
                             .collect(),
                         def,
                     },
                 );
                 id_defs.insert(func_id, IdDef::Func(func));
 
-                current_func_body = Some(FuncBody {
-                    func_id,
-                    func,
-                    insts: vec![],
-                });
+                current_func_body = Some(FuncBody { func_id, func, insts: vec![] });
 
                 Seq::Function
             } else if opcode == wk.OpFunctionEnd {
@@ -832,10 +795,7 @@ impl Module {
                     attrs: mem::take(&mut attrs),
                     result_type,
 
-                    without_ids: spv::Inst {
-                        opcode,
-                        imms: inst.without_ids.imms,
-                    },
+                    without_ids: spv::Inst { opcode, imms: inst.without_ids.imms },
                     result_id: inst.result_id,
                     ids: inst.ids,
                 });
@@ -883,11 +843,7 @@ impl Module {
 
         // Process function bodies, having seen the whole module.
         for func_body in pending_func_bodies {
-            let FuncBody {
-                func_id,
-                func,
-                insts: raw_insts,
-            } = func_body;
+            let FuncBody { func_id, func, insts: raw_insts } = func_body;
 
             let func_decl = &mut module.funcs[func];
 
@@ -964,13 +920,8 @@ impl Module {
                                         },
                                     )
                                 };
-                                block_details.insert(
-                                    block,
-                                    BlockDetails {
-                                        label_id: id,
-                                        phi_count: 0,
-                                    },
-                                );
+                                block_details
+                                    .insert(block, BlockDetails { label_id: id, phi_count: 0 });
                                 LocalIdDef::BlockLabel(block)
                             } else if opcode == wk.OpPhi {
                                 let (&current_block, block_details) = match block_details.last_mut()
@@ -1054,11 +1005,8 @@ impl Module {
 
             let mut current_block_control_region_and_details = None;
             for (raw_inst_idx, raw_inst) in raw_insts.iter().enumerate() {
-                let lookahead_raw_inst = |dist| {
-                    raw_inst_idx
-                        .checked_add(dist)
-                        .and_then(|i| raw_insts.get(i))
-                };
+                let lookahead_raw_inst =
+                    |dist| raw_inst_idx.checked_add(dist).and_then(|i| raw_insts.get(i));
 
                 let IntraFuncInst {
                     attrs,
@@ -1142,9 +1090,8 @@ impl Module {
                 }
                 let func_def_body = func_def_body.as_deref_mut().unwrap();
 
-                let is_last_in_block = lookahead_raw_inst(1).map_or(true, |next_raw_inst| {
-                    next_raw_inst.without_ids.opcode == wk.OpLabel
-                });
+                let is_last_in_block = lookahead_raw_inst(1)
+                    .map_or(true, |next_raw_inst| next_raw_inst.without_ids.opcode == wk.OpLabel);
 
                 if opcode == wk.OpLabel {
                     if is_last_in_block {
@@ -1292,13 +1239,7 @@ impl Module {
                         .control_inst_on_exit_from
                         .insert(
                             current_block_control_region,
-                            cfg::ControlInst {
-                                attrs,
-                                kind,
-                                inputs,
-                                targets,
-                                target_inputs,
-                            },
+                            cfg::ControlInst { attrs, kind, inputs, targets, target_inputs },
                         );
                 } else if opcode == wk.OpPhi {
                     if !current_block_control_region_def.children.is_empty() {
@@ -1310,10 +1251,7 @@ impl Module {
 
                     current_block_control_region_def
                         .inputs
-                        .push(ControlRegionInputDecl {
-                            attrs,
-                            ty: result_type.unwrap(),
-                        });
+                        .push(ControlRegionInputDecl { attrs, ty: result_type.unwrap() });
                 } else if [wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode) {
                     let is_second_to_last_in_block = lookahead_raw_inst(2)
                         .map_or(true, |next_raw_inst| {
@@ -1445,9 +1383,7 @@ impl Module {
                             let block_node = func_def_body.control_nodes.define(
                                 &cx,
                                 ControlNodeDef {
-                                    kind: ControlNodeKind::Block {
-                                        insts: EntityList::empty(),
-                                    },
+                                    kind: ControlNodeKind::Block { insts: EntityList::empty() },
                                     outputs: SmallVec::new(),
                                 }
                                 .into(),

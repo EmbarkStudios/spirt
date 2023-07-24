@@ -311,9 +311,7 @@ impl AttrSetDef {
 
     // FIXME(eddyb) should this be hidden in favor of `AttrSet::append_diag`?
     pub fn append_diag(&self, diag: Diag) -> Self {
-        let mut new_attrs = Self {
-            attrs: self.attrs.clone(),
-        };
+        let mut new_attrs = Self { attrs: self.attrs.clone() };
         new_attrs.push_diag(diag);
         new_attrs
     }
@@ -376,10 +374,7 @@ pub struct Diag {
 
 impl Diag {
     pub fn new(level: DiagLevel, message: impl IntoIterator<Item = DiagMsgPart>) -> Self {
-        Self {
-            level,
-            message: message.into_iter().collect(),
-        }
+        Self { level, message: message.into_iter().collect() }
     }
 
     // FIMXE(eddyb) make macros more ergonomic than this, for interpolation.
@@ -792,12 +787,7 @@ pub enum ControlNodeKind {
     ///
     /// This corresponds to "gamma" (`γ`) nodes in (R)VSDG, though those are
     /// sometimes limited only to a two-way selection on a boolean condition.
-    Select {
-        kind: SelectionKind,
-        scrutinee: Value,
-
-        cases: SmallVec<[ControlRegion; 2]>,
-    },
+    Select { kind: SelectionKind, scrutinee: Value, cases: SmallVec<[ControlRegion; 2]> },
 
     /// Execute `body` repeatedly, until `repeat_condition` evaluates to `false`.
     ///

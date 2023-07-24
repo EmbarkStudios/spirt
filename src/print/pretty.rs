@@ -92,10 +92,7 @@ pub struct Styles {
 
 impl Styles {
     pub fn color(color: [u8; 3]) -> Self {
-        Self {
-            color: Some(color),
-            ..Self::default()
-        }
+        Self { color: Some(color), ..Self::default() }
     }
 
     pub fn apply(self, text: impl Into<Cow<'static, str>>) -> Node {
@@ -105,11 +102,7 @@ impl Styles {
     // HACK(eddyb) this allows us to control `<sub>`/`<sup>` `font-size` exactly,
     // and use the same information for both layout and the CSS we emit.
     fn effective_size(&self) -> Option<i8> {
-        self.size.or(if self.subscript || self.superscript {
-            Some(-2)
-        } else {
-            None
-        })
+        self.size.or(if self.subscript || self.superscript { Some(-2) } else { None })
     }
 }
 
@@ -146,34 +139,23 @@ impl From<String> for Node {
 
 impl<T: Into<Node>> From<T> for Fragment {
     fn from(x: T) -> Self {
-        Self {
-            nodes: [x.into()].into_iter().collect(),
-        }
+        Self { nodes: [x.into()].into_iter().collect() }
     }
 }
 
 impl Fragment {
     pub fn new(fragments: impl IntoIterator<Item = impl Into<Self>>) -> Self {
-        Self {
-            nodes: fragments
-                .into_iter()
-                .flat_map(|fragment| fragment.into().nodes)
-                .collect(),
-        }
+        Self { nodes: fragments.into_iter().flat_map(|fragment| fragment.into().nodes).collect() }
     }
 
     /// Perform layout on the [`Fragment`], limiting lines to `max_line_width`
     /// columns where possible.
     pub fn layout_with_max_line_width(mut self, max_line_width: usize) -> FragmentPostLayout {
         // FIXME(eddyb) maybe make this a method on `Columns`?
-        let max_line_width = Columns {
-            char_width_tenths: max_line_width.try_into().unwrap_or(u16::MAX) * 10,
-        };
+        let max_line_width =
+            Columns { char_width_tenths: max_line_width.try_into().unwrap_or(u16::MAX) * 10 };
 
-        self.approx_layout(MaxWidths {
-            inline: max_line_width,
-            block: max_line_width,
-        });
+        self.approx_layout(MaxWidths { inline: max_line_width, block: max_line_width });
         FragmentPostLayout(self)
     }
 }
@@ -190,8 +172,7 @@ impl fmt::Display for FragmentPostLayout {
                 _ => None,
             })
             .try_for_each(|text| {
-                f.write_str(text)
-                    .map_or_else(ControlFlow::Break, ControlFlow::Continue)
+                f.write_str(text).map_or_else(ControlFlow::Break, ControlFlow::Continue)
             });
         match result {
             ControlFlow::Continue(()) => Ok(()),
@@ -441,10 +422,7 @@ impl<'a> FromInternalIterator<TextOp<'a>> for HtmlSnippet {
         });
         body += "</pre>";
 
-        HtmlSnippet {
-            head_deduplicatable_elements: [style_elem].into_iter().collect(),
-            body,
-        }
+        HtmlSnippet { head_deduplicatable_elements: [style_elem].into_iter().collect(), body }
     }
 }
 
@@ -464,9 +442,7 @@ struct Columns {
 }
 
 impl Columns {
-    const ZERO: Self = Self {
-        char_width_tenths: 0,
-    };
+    const ZERO: Self = Self { char_width_tenths: 0 };
 
     fn text_width(text: &str) -> Self {
         Self::maybe_styled_text_width(text, None)
@@ -481,28 +457,16 @@ impl Columns {
 
         // FIXME(eddyb) use `unicode-width` crate for accurate column count.
         Self {
-            char_width_tenths: text
-                .len()
-                .try_into()
-                .unwrap_or(u16::MAX)
-                .saturating_mul(font_size),
+            char_width_tenths: text.len().try_into().unwrap_or(u16::MAX).saturating_mul(font_size),
         }
     }
 
     fn saturating_add(self, other: Self) -> Self {
-        Self {
-            char_width_tenths: self
-                .char_width_tenths
-                .saturating_add(other.char_width_tenths),
-        }
+        Self { char_width_tenths: self.char_width_tenths.saturating_add(other.char_width_tenths) }
     }
 
     fn saturating_sub(self, other: Self) -> Self {
-        Self {
-            char_width_tenths: self
-                .char_width_tenths
-                .saturating_sub(other.char_width_tenths),
-        }
+        Self { char_width_tenths: self.char_width_tenths.saturating_sub(other.char_width_tenths) }
     }
 }
 
@@ -528,61 +492,33 @@ enum ApproxLayout {
     /// an `Inline` before (`pre_`) and after (`post_`) the multi-line block.
     //
     // FIXME(eddyb) maybe turn `ApproxLayout` into a `struct` instead?
-    BlockOrMixed {
-        pre_worst_width: Columns,
-        post_worst_width: Columns,
-    },
+    BlockOrMixed { pre_worst_width: Columns, post_worst_width: Columns },
 }
 
 impl ApproxLayout {
     fn append(self, other: Self) -> Self {
         match (self, other) {
             (
-                Self::Inline {
-                    worst_width: a,
-                    excess_width_from_only_if_block: a_excess_foib,
-                },
-                Self::Inline {
-                    worst_width: b,
-                    excess_width_from_only_if_block: b_excess_foib,
-                },
+                Self::Inline { worst_width: a, excess_width_from_only_if_block: a_excess_foib },
+                Self::Inline { worst_width: b, excess_width_from_only_if_block: b_excess_foib },
             ) => Self::Inline {
                 worst_width: a.saturating_add(b),
                 excess_width_from_only_if_block: a_excess_foib.saturating_add(b_excess_foib),
             },
             (
-                Self::BlockOrMixed {
-                    pre_worst_width, ..
-                },
-                Self::BlockOrMixed {
-                    post_worst_width, ..
-                },
-            ) => Self::BlockOrMixed {
-                pre_worst_width,
-                post_worst_width,
-            },
+                Self::BlockOrMixed { pre_worst_width, .. },
+                Self::BlockOrMixed { post_worst_width, .. },
+            ) => Self::BlockOrMixed { pre_worst_width, post_worst_width },
             (
-                Self::BlockOrMixed {
-                    pre_worst_width,
-                    post_worst_width: post_a,
-                },
-                Self::Inline {
-                    worst_width: post_b,
-                    excess_width_from_only_if_block: _,
-                },
+                Self::BlockOrMixed { pre_worst_width, post_worst_width: post_a },
+                Self::Inline { worst_width: post_b, excess_width_from_only_if_block: _ },
             ) => Self::BlockOrMixed {
                 pre_worst_width,
                 post_worst_width: post_a.saturating_add(post_b),
             },
             (
-                Self::Inline {
-                    worst_width: pre_a,
-                    excess_width_from_only_if_block: _,
-                },
-                Self::BlockOrMixed {
-                    pre_worst_width: pre_b,
-                    post_worst_width,
-                },
+                Self::Inline { worst_width: pre_a, excess_width_from_only_if_block: _ },
+                Self::BlockOrMixed { pre_worst_width: pre_b, post_worst_width },
             ) => Self::BlockOrMixed {
                 pre_worst_width: pre_a.saturating_add(pre_b),
                 post_worst_width,
@@ -635,11 +571,7 @@ impl Node {
         match self {
             Self::Text(styles, text) => text_approx_rigid_layout(styles, text),
 
-            Self::Anchor {
-                is_def: _,
-                anchor: _,
-                text,
-            } => text
+            Self::Anchor { is_def: _, anchor: _, text } => text
                 .iter()
                 .map(|(styles, text)| text_approx_rigid_layout(styles, text))
                 .reduce(ApproxLayout::append)
@@ -668,16 +600,12 @@ impl Node {
                 // comma added by `join_comma_sep`.
                 let text_layout = Self::Text(None, text.into()).approx_rigid_layout();
                 let worst_width = match text_layout {
-                    ApproxLayout::Inline {
-                        worst_width,
-                        excess_width_from_only_if_block: _,
-                    } => worst_width,
+                    ApproxLayout::Inline { worst_width, excess_width_from_only_if_block: _ } => {
+                        worst_width
+                    }
                     ApproxLayout::BlockOrMixed { .. } => Columns::ZERO,
                 };
-                ApproxLayout::Inline {
-                    worst_width,
-                    excess_width_from_only_if_block: worst_width,
-                }
+                ApproxLayout::Inline { worst_width, excess_width_from_only_if_block: worst_width }
             }
 
             // Layout computed only in `approx_flex_layout`.
@@ -745,10 +673,9 @@ impl Node {
                 // `Node::OnlyIfBlock`s, so `excess_width_from_only_if_block` can
                 // be safely subtracted from the "candidate" inline `worst_width`.
                 let candidate_inline_worst_width = match layout {
-                    ApproxLayout::Inline {
-                        worst_width,
-                        excess_width_from_only_if_block,
-                    } => Some(worst_width.saturating_sub(excess_width_from_only_if_block)),
+                    ApproxLayout::Inline { worst_width, excess_width_from_only_if_block } => {
+                        Some(worst_width.saturating_sub(excess_width_from_only_if_block))
+                    }
 
                     ApproxLayout::BlockOrMixed { .. } => None,
                 };
@@ -806,13 +733,12 @@ impl Fragment {
 
         let child_max_widths = |layout| MaxWidths {
             inline: match layout {
-                ApproxLayout::Inline {
-                    worst_width,
-                    excess_width_from_only_if_block: _,
-                } => max_widths.inline.saturating_sub(worst_width),
-                ApproxLayout::BlockOrMixed {
-                    post_worst_width, ..
-                } => max_widths.block.saturating_sub(post_worst_width),
+                ApproxLayout::Inline { worst_width, excess_width_from_only_if_block: _ } => {
+                    max_widths.inline.saturating_sub(worst_width)
+                }
+                ApproxLayout::BlockOrMixed { post_worst_width, .. } => {
+                    max_widths.block.saturating_sub(post_worst_width)
+                }
             },
             block: max_widths.block,
         };
@@ -826,10 +752,7 @@ impl Fragment {
                 rigid_layout @ ApproxLayout::Inline { .. } => {
                     layout = layout.append(rigid_layout);
                 }
-                ApproxLayout::BlockOrMixed {
-                    pre_worst_width,
-                    post_worst_width,
-                } => {
+                ApproxLayout::BlockOrMixed { pre_worst_width, post_worst_width } => {
                     // Split the `BlockOrMixed` just before the block, and
                     // process "recent" flexible nodes in between the halves.
                     layout = layout.append(ApproxLayout::Inline {
@@ -943,11 +866,7 @@ impl Node {
                 text_render_to_line_ops(styles, text).try_for_each(each_line_op)?;
             }
 
-            &Self::Anchor {
-                is_def,
-                ref anchor,
-                ref text,
-            } => {
+            &Self::Anchor { is_def, ref anchor, ref text } => {
                 if text.is_empty() {
                     each_line_op(LineOp::EmptyAnchor { is_def, anchor })?;
                 } else {
@@ -963,18 +882,15 @@ impl Node {
             }
 
             Self::IndentedBlock(fragments) => {
-                [
-                    LineOp::PushIndent,
-                    LineOp::BreakIfWithinLine(Break::NewLine),
-                ]
-                .into_internal_iter()
-                .chain(fragments.into_internal_iter().flat_map(|fragment| {
-                    fragment
-                        .render_to_line_ops(true)
-                        .chain([LineOp::BreakIfWithinLine(Break::NewLine)])
-                }))
-                .chain([LineOp::PopIndent])
-                .try_for_each(each_line_op)?;
+                [LineOp::PushIndent, LineOp::BreakIfWithinLine(Break::NewLine)]
+                    .into_internal_iter()
+                    .chain(fragments.into_internal_iter().flat_map(|fragment| {
+                        fragment
+                            .render_to_line_ops(true)
+                            .chain([LineOp::BreakIfWithinLine(Break::NewLine)])
+                    }))
+                    .chain([LineOp::PopIndent])
+                    .try_for_each(each_line_op)?;
             }
             // Post-layout, this is only used for the inline layout.
             Self::InlineOrIndentedBlock(fragments) => {
@@ -1145,9 +1061,7 @@ impl<'a> LineOp<'a> {
                     for _ in indent_so_far..target_indent {
                         each_text_op(TextOp::Text(INDENT))?;
                     }
-                    line_state = LineState::OnlyIndentedOrAnchored {
-                        indent_so_far: target_indent,
-                    };
+                    line_state = LineState::OnlyIndentedOrAnchored { indent_so_far: target_indent };
                 }
             }
 
@@ -1250,18 +1164,12 @@ pub fn join_comma_sep(
 
     if let Some((last_child, non_last_children)) = children.split_last_mut() {
         for non_last_child in non_last_children {
-            non_last_child
-                .nodes
-                .extend([",".into(), Node::BreakingOnlySpace]);
+            non_last_child.nodes.extend([",".into(), Node::BreakingOnlySpace]);
         }
 
         // Trailing comma is only needed after the very last element.
         last_child.nodes.push(Node::IfBlockLayout(","));
     }
 
-    Fragment::new([
-        prefix.into(),
-        Node::InlineOrIndentedBlock(children),
-        suffix.into(),
-    ])
+    Fragment::new([prefix.into(), Node::InlineOrIndentedBlock(children), suffix.into()])
 }

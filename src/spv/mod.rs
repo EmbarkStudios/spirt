@@ -65,10 +65,7 @@ pub struct Inst {
 
 impl From<spec::Opcode> for Inst {
     fn from(opcode: spec::Opcode) -> Self {
-        Self {
-            opcode,
-            imms: SmallVec::new(),
-        }
+        Self { opcode, imms: SmallVec::new() }
     }
 }
 
@@ -154,9 +151,7 @@ pub fn encode_literal_string(s: &str) -> impl Iterator<Item = Imm> + '_ {
     let bytes = s.as_bytes();
 
     // FIXME(eddyb) replace with `array_chunks` once that is stabilized.
-    let full_words = bytes
-        .chunks_exact(4)
-        .map(|w| <[u8; 4]>::try_from(w).unwrap());
+    let full_words = bytes.chunks_exact(4).map(|w| <[u8; 4]>::try_from(w).unwrap());
 
     let leftover_bytes = &bytes[full_words.len() * 4..];
     let mut last_word = [0; 4];
@@ -164,16 +159,14 @@ pub fn encode_literal_string(s: &str) -> impl Iterator<Item = Imm> + '_ {
 
     let total_words = full_words.len() + 1;
 
-    full_words
-        .chain(iter::once(last_word))
-        .map(u32::from_le_bytes)
-        .enumerate()
-        .map(move |(i, word)| {
+    full_words.chain(iter::once(last_word)).map(u32::from_le_bytes).enumerate().map(
+        move |(i, word)| {
             let kind = wk.LiteralString;
             match (i, total_words) {
                 (0, 1) => Imm::Short(kind, word),
                 (0, _) => Imm::LongStart(kind, word),
                 (_, _) => Imm::LongCont(kind, word),
             }
-        })
+        },
+    )
 }
