@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added ⭐
+- [PR#45](https://github.com/EmbarkStudios/spirt/pull/45) added the abilit to
+  pretty-print `OpExtInst`s (SPIR-V "extended instructions") using official
+  `extinst.*.grammar.json` descriptions and/or custom ones (registered via `Context`)
+
 ### Changed 🛠
 - [PR#43](https://github.com/EmbarkStudios/spirt/pull/43) tweaked several pretty-printing
   details to improve visual cohesion ("named arguments" in `module.{dialect,debuginfo}`)
