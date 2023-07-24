@@ -1145,6 +1145,9 @@ impl Printer<'_> {
     fn string_literal_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::RED)
     }
+    fn string_literal_escape_style(&self) -> pretty::Styles {
+        pretty::Styles::color(pretty::palettes::simple::ORANGE)
+    }
     fn declarative_keyword_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::BLUE)
     }
@@ -1188,9 +1191,54 @@ impl Printer<'_> {
 }
 
 impl<'a> Printer<'a> {
-    /// Pretty-print a `name: ` style "named argument" prefix.
+    /// Pretty-print a string literal with escaping and styling.
     //
-    // FIXME(eddyb) add methods like this for all styled text (e.g. literals).
+    // FIXME(eddyb) add methods like this for all styled text (e.g. numeric literals).
+    fn pretty_string_literal(&self, s: &str) -> pretty::Fragment {
+        // HACK(eddyb) this is somewhat inefficient, but we need to allocate a
+        // `String` for every piece anyway, so might as well make it convenient.
+        pretty::Fragment::new(
+            // HACK(eddyb) this allows aligning the actual string contents,
+            // (see `c == '\n'` special-casing below for when this applies).
+            (s.contains('\n').then_some(Either::Left(' ')).into_iter())
+                .chain([Either::Left('"')])
+                .chain(s.chars().flat_map(|c| {
+                    let escaped = c.escape_debug();
+                    let maybe_escaped = if c == '\'' {
+                        // Unescape single quotes, we're in a double-quoted string.
+                        assert_eq!(escaped.collect_tuple(), Some(('\\', c)));
+                        Either::Left(c)
+                    } else if let Some((single,)) = escaped.clone().collect_tuple() {
+                        assert_eq!(single, c);
+                        Either::Left(c)
+                    } else {
+                        assert_eq!(escaped.clone().next(), Some('\\'));
+                        Either::Right(escaped)
+                    };
+
+                    // HACK(eddyb) move escaped `\n` to the start of a new line,
+                    // using Rust's trailing `\` on the previous line, which eats
+                    // all following whitespace (and only stops at the escape).
+                    let extra_prefix_unescaped = if c == '\n' { "\\\n" } else { "" };
+
+                    (extra_prefix_unescaped.chars().map(Either::Left)).chain([maybe_escaped])
+                }))
+                .chain([Either::Left('"')])
+                .group_by(|maybe_escaped| maybe_escaped.is_right())
+                .into_iter()
+                .map(|(escaped, group)| {
+                    if escaped {
+                        self.string_literal_escape_style()
+                            .apply(group.flat_map(Either::unwrap_right).collect::<String>())
+                    } else {
+                        self.string_literal_style()
+                            .apply(group.map(Either::unwrap_left).collect::<String>())
+                    }
+                }),
+        )
+    }
+
+    /// Pretty-print a `name: ` style "named argument" prefix.
     fn pretty_named_argument_prefix(&self, name: impl Into<Cow<'static, str>>) -> pretty::Fragment {
         // FIXME(eddyb) avoid the cost of allocating here.
         self.named_argument_label_style()
@@ -1835,9 +1883,9 @@ impl Print for spv::Dialect {
                         printer.pretty_named_argument_prefix("extensions"),
                         pretty::join_comma_sep(
                             "{",
-                            extensions.iter().map(|ext| {
-                                printer.string_literal_style().apply(format!("{ext:?}"))
-                            }),
+                            extensions
+                                .iter()
+                                .map(|ext| printer.pretty_string_literal(ext)),
                             "}",
                         ),
                     ])
@@ -1991,13 +2039,15 @@ impl Print for spv::ModuleDebugInfo {
                                                     .iter()
                                                     .map(|(&file, contents)| {
                                                         pretty::Fragment::new([
-                                                            printer.string_literal_style().apply(
-                                                                format!("{:?}", &printer.cx[file]),
+                                                            printer.pretty_string_literal(
+                                                                &printer.cx[file],
                                                             ),
-                                                            ": ".into(),
-                                                            printer
-                                                                .string_literal_style()
-                                                                .apply(format!("{contents:?}")),
+                                                            pretty::join_space(
+                                                                ":",
+                                                                [printer.pretty_string_literal(
+                                                                    contents,
+                                                                )],
+                                                            ),
                                                         ])
                                                     })
                                                     .map(|entry| {
@@ -2026,9 +2076,9 @@ impl Print for spv::ModuleDebugInfo {
                             printer.pretty_named_argument_prefix("source_extensions"),
                             pretty::join_comma_sep(
                                 "[",
-                                source_extensions.iter().map(|ext| {
-                                    printer.string_literal_style().apply(format!("{ext:?}"))
-                                }),
+                                source_extensions
+                                    .iter()
+                                    .map(|ext| printer.pretty_string_literal(ext)),
                                 "]",
                             ),
                         ])
@@ -2038,9 +2088,9 @@ impl Print for spv::ModuleDebugInfo {
                             printer.pretty_named_argument_prefix("module_processes"),
                             pretty::join_comma_sep(
                                 "[",
-                                module_processes.iter().map(|proc| {
-                                    printer.string_literal_style().apply(format!("{proc:?}"))
-                                }),
+                                module_processes
+                                    .iter()
+                                    .map(|proc| printer.pretty_string_literal(proc)),
                                 "]",
                             ),
                         ])
@@ -2058,10 +2108,7 @@ impl Print for ExportKey {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
-            &Self::LinkName(name) => printer
-                .string_literal_style()
-                .apply(format!("{:?}", &printer.cx[name]))
-                .into(),
+            &Self::LinkName(name) => printer.pretty_string_literal(&printer.cx[name]),
 
             // HACK(eddyb) `interface_global_vars` should be recomputed by
             // `spv::lift` anyway, so hiding them here mimics that.
@@ -2645,10 +2692,7 @@ impl Print for ConstDef {
                 ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
                     printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
                     "(".into(),
-                    printer
-                        .string_literal_style()
-                        .apply(format!("{:?}", &printer.cx[s]))
-                        .into(),
+                    printer.pretty_string_literal(&printer.cx[s]),
                     ")".into(),
                 ]),
             }),
@@ -2661,11 +2705,9 @@ impl Print for Import {
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
             &Self::LinkName(name) => pretty::Fragment::new([
-                printer.declarative_keyword_style().apply("import"),
+                printer.declarative_keyword_style().apply("import").into(),
                 " ".into(),
-                printer
-                    .string_literal_style()
-                    .apply(format!("{:?}", &printer.cx[name])),
+                printer.pretty_string_literal(&printer.cx[name]),
             ]),
         }
     }
@@ -3379,10 +3421,7 @@ impl Print for DataInstDef {
                                 printer
                                     .pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInstImport),
                                 "(".into(),
-                                printer
-                                    .string_literal_style()
-                                    .apply(format!("{:?}", &printer.cx[ext_set]))
-                                    .into(),
+                                printer.pretty_string_literal(&printer.cx[ext_set]),
                                 ")".into(),
                             ]),
                             printer
