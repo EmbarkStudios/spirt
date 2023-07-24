@@ -1,5 +1,6 @@
 //! [`Context`](struct.Context.html) and related types/traits.
 
+use crate::spv::spec::ExtInstSetDesc;
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::mem;
@@ -15,10 +16,45 @@ use std::ops::{Deref, DerefMut};
 ///   * the *definition* of an entity isn't kept in the [`Context`], but rather in
 ///     some [`EntityDefs`] collection somewhere in a [`Module`](crate::Module) (or further nested),
 ///     with only the entity *indices* being allocated by the [`Context`]
+/// * custom SPIR-V "extended instruction set" descriptions, which can be
+///   dynamically registered, to account for any such "extended instruction set"
+///   not covered by [`spv::spec::Spec`](crate::spv::spec::Spec)'s built-in list
+///   (e.g. non-standard tool-specific sets), and only used for pretty-printing
 #[derive(Default)]
 pub struct Context {
     interners: Interners,
     entity_allocs: EntityAllocs,
+
+    custom_spv_ext_inst_set_descs: elsa::FrozenBTreeMap<String, Box<ExtInstSetDesc>>,
+}
+
+impl Context {
+    /// Register a custom [`ExtInstSetDesc`] with name `ext_inst_set_name`,
+    /// to be used by pretty-printing when using this [`Context`].
+    pub fn register_custom_ext_inst_set(
+        &self,
+        ext_inst_set_name: &str,
+        ext_inst_set_desc: ExtInstSetDesc,
+    ) {
+        let lowercase_ext_inst_set_name = ext_inst_set_name.to_ascii_lowercase();
+        assert!(
+            self.get_custom_ext_inst_set_by_lowercase_name(&lowercase_ext_inst_set_name).is_none(),
+            "already registered {lowercase_ext_inst_set_name:?} \
+             (name before lowercasing: {ext_inst_set_name})"
+        );
+        self.custom_spv_ext_inst_set_descs
+            .insert(lowercase_ext_inst_set_name, Box::new(ext_inst_set_desc));
+    }
+
+    /// Return a custom [`ExtInstSetDesc`], if one was registered on this [`Context`],
+    /// for this `OpExtInstImport` name (required to be lowercase, due to Khronos'
+    /// choice of case insensitivity, but **not checked by this function**).
+    pub fn get_custom_ext_inst_set_by_lowercase_name(
+        &self,
+        lowercase_ext_inst_set_name: &str,
+    ) -> Option<&ExtInstSetDesc> {
+        self.custom_spv_ext_inst_set_descs.get(lowercase_ext_inst_set_name)
+    }
 }
 
 /// Private module containing traits (and related types) used in public APIs,
