@@ -4,6 +4,8 @@ use crate::FxIndexSet;
 use arrayvec::ArrayVec;
 use lazy_static::lazy_static;
 use rustc_hash::FxHashMap;
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::{fmt, iter};
 
 use self::indexed::FlatIdx as _;
@@ -23,6 +25,34 @@ pub struct Spec {
     // HACK(eddyb) ad-hoc interning, to reduce the cost of tracking operand names
     // down to a single extra byte per operand (see `PackedOperandNameAndKind`).
     operand_names: FxIndexSet<&'static str>,
+
+    // HACK(eddyb) the `OnceLock`s allow lazy parsing, avoiding overhead.
+    // FIXME(eddyb) fix type complexity once `LazyLock` stabilizes.
+    #[allow(clippy::type_complexity)]
+    ext_inst_sets: BTreeMap<
+        &'static str,
+        (std::sync::OnceLock<ExtInstSetDesc>, Box<dyn Fn() -> ExtInstSetDesc + Send + Sync>),
+    >,
+}
+
+/// Simplified information for pretty-printing "extended instruction" sets.
+pub struct ExtInstSetDesc {
+    /// Shorter name to use during pretty-printing.
+    pub short_alias: Option<Cow<'static, str>>,
+
+    pub instructions: BTreeMap<u32, ExtInstSetInstructionDesc>,
+}
+
+/// Simplified [`InstructionDef`] for pretty-printing "extended instruction" sets.
+pub struct ExtInstSetInstructionDesc {
+    pub name: Cow<'static, str>,
+    pub operand_names: Vec<Cow<'static, str>>,
+
+    /// Whether this instruction is non-semantic debuginfo and should therefore
+    /// be pretty-printed on a single line, as a comment.
+    //
+    // FIXME(eddyb) allow customizing the formatting, but this works for now.
+    pub is_debuginfo: bool,
 }
 
 macro_rules! def_well_known {
@@ -86,6 +116,7 @@ def_well_known! {
         OpLine,
         OpNoLine,
 
+        OpTypeVoid,
         OpTypeBool,
         OpTypeInt,
         OpTypeFloat,
@@ -480,6 +511,37 @@ pub enum LiteralSize {
     FromContextualType,
 }
 
+fn sanitize_operand_name<'a>(name: &Option<raw::CowStr<'a>>) -> &'a str {
+    name.as_ref()
+        .and_then(|name| match name {
+            &raw::CowStr::Borrowed(s) => {
+                s.strip_prefix('\'')?.strip_suffix('\'').filter(|s| {
+                    // HACK(eddyb) it's pretty bad that SPIR-V uses spaces
+                    // in operand names, but by constraining the rest of
+                    // the character set (to be identifier-like), we get
+                    // to remove spaces (to get `FooBar`), or even replace
+                    // them with `_` (to get `Foo_Bar` or even `foo_bar`).
+                    s.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ')
+                })
+            }
+            raw::CowStr::Owned(s) => {
+                assert!(s.contains("', +\n'"), "unexpected non-zero-copy {s:?}");
+                None
+            }
+        })
+        .unwrap_or("")
+}
+
+// HACK(eddyb) make sure parsing JSON doesn't start failing randomly.
+#[test]
+fn get_spec_and_all_ext_inst_sets() {
+    let spec = Spec::get();
+    for name in spec.ext_inst_sets.keys() {
+        spec.get_ext_inst_set_by_lowercase_name(name);
+    }
+}
+
 impl Spec {
     /// Return a lazily-loaded [`Spec`] (only does significant work for the first call).
     #[inline(always)]
@@ -487,23 +549,73 @@ impl Spec {
     pub fn get() -> &'static Spec {
         lazy_static! {
             static ref SPEC: Spec = {
-                // NOTE(eddyb) the comment inside the invocation below exists to
-                // show up when the file is missing (due to git submodules not
-                // being checked out), which is why it's styled the way it is.
-                const SPIRV_CORE_GRAMMAR_JSON: &str = include_str!(
-                    // help: when building from a git checkout, git submodules
-                    //     also need to be initialized/checked out, by running:
-                    //     `git submodule update --init`
-                    // note: if the error persists, please open an issue
-                    "../../khronos-spec/SPIRV-Headers/include/spirv/unified1/spirv.core.grammar.json"
-                );
+                mod khr_spv_grammar_jsons {
+                    include!(concat!(env!("OUT_DIR"), "/khr_spv_grammar_jsons.rs"));
+                }
 
                 let raw_core_grammar: raw::CoreGrammar<'static> =
-                    serde_json::from_str(SPIRV_CORE_GRAMMAR_JSON).unwrap();
-                Spec::from_raw(raw_core_grammar)
+                    serde_json::from_str(khr_spv_grammar_jsons::SPIRV_CORE_GRAMMAR).unwrap();
+
+                let mut spec = Spec::from_raw(raw_core_grammar);
+
+                // FIXME(eddyb) this should be moved somewhere better.
+                for (name, json) in khr_spv_grammar_jsons::EXTINST_NAMES_AND_GRAMMARS {
+                    let lazy_init = move || {
+                        let is_debuginfo_ext_inst_set = name.contains(".debuginfo.");
+                        let extinst_grammar: raw::ExtInstGrammar<'static> =
+                            serde_json::from_str(json).unwrap();
+                        let instructions = extinst_grammar
+                            .instructions
+                            .iter()
+                            .map(|inst| {
+                                (
+                                    inst.opcode.into(),
+                                    ExtInstSetInstructionDesc {
+                                        name: inst.opname.into(),
+                                        operand_names: inst
+                                            .operands
+                                            .iter()
+                                            .map(|operand| {
+                                                sanitize_operand_name(&operand.name)
+                                            })
+                                            .take_while(|name| !name.is_empty())
+                                            .map(|name| name.into())
+                                            .collect(),
+
+                                        is_debuginfo: is_debuginfo_ext_inst_set
+                                            && inst.opname.strip_prefix("Debug")
+                                                .is_some_and(|next| next.starts_with(|c: char| c.is_ascii_uppercase()))
+                                    },
+                                )
+                            })
+                            .collect::<BTreeMap<_, _>>();
+                        ExtInstSetDesc { short_alias: None, instructions }
+                    };
+                    spec.ext_inst_sets.insert(
+                        name,
+                        (
+                            Default::default(),
+                            Box::new(lazy_init),
+                        ),
+                    );
+                }
+
+                spec
             };
         }
         &SPEC
+    }
+
+    /// Return a lazily-parsed [`ExtInstSetDesc`], if a known one exists for this
+    /// `OpExtInstImport` name (required to be lowercase, due to Khronos' choice
+    /// of case insensitivity, but **not checked by this function**).
+    pub fn get_ext_inst_set_by_lowercase_name(
+        &self,
+        lowercase_ext_inst_set_name: &str,
+    ) -> Option<&ExtInstSetDesc> {
+        self.ext_inst_sets
+            .get(lowercase_ext_inst_set_name)
+            .map(|(once_cell, init)| once_cell.get_or_init(init))
     }
 
     /// Implementation detail of [`Spec::get`], indexes the raw data to produce a [`Spec`].
@@ -530,27 +642,7 @@ impl Spec {
         let mut operand_names = FxIndexSet::default();
         assert_eq!(operand_names.insert_full("").0, PackedOperandNameAndKind::EMPTY_NAME_IDX);
         let mut pack_operand_name_and_kind = |name: &Option<raw::CowStr<'static>>, kind| {
-            let name = name
-                .as_ref()
-                .and_then(|name| match name {
-                    &raw::CowStr::Borrowed(s) => {
-                        s.strip_prefix('\'')?.strip_suffix('\'').filter(|s| {
-                            // HACK(eddyb) it's pretty bad that SPIR-V uses spaces
-                            // in operand names, but by constraining the rest of
-                            // the character set (to be identifier-like), we get
-                            // to remove spaces (to get `FooBar`), or even replace
-                            // them with `_` (to get `Foo_Bar` or even `foo_bar`).
-                            s.starts_with(|c: char| c.is_ascii_alphabetic())
-                                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ')
-                        })
-                    }
-                    raw::CowStr::Owned(s) => {
-                        assert!(s.contains("', +\n'"), "unexpected non-zero-copy {s:?}");
-                        None
-                    }
-                })
-                .unwrap_or("");
-            let (name_idx, _) = operand_names.insert_full(name);
+            let (name_idx, _) = operand_names.insert_full(sanitize_operand_name(name));
             PackedOperandNameAndKind::pack(name_idx, kind)
         };
 
@@ -774,8 +866,7 @@ impl Spec {
                 let has_categorical_prefix = |prefix| {
                     inst.opname
                         .strip_prefix(prefix)
-                        .filter(|next| next.starts_with(|c: char| c.is_ascii_uppercase()))
-                        .is_some()
+                        .is_some_and(|next| next.starts_with(|c: char| c.is_ascii_uppercase()))
                 };
 
                 let category_from_prefix = if has_categorical_prefix("OpType") {
@@ -964,6 +1055,8 @@ impl Spec {
             operand_kinds,
 
             operand_names,
+
+            ext_inst_sets: BTreeMap::new(),
         }
     }
 }
@@ -993,6 +1086,20 @@ pub mod raw {
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    pub struct ExtInstGrammar<'a> {
+        #[serde(borrow)]
+        pub copyright: Option<Vec<CowStr<'a>>>,
+
+        pub version: Option<u8>,
+        pub revision: u8,
+
+        pub instructions: Vec<Instruction<'a>>,
+        #[serde(default)]
+        pub operand_kinds: Vec<OperandKind<'a>>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct InstructionPrintingClass<'a> {
         pub tag: &'a str,
         pub heading: Option<&'a str>,
@@ -1002,6 +1109,7 @@ pub mod raw {
     #[serde(deny_unknown_fields)]
     pub struct Instruction<'a> {
         pub opname: &'a str,
+        #[serde(default)]
         pub class: &'a str,
         pub opcode: u16,
         #[serde(default)]
@@ -1011,6 +1119,8 @@ pub mod raw {
         pub extensions: SmallVec<[&'a str; 1]>,
         #[serde(default)]
         pub capabilities: SmallVec<[&'a str; 1]>,
+        // HACK(eddyb) some `extinst.*.json` use this form.
+        pub capability: Option<&'a str>,
 
         pub version: Option<&'a str>,
         #[serde(rename = "lastVersion")]
@@ -1115,17 +1225,24 @@ pub mod raw {
     #[serde(untagged)]
     pub enum DecOrHex<'a, T> {
         Dec(T),
-        Hex(&'a str),
+        MaybeHex(&'a str),
     }
 
     impl TryInto<u32> for DecOrHex<'_, u32> {
-        type Error = &'static str;
+        type Error = String;
         fn try_into(self) -> Result<u32, Self::Error> {
-            Ok(match self {
-                DecOrHex::Dec(x) => x,
-                DecOrHex::Hex(s) => {
+            match self {
+                DecOrHex::Dec(x) => Ok(x),
+                DecOrHex::MaybeHex(s) => {
+                    // HACK(eddyb) some decimal numbers are kept as strings.
+                    if let Ok(x) = s.parse() {
+                        return Ok(x);
+                    }
+
                     s.strip_prefix("0x")
-                        .ok_or("DecOrHex string form doesn't start with 0x")?
+                        .ok_or_else(|| {
+                            format!("DecOrHex string form doesn't start with 0x: {s:?}")
+                        })?
                         .chars()
                         .try_fold(0u32, |r, c| {
                             // HACK(eddyb) this uses `checked_mul` because `checked_shl`
@@ -1133,9 +1250,9 @@ pub mod raw {
                             Ok(r.checked_mul(16).ok_or("DecOrHex hex overflow into u32")?
                                 + c.to_digit(16)
                                     .ok_or("DecOrHex hex has non-hex-nibble character")?)
-                        })?
+                        })
                 }
-            })
+            }
         }
     }
 }
