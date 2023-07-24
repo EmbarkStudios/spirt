@@ -165,6 +165,7 @@ pub mod passes {
 
     pub mod legalize;
     pub mod link;
+    pub mod merge;
     pub mod qptr;
 }
 pub mod qptr;

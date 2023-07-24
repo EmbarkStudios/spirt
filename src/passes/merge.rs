@@ -1,17 +1,16 @@
 use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use smallvec::SmallVec;
 
 use crate::{
-    spv::{self, Dialect},
     transform::{InnerTransform, Transformed, Transformer},
     visit::{InnerVisit, Visitor},
-    AttrSet, Const, Context, DataInstForm, Func, GlobalVar, Module, Type,
+    AttrSet, Const, Context, DataInstForm, Func, GlobalVar, Module, ModuleDialect, Type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeError {
+    IncompatibleModuleDialects,
     MemoryModelMissmatch,
     AddressingModelMissmatch,
     VersionMissmatch { mergee: (u8, u8), merged: (u8, u8) },
@@ -32,13 +31,7 @@ pub fn merge(mergee: &mut Module, merged: Module) -> Result<(), MergeError> {
     // First we need to verify some basic compatibility (spec version, memory model etc.).
     // After that we build a rewriting table for type IDs, that match `merged`'s type IDs to the `mergee`
     // IDs, or import them into `mergee` if they don't exist.
-    let mut dialect_collector = DialectCollector {
-        dialects: SmallVec::default(),
-    };
-    mergee.inner_visit_with(&mut dialect_collector);
-    merged.inner_visit_with(&mut dialect_collector);
-    assert!(dialect_collector.dialects.len() == 2);
-    dialect_collector.compatible()?;
+    let resolved_dialect = make_compatible(mergee.dialect.clone(), &merged.dialect)?;
 
     let (resolved_global_vars, resolved_funcs) = {
         let mut cpycoll = CopyCollector {
@@ -104,57 +97,47 @@ pub fn merge(mergee: &mut Module, merged: Module) -> Result<(), MergeError> {
         }
     }
 
+    //Finally apply the merged new dialect
+    mergee.dialect = resolved_dialect;
+
     Ok(())
 }
 
-struct DialectCollector {
-    dialects: SmallVec<[Dialect; 2]>,
-}
+fn make_compatible(a: ModuleDialect, b: &ModuleDialect) -> Result<ModuleDialect, MergeError> {
+    //NOTE(siebencorgie):
+    // We currently only have spv. Not sure hot this would work otherwise
+    let (a_dia, b_dia) = match (a, b) {
+        (ModuleDialect::Spv(a_spv), ModuleDialect::Spv(b_spv)) => (a_spv, b_spv),
+    };
 
-impl DialectCollector {
-    fn compatible(&self) -> Result<(), MergeError> {
-        if self.dialects.len() < 2 {
-            return Ok(());
-        }
-
-        let memmodel = self.dialects[0].memory_model;
-        let addressmdl = self.dialects[0].addressing_model;
-        let ver_maj = self.dialects[0].version_major;
-        let ver_min = self.dialects[0].version_minor;
-
-        for d in &self.dialects[1..] {
-            if d.memory_model != memmodel {
-                return Err(MergeError::MemoryModelMissmatch);
-            }
-            if d.addressing_model != addressmdl {
-                return Err(MergeError::AddressingModelMissmatch);
-            }
-            if d.version_major != ver_maj || d.version_minor != ver_min {
-                return Err(MergeError::VersionMissmatch {
-                    mergee: (ver_maj, ver_min),
-                    merged: (d.version_major, d.version_minor),
-                });
-            }
-        }
-
-        Ok(())
+    if a_dia.memory_model != b_dia.memory_model {
+        return Err(MergeError::MemoryModelMissmatch);
     }
-}
-
-impl Visitor<'_> for DialectCollector {
-    fn visit_attr_set_use(&mut self, _attrs: crate::AttrSet) {}
-    fn visit_type_use(&mut self, _ty: crate::Type) {}
-    fn visit_const_use(&mut self, _ct: crate::Const) {}
-    fn visit_data_inst_form_use(&mut self, _data_inst_form: crate::DataInstForm) {}
-    fn visit_global_var_use(&mut self, _gv: crate::GlobalVar) {}
-    fn visit_func_use(&mut self, _func: crate::Func) {}
-    fn visit_spv_dialect(&mut self, dialect: &spv::Dialect) {
-        self.dialects.push(dialect.clone());
+    if a_dia.addressing_model != b_dia.addressing_model {
+        return Err(MergeError::AddressingModelMissmatch);
     }
+    if a_dia.version_major != b_dia.version_major || a_dia.version_minor != b_dia.version_minor {
+        return Err(MergeError::VersionMissmatch {
+            mergee: (a_dia.version_major, a_dia.version_minor),
+            merged: (b_dia.version_major, b_dia.version_minor),
+        });
+    }
+
+    //since we are compatible, take the first dialect and merge any capability we don't have yet.
+    // TODO(siebencorgie): Are there any incompatible capabilities we should check?
+    let mut new_dialect = a_dia;
+    for cap in b_dia.capabilities.iter() {
+        let _ = new_dialect.capabilities.insert(cap.clone());
+    }
+    for ext in b_dia.extensions.iter() {
+        let _ = new_dialect.extensions.insert(ext.clone());
+    }
+
+    Ok(ModuleDialect::Spv(new_dialect))
 }
 
-///Collects all functions and global variables that need to be copied over
-/// for any export to become _valid_.
+//Collects all functions and global variables that need to be copied over
+// for all exports to become _valid_.
 struct CopyCollector<'a> {
     cx: &'a Context,
     src_module: &'a Module,
@@ -203,7 +186,6 @@ impl Visitor<'_> for CopyCollector<'_> {
             self.visit_func_decl(&self.src_module.funcs[func]);
         } else {
             //Seen the first time, therefore register in new module
-            println!("Define function!");
             let e = self
                 .dst_module
                 .funcs

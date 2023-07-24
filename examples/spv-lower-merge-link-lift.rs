@@ -72,10 +72,12 @@ fn main() -> std::io::Result<()> {
             after_pass("merge file", &merged)?;
 
             eprint_duration(|| spirt::passes::merge::merge(&mut module, merged)).unwrap();
-
+            eprintln!("merge");
             after_pass("merged", &module)?;
 
-            /*
+            /* NOTE: If you add that, it'll probably delete the just merged exports
+             * to prevent that, use an module that declares an `import` for one of the merged
+             * `export`s.
             let original_export_count = module.exports.len();
             eprint_duration(|| {
                 spirt::passes::link::minimize_exports(&mut module, |export_key| {
@@ -91,8 +93,6 @@ fn main() -> std::io::Result<()> {
 
             after_pass("minimize_exports", &module)?;
             */
-            // HACK(eddyb) do this late enough to avoid spending time on unused
-            // functions, which `link::minimize_exports` makes unreachable.
             eprint_duration(|| spirt::passes::legalize::structurize_func_cfgs(&mut module));
             eprintln!("legalize::structurize_func_cfgs");
             after_pass("structurize_func_cfgs", &module)?;
