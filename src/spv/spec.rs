@@ -154,6 +154,9 @@ def_well_known! {
         LiteralContextDependentNumber,
     ],
     // FIXME(eddyb) find a way to namespace these to avoid conflicts.
+    addressing_model: u32 = [
+        Logical,
+    ],
     storage_class: u32 = [
         Function,
 
@@ -949,6 +952,11 @@ impl Spec {
             storage: instructions,
         };
 
+        let addressing_models =
+            match &operand_kinds[operand_kinds.lookup("AddressingModel").unwrap()] {
+                OperandKindDef::ValueEnum { variants } => variants,
+                _ => unreachable!(),
+            };
         let storage_classes = match &operand_kinds[operand_kinds.lookup("StorageClass").unwrap()] {
             OperandKindDef::ValueEnum { variants } => variants,
             _ => unreachable!(),
@@ -967,6 +975,7 @@ impl Spec {
         let well_known = WellKnown::lookup_with(PerWellKnownGroup {
             opcode: |name| instructions.lookup(name).unwrap(),
             operand_kind: |name| operand_kinds.lookup(name).unwrap(),
+            addressing_model: |name| addressing_models.lookup(name).unwrap().into(),
             storage_class: |name| storage_classes.lookup(name).unwrap().into(),
             decoration: |name| decorations.lookup(name).unwrap().into(),
             linkage_type: |name| linkage_types.lookup(name).unwrap().into(),

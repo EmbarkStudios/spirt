@@ -4,7 +4,7 @@ set -e
 # HACK(eddyb) `sed -E -z` expression to remove parts of the SPIR-T pretty-printing
 # output that we don't want to be actaully shown in an example (in `README.md`).
 spirt_cleanup_sed="\
-    s/module\.(dialect|debug_info) = SPIR-V \{\n(  [^\n]*\n)*\}\n\n//g;\
+    s/module\.(dialect|debug_info) = spv\.Module(\.DebugInfo)?\(.*\)\n\n//g;\
     s/\nexport \{\n(  [^\n]*\n)*\}//\
 "
 

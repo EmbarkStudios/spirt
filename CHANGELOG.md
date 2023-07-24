@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#43](https://github.com/EmbarkStudios/spirt/pull/43) tweaked several pretty-printing
+  details to improve visual cohesion ("named arguments" in `module.{dialect,debuginfo}`)
+  and ergonomics (multi-line string literals, HTML entities for anchor escaping,
+  hover on multi-version table cells to disable "no changes" desaturation/dimming)
 - [PR#36](https://github.com/EmbarkStudios/spirt/pull/36) started using `OpName`s
   in pretty-printing, to replace the `T1`/`F2`/`v3` "anonymous" style, when unambiguous
 - [PR#40](https://github.com/EmbarkStudios/spirt/pull/40) increased the pretty-printed

@@ -1145,6 +1145,9 @@ impl Printer<'_> {
     fn string_literal_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::RED)
     }
+    fn string_literal_escape_style(&self) -> pretty::Styles {
+        pretty::Styles::color(pretty::palettes::simple::ORANGE)
+    }
     fn declarative_keyword_style(&self) -> pretty::Styles {
         pretty::Styles::color(pretty::palettes::simple::BLUE)
     }
@@ -1188,9 +1191,54 @@ impl Printer<'_> {
 }
 
 impl<'a> Printer<'a> {
-    /// Pretty-print a `name: ` style "named argument" prefix.
+    /// Pretty-print a string literal with escaping and styling.
     //
-    // FIXME(eddyb) add methods like this for all styled text (e.g. literals).
+    // FIXME(eddyb) add methods like this for all styled text (e.g. numeric literals).
+    fn pretty_string_literal(&self, s: &str) -> pretty::Fragment {
+        // HACK(eddyb) this is somewhat inefficient, but we need to allocate a
+        // `String` for every piece anyway, so might as well make it convenient.
+        pretty::Fragment::new(
+            // HACK(eddyb) this allows aligning the actual string contents,
+            // (see `c == '\n'` special-casing below for when this applies).
+            (s.contains('\n').then_some(Either::Left(' ')).into_iter())
+                .chain([Either::Left('"')])
+                .chain(s.chars().flat_map(|c| {
+                    let escaped = c.escape_debug();
+                    let maybe_escaped = if c == '\'' {
+                        // Unescape single quotes, we're in a double-quoted string.
+                        assert_eq!(escaped.collect_tuple(), Some(('\\', c)));
+                        Either::Left(c)
+                    } else if let Some((single,)) = escaped.clone().collect_tuple() {
+                        assert_eq!(single, c);
+                        Either::Left(c)
+                    } else {
+                        assert_eq!(escaped.clone().next(), Some('\\'));
+                        Either::Right(escaped)
+                    };
+
+                    // HACK(eddyb) move escaped `\n` to the start of a new line,
+                    // using Rust's trailing `\` on the previous line, which eats
+                    // all following whitespace (and only stops at the escape).
+                    let extra_prefix_unescaped = if c == '\n' { "\\\n" } else { "" };
+
+                    (extra_prefix_unescaped.chars().map(Either::Left)).chain([maybe_escaped])
+                }))
+                .chain([Either::Left('"')])
+                .group_by(|maybe_escaped| maybe_escaped.is_right())
+                .into_iter()
+                .map(|(escaped, group)| {
+                    if escaped {
+                        self.string_literal_escape_style()
+                            .apply(group.flat_map(Either::unwrap_right).collect::<String>())
+                    } else {
+                        self.string_literal_style()
+                            .apply(group.map(Either::unwrap_left).collect::<String>())
+                    }
+                }),
+        )
+    }
+
+    /// Pretty-print a `name: ` style "named argument" prefix.
     fn pretty_named_argument_prefix(&self, name: impl Into<Cow<'static, str>>) -> pretty::Fragment {
         // FIXME(eddyb) avoid the cost of allocating here.
         self.named_argument_label_style()
@@ -1467,9 +1515,9 @@ impl Use {
                 }
 
                 impl Suffix<'_> {
-                    /// Format `self` into `w`, escaping (`Sufix::Name`) `char`s
-                    /// wherever needed, to limit the charset to `[A-Za-z0-9_]`
-                    /// (plus `\`, `{` and `}` for escape sequences alone).
+                    /// Format `self` into `w`, minimally escaping (`Sufix::Name`)
+                    /// `char`s as `&#...;` HTML entities, to limit the charset
+                    /// to `[A-Za-z0-9_]` (plus `[&#;]`, for escapes alone).
                     fn write_escaped_to(&self, w: &mut impl fmt::Write) -> fmt::Result {
                         match *self {
                             Suffix::Num(idx) => write!(w, "{idx}"),
@@ -1496,7 +1544,7 @@ impl Use {
                                     let mut chars = name.chars();
                                     if let Some(c) = chars.next() {
                                         assert!(!is_valid(c));
-                                        write!(w, "{}", c.escape_unicode())?;
+                                        write!(w, "&#{};", c as u32)?;
                                     }
                                     name = chars.as_str();
                                 }
@@ -1787,55 +1835,7 @@ impl Print for ModuleDialect {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let dialect = match self {
-            Self::Spv(spv::Dialect {
-                version_major,
-                version_minor,
-                capabilities,
-                extensions,
-                addressing_model,
-                memory_model,
-            }) => {
-                let wk = &spv::spec::Spec::get().well_known;
-
-                pretty::join_comma_sep(
-                    "SPIR-V {",
-                    [
-                        pretty::Fragment::new([
-                            "version: ".into(),
-                            printer
-                                .numeric_literal_style()
-                                .apply(format!("{version_major}.{version_minor}")),
-                        ]),
-                        pretty::join_comma_sep(
-                            "extensions: {",
-                            extensions.iter().map(|ext| {
-                                printer.string_literal_style().apply(format!("{ext:?}"))
-                            }),
-                            "}",
-                        ),
-                        pretty::join_comma_sep(
-                            "capabilities: {",
-                            capabilities
-                                .iter()
-                                .map(|&cap| printer.pretty_spv_imm(wk.Capability, cap)),
-                            "}",
-                        ),
-                        pretty::Fragment::new([
-                            "addressing_model: ".into(),
-                            printer.pretty_spv_imm(wk.AddressingModel, *addressing_model),
-                        ]),
-                        pretty::Fragment::new([
-                            "memory_model: ".into(),
-                            printer.pretty_spv_imm(wk.MemoryModel, *memory_model),
-                        ]),
-                    ]
-                    .into_iter()
-                    .map(|entry| {
-                        pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), entry])
-                    }),
-                    "}",
-                )
-            }
+            Self::Spv(dialect) => dialect.print(printer),
         };
 
         AttrsAndDef {
@@ -1844,109 +1844,106 @@ impl Print for ModuleDialect {
         }
     }
 }
+impl Print for spv::Dialect {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        let Self {
+            version_major,
+            version_minor,
+            capabilities,
+            extensions,
+            addressing_model,
+            memory_model,
+        } = self;
+
+        let wk = &spv::spec::Spec::get().well_known;
+        pretty::Fragment::new([
+            printer
+                .demote_style_for_namespace_prefix(printer.spv_base_style())
+                .apply("spv.")
+                .into(),
+            printer.spv_base_style().apply("Module").into(),
+            pretty::join_comma_sep(
+                "(",
+                [pretty::Fragment::new([
+                    printer.pretty_named_argument_prefix("version"),
+                    printer
+                        .numeric_literal_style()
+                        .apply(format!("{version_major}"))
+                        .into(),
+                    ".".into(),
+                    printer
+                        .numeric_literal_style()
+                        .apply(format!("{version_minor}"))
+                        .into(),
+                ])]
+                .into_iter()
+                .chain((!extensions.is_empty()).then(|| {
+                    pretty::Fragment::new([
+                        printer.pretty_named_argument_prefix("extensions"),
+                        pretty::join_comma_sep(
+                            "{",
+                            extensions
+                                .iter()
+                                .map(|ext| printer.pretty_string_literal(ext)),
+                            "}",
+                        ),
+                    ])
+                }))
+                .chain(
+                    // FIXME(eddyb) consider a `spv.Capability.{A,B,C}` style.
+                    (!capabilities.is_empty()).then(|| {
+                        let cap_imms = |cap| [spv::Imm::Short(wk.Capability, cap)];
+
+                        // HACK(eddyb) construct a custom `spv.Capability.{A,B,C}`.
+                        let capability_namespace_prefix = printer
+                            .pretty_spv_print_tokens_for_operand({
+                                let mut tokens = spv::print::operand_from_imms(cap_imms(0));
+                                assert!(matches!(
+                                    tokens.tokens.pop(),
+                                    Some(spv::print::Token::EnumerandName(_))
+                                ));
+                                tokens
+                            });
+
+                        let mut cap_names = capabilities.iter().map(|&cap| {
+                            printer.pretty_spv_print_tokens_for_operand({
+                                let mut tokens = spv::print::operand_from_imms(cap_imms(cap));
+                                tokens.tokens.drain(..tokens.tokens.len() - 1);
+                                assert!(matches!(
+                                    tokens.tokens[..],
+                                    [spv::print::Token::EnumerandName(_)]
+                                ));
+                                tokens
+                            })
+                        });
+
+                        pretty::Fragment::new([
+                            capability_namespace_prefix,
+                            if cap_names.len() == 1 {
+                                cap_names.next().unwrap()
+                            } else {
+                                pretty::join_comma_sep("{", cap_names, "}")
+                            },
+                        ])
+                    }),
+                )
+                .chain(
+                    (*addressing_model != wk.Logical)
+                        .then(|| printer.pretty_spv_imm(wk.AddressingModel, *addressing_model)),
+                )
+                .chain([printer.pretty_spv_imm(wk.MemoryModel, *memory_model)]),
+                ")",
+            ),
+        ])
+    }
+}
 
 impl Print for ModuleDebugInfo {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
         let debug_info = match self {
-            Self::Spv(spv::ModuleDebugInfo {
-                original_generator_magic,
-                source_languages,
-                source_extensions,
-                module_processes,
-            }) => {
-                let wk = &spv::spec::Spec::get().well_known;
-
-                pretty::join_comma_sep(
-                    "SPIR-V {",
-                    [
-                        pretty::Fragment::new([
-                            "generator: ".into(),
-                            original_generator_magic
-                                .map(|generator_magic| {
-                                    let (tool_id, tool_version) =
-                                        (generator_magic.get() >> 16, generator_magic.get() as u16);
-                                    pretty::Fragment::new([
-                                        "{ tool_id: ".into(),
-                                        printer.numeric_literal_style().apply(format!("{tool_id}")),
-                                        ", version: ".into(),
-                                        printer
-                                            .numeric_literal_style()
-                                            .apply(format!("{tool_version}")),
-                                        " }".into(),
-                                    ])
-                                })
-                                .unwrap_or_else(|| "unknown".into()),
-                        ]),
-                        pretty::join_comma_sep(
-                            "source_languages: {",
-                            source_languages
-                                .iter()
-                                .map(|(lang, sources)| {
-                                    let spv::DebugSources { file_contents } = sources;
-                                    pretty::Fragment::new([
-                                        printer.pretty_spv_imm(wk.SourceLanguage, lang.lang),
-                                        " { version: ".into(),
-                                        printer
-                                            .numeric_literal_style()
-                                            .apply(format!("{}", lang.version))
-                                            .into(),
-                                        " }: ".into(),
-                                        pretty::join_comma_sep(
-                                            "{",
-                                            file_contents
-                                                .iter()
-                                                .map(|(&file, contents)| {
-                                                    pretty::Fragment::new([
-                                                        printer.string_literal_style().apply(
-                                                            format!("{:?}", &printer.cx[file]),
-                                                        ),
-                                                        ": ".into(),
-                                                        printer
-                                                            .string_literal_style()
-                                                            .apply(format!("{contents:?}")),
-                                                    ])
-                                                })
-                                                .map(|entry| {
-                                                    pretty::Fragment::new([
-                                                        pretty::Node::ForceLineSeparation.into(),
-                                                        entry,
-                                                    ])
-                                                }),
-                                            "}",
-                                        ),
-                                    ])
-                                })
-                                .map(|entry| {
-                                    pretty::Fragment::new([
-                                        pretty::Node::ForceLineSeparation.into(),
-                                        entry,
-                                    ])
-                                }),
-                            "}",
-                        ),
-                        pretty::join_comma_sep(
-                            "source_extensions: [",
-                            source_extensions.iter().map(|ext| {
-                                printer.string_literal_style().apply(format!("{ext:?}"))
-                            }),
-                            "]",
-                        ),
-                        pretty::join_comma_sep(
-                            "module_processes: [",
-                            module_processes.iter().map(|proc| {
-                                printer.string_literal_style().apply(format!("{proc:?}"))
-                            }),
-                            "]",
-                        ),
-                    ]
-                    .into_iter()
-                    .map(|entry| {
-                        pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), entry])
-                    }),
-                    "}",
-                )
-            }
+            Self::Spv(debug_info) => debug_info.print(printer),
         };
 
         AttrsAndDef {
@@ -1956,14 +1953,162 @@ impl Print for ModuleDebugInfo {
     }
 }
 
+impl Print for spv::ModuleDebugInfo {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        let Self {
+            original_generator_magic,
+            source_languages,
+            source_extensions,
+            module_processes,
+        } = self;
+
+        let wk = &spv::spec::Spec::get().well_known;
+        pretty::Fragment::new([
+            printer
+                .demote_style_for_namespace_prefix(
+                    printer.demote_style_for_namespace_prefix(printer.spv_base_style()),
+                )
+                .apply("spv.")
+                .into(),
+            printer
+                .demote_style_for_namespace_prefix(printer.spv_base_style())
+                .apply("Module.")
+                .into(),
+            printer.spv_base_style().apply("DebugInfo").into(),
+            pretty::join_comma_sep(
+                "(",
+                [
+                    original_generator_magic.map(|generator_magic| {
+                        let (tool_id, tool_version) =
+                            (generator_magic.get() >> 16, generator_magic.get() as u16);
+                        pretty::Fragment::new([
+                            printer.pretty_named_argument_prefix("generator"),
+                            printer
+                                .demote_style_for_namespace_prefix(printer.spv_base_style())
+                                .apply("spv.")
+                                .into(),
+                            printer.spv_base_style().apply("Tool").into(),
+                            pretty::join_comma_sep(
+                                "(",
+                                [
+                                    Some(pretty::Fragment::new([
+                                        printer.pretty_named_argument_prefix("id"),
+                                        printer
+                                            .numeric_literal_style()
+                                            .apply(format!("{tool_id}"))
+                                            .into(),
+                                    ])),
+                                    (tool_version != 0).then(|| {
+                                        pretty::Fragment::new([
+                                            printer.pretty_named_argument_prefix("version"),
+                                            printer
+                                                .numeric_literal_style()
+                                                .apply(format!("{tool_version}"))
+                                                .into(),
+                                        ])
+                                    }),
+                                ]
+                                .into_iter()
+                                .flatten(),
+                                ")",
+                            ),
+                        ])
+                    }),
+                    (!source_languages.is_empty()).then(|| {
+                        pretty::Fragment::new([
+                            printer.pretty_named_argument_prefix("source_languages"),
+                            pretty::join_comma_sep(
+                                "{",
+                                source_languages
+                                    .iter()
+                                    .map(|(lang, sources)| {
+                                        let spv::DebugSources { file_contents } = sources;
+                                        pretty::Fragment::new([
+                                            printer.pretty_spv_imm(wk.SourceLanguage, lang.lang),
+                                            "(".into(),
+                                            printer.pretty_named_argument_prefix("version"),
+                                            printer
+                                                .numeric_literal_style()
+                                                .apply(format!("{}", lang.version))
+                                                .into(),
+                                            "): ".into(),
+                                            pretty::join_comma_sep(
+                                                "{",
+                                                file_contents
+                                                    .iter()
+                                                    .map(|(&file, contents)| {
+                                                        pretty::Fragment::new([
+                                                            printer.pretty_string_literal(
+                                                                &printer.cx[file],
+                                                            ),
+                                                            pretty::join_space(
+                                                                ":",
+                                                                [printer.pretty_string_literal(
+                                                                    contents,
+                                                                )],
+                                                            ),
+                                                        ])
+                                                    })
+                                                    .map(|entry| {
+                                                        pretty::Fragment::new([
+                                                            pretty::Node::ForceLineSeparation
+                                                                .into(),
+                                                            entry,
+                                                        ])
+                                                    }),
+                                                "}",
+                                            ),
+                                        ])
+                                    })
+                                    .map(|entry| {
+                                        pretty::Fragment::new([
+                                            pretty::Node::ForceLineSeparation.into(),
+                                            entry,
+                                        ])
+                                    }),
+                                "}",
+                            ),
+                        ])
+                    }),
+                    (!source_extensions.is_empty()).then(|| {
+                        pretty::Fragment::new([
+                            printer.pretty_named_argument_prefix("source_extensions"),
+                            pretty::join_comma_sep(
+                                "[",
+                                source_extensions
+                                    .iter()
+                                    .map(|ext| printer.pretty_string_literal(ext)),
+                                "]",
+                            ),
+                        ])
+                    }),
+                    (!module_processes.is_empty()).then(|| {
+                        pretty::Fragment::new([
+                            printer.pretty_named_argument_prefix("module_processes"),
+                            pretty::join_comma_sep(
+                                "[",
+                                module_processes
+                                    .iter()
+                                    .map(|proc| printer.pretty_string_literal(proc)),
+                                "]",
+                            ),
+                        ])
+                    }),
+                ]
+                .into_iter()
+                .flatten(),
+                ")",
+            ),
+        ])
+    }
+}
+
 impl Print for ExportKey {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
-            &Self::LinkName(name) => printer
-                .string_literal_style()
-                .apply(format!("{:?}", &printer.cx[name]))
-                .into(),
+            &Self::LinkName(name) => printer.pretty_string_literal(&printer.cx[name]),
 
             // HACK(eddyb) `interface_global_vars` should be recomputed by
             // `spv::lift` anyway, so hiding them here mimics that.
@@ -2547,10 +2692,7 @@ impl Print for ConstDef {
                 ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
                     printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
                     "(".into(),
-                    printer
-                        .string_literal_style()
-                        .apply(format!("{:?}", &printer.cx[s]))
-                        .into(),
+                    printer.pretty_string_literal(&printer.cx[s]),
                     ")".into(),
                 ]),
             }),
@@ -2563,11 +2705,9 @@ impl Print for Import {
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         match self {
             &Self::LinkName(name) => pretty::Fragment::new([
-                printer.declarative_keyword_style().apply("import"),
+                printer.declarative_keyword_style().apply("import").into(),
                 " ".into(),
-                printer
-                    .string_literal_style()
-                    .apply(format!("{:?}", &printer.cx[name])),
+                printer.pretty_string_literal(&printer.cx[name]),
             ]),
         }
     }
@@ -3281,10 +3421,7 @@ impl Print for DataInstDef {
                                 printer
                                     .pretty_spv_opcode(printer.spv_op_style(), wk.OpExtInstImport),
                                 "(".into(),
-                                printer
-                                    .string_literal_style()
-                                    .apply(format!("{:?}", &printer.cx[ext_set]))
-                                    .into(),
+                                printer.pretty_string_literal(&printer.cx[ext_set]),
                                 ")".into(),
                             ]),
                             printer
