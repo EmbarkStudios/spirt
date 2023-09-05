@@ -2,7 +2,7 @@
 
 use crate::{
     spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
-    ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef, EntityList,
+    ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeKind,
     Value,
 };
@@ -574,8 +574,11 @@ struct DeferredEdgeBundleSet {
 /// Partially structurized [`ControlRegion`], the result of combining together
 /// several smaller [`ControlRegion`]s, based on CFG edges between them.
 struct PartialControlRegion {
-    // FIXME(eddyb) keep this in the original `ControlRegion` instead.
-    children: EntityList<ControlNode>,
+    // FIXME(eddyb) theoretically this field could be removed, but in practice
+    // this still holds a mix of original `ControlRegion`s and transient ones
+    // which only hold a `ControlNode`, and which would need to be handled
+    // separately (e.g. `(ControlNode, DeferredEdgeBundleSet)`, generics, etc.).
+    structured_body_holder: Option<ControlRegion>,
 
     /// The transitive targets which can't be claimed into the [`ControlRegion`]
     /// remain as deferred exits, and will blocking further structurization until
@@ -688,8 +691,8 @@ impl<'a> Structurizer<'a> {
             if let Some(deferred_return) =
                 body_region.deferred_edges.target_to_deferred.swap_remove(&DeferredTarget::Return)
             {
+                assert!(body_region.structured_body_holder == Some(self.func_def_body.body));
                 let body_def = self.func_def_body.at_mut_body().def();
-                body_def.children = body_region.children;
                 body_def.outputs = deferred_return.edge_bundle.target_inputs;
                 self.func_def_body.unstructured_cfg = None;
 
@@ -744,6 +747,8 @@ impl<'a> Structurizer<'a> {
         }));
     }
 
+    // FIXME(eddyb) the names `target` and `region` are an issue, they
+    // should be treated as "the region" vs "its (deferred) successors".
     fn claim_or_defer_single_edge(
         &mut self,
         target: ControlRegion,
@@ -757,7 +762,7 @@ impl<'a> Structurizer<'a> {
         .unwrap_or_else(|deferred| {
             let (deferred_target, deferred) = deferred.into_target_keyed_kv_pair();
             PartialControlRegion {
-                children: EntityList::empty(),
+                structured_body_holder: None,
                 deferred_edges: DeferredEdgeBundleSet {
                     target_to_deferred: [(DeferredTarget::Region(deferred_target), deferred)]
                         .into_iter()
@@ -767,6 +772,8 @@ impl<'a> Structurizer<'a> {
         })
     }
 
+    // FIXME(eddyb) make it possible to return a fresh new node, as opposed to
+    // an existing region?
     fn try_claim_edge_bundle(
         &mut self,
         mut edge_bundle: IncomingEdgeBundle<ControlRegion>,
@@ -816,11 +823,14 @@ impl<'a> Structurizer<'a> {
             }
         };
 
+        // FIXME(eddyb) remove this field in most cases.
+        assert!(region.structured_body_holder == Some(target));
+
         // If the target contains any backedge to itself, that's a loop, with:
         // * entry: `edge_bundle` (unconditional, i.e. `do`-`while`-like)
-        // * body: `region.children`
+        // * body: `target` / `region.structured_body_holder`
         // * repeat ("continue") edge: `backedge` (with its `condition`)
-        // * exit ("break") edges: `region.successor` (must be `Deferred`)
+        // * exit ("break") edges: `region.deferred_*`
         if let Some(backedge) = backedge {
             let DeferredEdgeBundle { condition: repeat_condition, edge_bundle: backedge } =
                 backedge;
@@ -829,36 +839,15 @@ impl<'a> Structurizer<'a> {
             // from both the loop entry and the backedge, that has to become
             // "loop state" (with values being passed to `body` `inputs`, i.e.
             // the structurized `body` region as a whole takes the same `inputs`).
-            let body_inputs: SmallVec<[_; 2]> = self.func_def_body.at(target).def().inputs.clone();
-            let initial_inputs = edge_bundle.target_inputs;
-            let body_outputs = backedge.target_inputs;
-            assert_eq!(initial_inputs.len(), body_inputs.len());
-            assert_eq!(body_outputs.len(), body_inputs.len());
-
-            let body = self.func_def_body.control_regions.define(
-                self.cx,
-                ControlRegionDef {
-                    inputs: body_inputs,
-                    children: region.children,
-                    outputs: body_outputs,
-                },
-            );
-
-            // The last step of turning `edge_bundle` into the complete merge of
-            // the loop entry and its backedge, is to supply the structured
-            // `body` `inputs` as the `target_inputs`, so that they can be
-            // inserted into `control_region_input_replacements` below.
             //
-            // FIXME(eddyb) if the original body region (`target`) were kept,
-            // it would remove the need for all of this rewriting.
-            edge_bundle.target_inputs = initial_inputs
-                .iter()
-                .enumerate()
-                .map(|(input_idx, _)| Value::ControlRegionInput {
-                    region: body,
-                    input_idx: input_idx.try_into().unwrap(),
-                })
-                .collect();
+            // FIXME(eddyb) the names `target` and `region` are an issue, they
+            // should be treated as "the region" vs "its (deferred) successors".
+            let body = target;
+            let body_def = self.func_def_body.at_mut(body).def();
+            let initial_inputs = mem::take(&mut edge_bundle.target_inputs);
+            body_def.outputs = backedge.target_inputs;
+            assert_eq!(initial_inputs.len(), body_def.inputs.len());
+            assert_eq!(body_def.outputs.len(), body_def.inputs.len());
 
             let repeat_condition = self.materialize_lazy_cond(repeat_condition);
             let loop_node = self.func_def_body.control_nodes.define(
@@ -872,8 +861,17 @@ impl<'a> Structurizer<'a> {
 
             // Replace the region with the whole loop, any exits out of the loop
             // being encoded in `region.deferred_*`.
-            region.children = EntityList::empty();
-            region.children.insert_last(loop_node, &mut self.func_def_body.control_nodes);
+            //
+            // FIXME(eddyb) the names `target` and `region` are an issue, they
+            // should be treated as "the region" vs "its (deferred) successors".
+            //
+            // FIXME(eddyb) do not define a region just to keep a `ControlNode` in it.
+            let wasteful_loop_region =
+                self.func_def_body.control_regions.define(self.cx, ControlRegionDef::default());
+            self.func_def_body.control_regions[wasteful_loop_region]
+                .children
+                .insert_last(loop_node, &mut self.func_def_body.control_nodes);
+            region.structured_body_holder = Some(wasteful_loop_region);
 
             // HACK(eddyb) we've treated loop exits as extra "false edges", so
             // here they have to be added to the loop (potentially unlocking
@@ -965,7 +963,7 @@ impl<'a> Structurizer<'a> {
                     // (e.g. a new `ControlKind`, or replacing region `outputs`),
                     // but it's simpler to handle it like this.
                     Ok(PartialControlRegion {
-                        children: EntityList::empty(),
+                        structured_body_holder: None,
                         deferred_edges: DeferredEdgeBundleSet {
                             target_to_deferred: [].into_iter().collect(),
                         },
@@ -989,7 +987,7 @@ impl<'a> Structurizer<'a> {
                     assert_eq!(child_regions.len(), 0);
 
                     Ok(PartialControlRegion {
-                        children: EntityList::empty(),
+                        structured_body_holder: None,
                         deferred_edges: DeferredEdgeBundleSet {
                             target_to_deferred: [DeferredEdgeBundle {
                                 condition: LazyCond::True,
@@ -1030,14 +1028,8 @@ impl<'a> Structurizer<'a> {
                 // HACK(eddyb) attach the unsupported `ControlInst` to a fresh
                 // new "proxy" `ControlRegion`, that can then be the target of
                 // a deferred edge, specially crafted to be unclaimable.
-                let proxy = self.func_def_body.control_regions.define(
-                    self.cx,
-                    ControlRegionDef {
-                        inputs: [].into_iter().collect(),
-                        children: EntityList::empty(),
-                        outputs: [].into_iter().collect(),
-                    },
-                );
+                let proxy =
+                    self.func_def_body.control_regions.define(self.cx, ControlRegionDef::default());
                 self.func_def_body
                     .unstructured_cfg
                     .as_mut()
@@ -1057,7 +1049,7 @@ impl<'a> Structurizer<'a> {
                 };
 
                 PartialControlRegion {
-                    children: EntityList::empty(),
+                    structured_body_holder: None,
                     deferred_edges: DeferredEdgeBundleSet {
                         target_to_deferred: [deferred_proxy]
                             .into_iter()
@@ -1069,17 +1061,27 @@ impl<'a> Structurizer<'a> {
 
         // Prepend `unstructured_region`'s children to `region_from_control_inst`.
         let mut region = {
-            let mut children = self.func_def_body.at(unstructured_region).def().children;
+            let children_from_control_inst = region_from_control_inst
+                .structured_body_holder
+                .map(|structured_body_holder_from_control_inst| {
+                    mem::take(
+                        &mut self
+                            .func_def_body
+                            .at_mut(structured_body_holder_from_control_inst)
+                            .def()
+                            .children,
+                    )
+                })
+                .unwrap_or_default();
 
-            children
-                .append(region_from_control_inst.children, &mut self.func_def_body.control_nodes);
+            self.func_def_body.control_regions[unstructured_region]
+                .children
+                .append(children_from_control_inst, &mut self.func_def_body.control_nodes);
 
-            // HACK(eddyb) this updates `unstructured_region` just in case
-            // `repair_unclaimed_region` needs to use it again. But it would be
-            // better if `PartialControlRegion` didn't have a `children` copy.
-            self.func_def_body.at_mut(unstructured_region).def().children = children;
-
-            PartialControlRegion { children, ..region_from_control_inst }
+            PartialControlRegion {
+                structured_body_holder: Some(unstructured_region),
+                ..region_from_control_inst
+            }
         };
 
         // Try to resolve deferred edges that may have accumulated, and keep
@@ -1128,7 +1130,7 @@ impl<'a> Structurizer<'a> {
         while let Some((condition, then_region)) =
             try_claim_any_deferred_edge(self, &mut region.deferred_edges)
         {
-            let else_region = PartialControlRegion { children: EntityList::empty(), ..region };
+            let else_region = PartialControlRegion { structured_body_holder: None, ..region };
             let else_is_unreachable = else_region.deferred_edges.target_to_deferred.is_empty();
 
             // `then_region` is only taken if `condition` holds, except that
@@ -1144,8 +1146,21 @@ impl<'a> Structurizer<'a> {
                 )
             };
 
-            // Prepend the original children to the freshly merged region.
-            merged_region.children.prepend(region.children, &mut self.func_def_body.control_nodes);
+            // FIXME(eddyb) remove this field in most cases.
+            assert!(region.structured_body_holder == Some(unstructured_region));
+
+            // Append the freshly merged region's children to the original region.
+            let original_structured_body_holder = region.structured_body_holder.unwrap();
+            if let Some(merged_structured_body_holder) = merged_region.structured_body_holder {
+                let merged_children = mem::take(
+                    &mut self.func_def_body.at_mut(merged_structured_body_holder).def().children,
+                );
+
+                self.func_def_body.control_regions[original_structured_body_holder]
+                    .children
+                    .append(merged_children, &mut self.func_def_body.control_nodes);
+            }
+            merged_region.structured_body_holder = Some(original_structured_body_holder);
 
             region = merged_region;
         }
@@ -1155,6 +1170,9 @@ impl<'a> Structurizer<'a> {
             .deferred_edges
             .target_to_deferred
             .swap_remove(&DeferredTarget::Region(unstructured_region));
+
+        // FIXME(eddyb) remove this field in most cases.
+        assert!(region.structured_body_holder == Some(unstructured_region));
 
         let old_state = self
             .structurize_region_state
@@ -1184,7 +1202,7 @@ impl<'a> Structurizer<'a> {
         // `Select` isn't actually needed unless there's at least two `cases`.
         if cases.len() <= 1 {
             return cases.into_iter().next().unwrap_or_else(|| PartialControlRegion {
-                children: EntityList::empty(),
+                structured_body_holder: None,
                 deferred_edges: DeferredEdgeBundleSet {
                     target_to_deferred: [].into_iter().collect(),
                 },
@@ -1266,7 +1284,7 @@ impl<'a> Structurizer<'a> {
             .into_iter()
             .enumerate()
             .map(|(case_idx, case)| {
-                let PartialControlRegion { children, mut deferred_edges } = case;
+                let PartialControlRegion { structured_body_holder, mut deferred_edges } = case;
 
                 let mut outputs = SmallVec::with_capacity(output_decls.len());
                 for (deferred, per_case_conditions) in
@@ -1304,10 +1322,12 @@ impl<'a> Structurizer<'a> {
                 assert!(deferred_edges.target_to_deferred.is_empty());
                 assert_eq!(outputs.len(), output_decls.len());
 
-                self.func_def_body.control_regions.define(
-                    self.cx,
-                    ControlRegionDef { inputs: [].into_iter().collect(), children, outputs },
-                )
+                let case_region = structured_body_holder.unwrap_or_else(|| {
+                    self.func_def_body.control_regions.define(self.cx, ControlRegionDef::default())
+                });
+                self.func_def_body.at_mut(case_region).def().inputs.clear();
+                self.func_def_body.at_mut(case_region).def().outputs = outputs;
+                case_region
             })
             .collect();
 
@@ -1347,10 +1367,14 @@ impl<'a> Structurizer<'a> {
             },
         );
 
-        let mut children = EntityList::empty();
-        children.insert_last(select_node, &mut self.func_def_body.control_nodes);
+        // FIXME(eddyb) do not define a region just to keep a `ControlNode` in it.
+        let wasteful_select_region =
+            self.func_def_body.control_regions.define(self.cx, ControlRegionDef::default());
+        self.func_def_body.control_regions[wasteful_select_region]
+            .children
+            .insert_last(select_node, &mut self.func_def_body.control_nodes);
         PartialControlRegion {
-            children,
+            structured_body_holder: Some(wasteful_select_region),
             deferred_edges: DeferredEdgeBundleSet {
                 target_to_deferred: deferreds
                     .map(|deferred| deferred.into_target_keyed_kv_pair())
@@ -1435,17 +1459,11 @@ impl<'a> Structurizer<'a> {
              from `structurize_func`, after it takes `structurize_region_state`"
         );
 
-        let PartialControlRegion { children, mut deferred_edges } = partial_control_region;
+        let PartialControlRegion { structured_body_holder, mut deferred_edges } =
+            partial_control_region;
 
-        // HACK(eddyb) this'd be unnecessary if `PartialControlRegion` didn't
-        // hold `children` (and the original `ControlRegion` was relied upon).
-        {
-            let list_eq_key = |l: EntityList<_>| (l.iter().first, l.iter().last);
-            assert!(
-                list_eq_key(children)
-                    == list_eq_key(self.func_def_body.at(unstructured_region).def().children)
-            );
-        }
+        // FIXME(eddyb) remove this field in most cases.
+        assert!(structured_body_holder == Some(unstructured_region));
 
         // Build a chain of conditional branches to apply deferred edges.
         let deferred_return = deferred_edges
@@ -1463,26 +1481,21 @@ impl<'a> Structurizer<'a> {
         let mut control_source = Some(unstructured_region);
         while let Some((condition, then_target_and_inputs)) = deferred_edge_targets.next() {
             let branch_source = control_source.take().unwrap();
-            let else_target_and_inputs =
-                if deferred_edge_targets.len() <= 1 && deferred_return.is_none() {
-                    // At most one deferral left, so it can be used as the "else"
-                    // case, or the branch left unconditional in its absence.
-                    deferred_edge_targets.next().map(|(_, t)| t)
-                } else {
-                    // Either more branches, or a deferred return, are needed, so
-                    // the "else" case must be a `ControlRegion` that itself can
-                    // have a `ControlInst` attached to it later on.
-                    let new_empty_region = self.func_def_body.control_regions.define(
-                        self.cx,
-                        ControlRegionDef {
-                            inputs: [].into_iter().collect(),
-                            children: EntityList::empty(),
-                            outputs: [].into_iter().collect(),
-                        },
-                    );
-                    control_source = Some(new_empty_region);
-                    Some((new_empty_region, [].into_iter().collect()))
-                };
+            let else_target_and_inputs = if deferred_edge_targets.len() <= 1
+                && deferred_return.is_none()
+            {
+                // At most one deferral left, so it can be used as the "else"
+                // case, or the branch left unconditional in its absence.
+                deferred_edge_targets.next().map(|(_, t)| t)
+            } else {
+                // Either more branches, or a deferred return, are needed, so
+                // the "else" case must be a `ControlRegion` that itself can
+                // have a `ControlInst` attached to it later on.
+                let new_empty_region =
+                    self.func_def_body.control_regions.define(self.cx, ControlRegionDef::default());
+                control_source = Some(new_empty_region);
+                Some((new_empty_region, [].into_iter().collect()))
+            };
 
             let condition = Some(condition)
                 .filter(|_| else_target_and_inputs.is_some())
