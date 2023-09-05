@@ -741,14 +741,7 @@ impl Module {
                     Some(import) => DeclDef::Imported(import),
                     None => {
                         let mut control_regions = EntityDefs::default();
-                        let body = control_regions.define(
-                            &cx,
-                            ControlRegionDef {
-                                inputs: SmallVec::new(),
-                                children: EntityList::empty(),
-                                outputs: SmallVec::new(),
-                            },
-                        );
+                        let body = control_regions.define(&cx, ControlRegionDef::default());
                         DeclDef::Present(FuncDefBody {
                             control_regions,
                             control_nodes: Default::default(),
@@ -912,14 +905,9 @@ impl Module {
                                     // to be able to create the `FuncDefBody`.
                                     func_def_body.body
                                 } else {
-                                    func_def_body.control_regions.define(
-                                        &cx,
-                                        ControlRegionDef {
-                                            inputs: SmallVec::new(),
-                                            children: EntityList::empty(),
-                                            outputs: SmallVec::new(),
-                                        },
-                                    )
+                                    func_def_body
+                                        .control_regions
+                                        .define(&cx, ControlRegionDef::default())
                                 };
                                 block_details
                                     .insert(block, BlockDetails { label_id: id, phi_count: 0 });
