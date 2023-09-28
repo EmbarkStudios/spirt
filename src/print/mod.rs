@@ -227,7 +227,7 @@ impl Use {
     // HACK(eddyb) this is used in `AttrsAndDef::insert_name_before_def` to
     // detect alignment anchors specifically, so it needs to not overlap with
     // any other name (including those containing escaped `OpName` strings).
-    const ANCHOR_ALIGNMENT_NAME_PREFIX: &str = "AA.";
+    const ANCHOR_ALIGNMENT_NAME_PREFIX: &'static str = "AA.";
 
     fn keyword_and_name_prefix(self) -> (&'static str, &'static str) {
         match self {

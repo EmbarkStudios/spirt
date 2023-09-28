@@ -32,17 +32,17 @@ fn main() {
         .collect();
     extinsts_names_and_grammars.sort();
 
-    let all_jsons = format!(
+    let mut all_jsons = format!(
         "pub(super) const SPIRV_CORE_GRAMMAR: &str = include_str!({:?});\n\
-         pub(super) const EXTINST_NAMES_AND_GRAMMARS: &[(&str, &str)] = &[\n{}];",
+         pub(super) const EXTINST_NAMES_AND_GRAMMARS: &[(&str, &str)] = &[\n",
         khr_spv_include_dir.join(core_grammar),
-        extinsts_names_and_grammars
-            .into_iter()
-            .map(|(name, grammar)| {
-                format!("({:?}, include_str!({:?})),\n", name, khr_spv_include_dir.join(grammar),)
-            })
-            .collect::<String>()
     );
+    for (name, grammar) in extinsts_names_and_grammars {
+        use std::fmt::Write as _;
+        writeln!(all_jsons, "({:?}, include_str!({:?})),", name, khr_spv_include_dir.join(grammar))
+            .unwrap();
+    }
+    all_jsons += "];";
     std::fs::write(
         std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
             .join("khr_spv_grammar_jsons.rs"),
