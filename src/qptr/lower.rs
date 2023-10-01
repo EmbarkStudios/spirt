@@ -787,6 +787,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                 // If this is an aggregate `OpLoad`/`OpStore`, we should generate
                 // one instruction per leaf, instead.
                 Accesses::AggregateLeaves { aggregate_type: _, mut leaf_accesses } => {
+                    // FIXME(eddyb) this may need to automatically generate an
+                    // intermediary `QPtrOp::BufferData` when accessing buffers.
                     let mem_data_layout = match self.lowerer.layout_of(pointee_type)? {
                         TypeLayout::Concrete(mem) => mem,
                         _ => {
@@ -898,8 +900,197 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                 }
             }
         } else if spv_inst.opcode == wk.OpCopyMemory {
-            // FIXME(eddyb) partially disaggregate (`OpTypeStruct` but not `OpTypeArray`).
-            return Ok(Transformed::Unchanged);
+            if disaggregated_output_or_inputs_during_lowering {
+                return Err(LowerError(Diag::bug([format!(
+                    "unexpected aggregate types in `{}`",
+                    spv_inst.opcode.name()
+                )
+                .into()])));
+            }
+
+            assert_eq!(data_inst_def.inputs.len(), 2);
+
+            let dst_ptr = data_inst_def.inputs[0];
+            let src_ptr = data_inst_def.inputs[1];
+
+            let (_, dst_pointee_type) =
+                self.lowerer.as_spv_ptr_type(func.at(dst_ptr).type_of(cx)).ok_or_else(|| {
+                    LowerError(Diag::bug([
+                        "destination pointer input not an `OpTypePointer`".into()
+                    ]))
+                })?;
+            let (_, src_pointee_type) =
+                self.lowerer.as_spv_ptr_type(func.at(src_ptr).type_of(cx)).ok_or_else(|| {
+                    LowerError(Diag::bug(["source pointer input not an `OpTypePointer`".into()]))
+                })?;
+
+            if dst_pointee_type != src_pointee_type {
+                return Err(LowerError(Diag::bug([
+                    "copy destination pointee type different from source pointee type".into(),
+                ])));
+            }
+
+            // FIXME(eddyb) this may need to automatically generate an
+            // intermediary `QPtrOp::BufferData` when accessing buffers.
+            let mem_data_layout = match self.lowerer.layout_of(src_pointee_type)? {
+                TypeLayout::Concrete(mem) => mem,
+                _ => {
+                    return Err(LowerError(Diag::bug([
+                        "`OpCopyMemory` of data with non-memory type: ".into(),
+                        src_pointee_type.into(),
+                    ])));
+                }
+            };
+
+            let (dst_ptr, dst_base_offset) = flatten_offsets(dst_ptr);
+            let (src_ptr, src_base_offset) = flatten_offsets(src_ptr);
+
+            // FIXME(eddyb) support memory operands somehow.
+            if !spv_inst.imms.is_empty() {
+                return Ok(Transformed::Unchanged);
+            }
+
+            // HACK(eddyb) this is speculative, so we just give up if we hit
+            // some situation we don't currently support - ideally, there would
+            // be an *untyped* `qptr.copy`, but that is harder to support overall.
+            // HACK(eddyb) this is a `try {...}`-like use of a closure.
+            let try_gather_leaf_offsets_and_types = || {
+                struct UnsupportedLargeArray;
+                let recurse_into_layout = |layout: &MemTypeLayout| {
+                    let aggregate_shape = match &cx[layout.original_type].kind {
+                        TypeKind::SpvInst {
+                            value_lowering: spv::ValueLowering::Disaggregate(aggregate_shape),
+                            ..
+                        } => aggregate_shape,
+                        _ => return Ok(false),
+                    };
+                    match *aggregate_shape {
+                        spv::AggregateShape::Struct { .. } => Ok(true),
+
+                        // HACK(eddyb) 16 leaves allows for a 4x4 matrix, even
+                        // when represented as e.g. `[f32; 16]` or `[[f32; 4]; 4]`
+                        // (this comparison gets more complex when accounting
+                        // for vectors, e.g. `[f32x4; 4]`, which is only 4 leaves),
+                        // but ideally most types accepted here will be even
+                        // smaller arrays (which could've e.g. been structs).
+                        // FIXME(eddyb) larger arrays should lower to loops that
+                        // copy a small number of leaves per iteration, or even
+                        // some general-purpose `qptr.copy`, to avoid generating
+                        // amounts of IR that scale with the array length, which
+                        // (unlike struct fields) can be arbitrarily large.
+                        spv::AggregateShape::Array { total_leaf_count, .. } => {
+                            if total_leaf_count <= 16 {
+                                Ok(true)
+                            } else {
+                                Err(UnsupportedLargeArray)
+                            }
+                        }
+                    }
+                };
+
+                // HACK(eddyb) buffering the details of the instructions we'll
+                // be generating, because we don't know ahead of time whether we
+                // even want to expand the `OpCopyMemory`, at all.
+                let mut leaf_offsets_and_types = SmallVec::<[_; 8]>::new();
+                mem_data_layout
+                    .deeply_flatten_if(
+                        0,
+                        &|candidate_layout| recurse_into_layout(candidate_layout).unwrap_or(false),
+                        &mut |leaf_offset, leaf| {
+                            // FIMXE(eddyb) ideally this would not be computed twice.
+                            recurse_into_layout(leaf).map_err(|UnsupportedLargeArray| {
+                                // HACK(eddyb) not an error, just stopping traversal.
+                                LayoutError(Diag::bug([]))
+                            })?;
+
+                            // HACK(eddyb) `deeply_flatten_if` takes a base offset,
+                            // but we have two, so we need our own overflow checks.
+                            if dst_base_offset.checked_add(leaf_offset).is_none()
+                                || src_base_offset.checked_add(leaf_offset).is_none()
+                            {
+                                // HACK(eddyb) not an error, just stopping traversal.
+                                return Err(LayoutError(Diag::bug([])));
+                            }
+
+                            leaf_offsets_and_types.push((leaf_offset, leaf.original_type));
+
+                            Ok(())
+                        },
+                    )
+                    .ok()?;
+                Some(leaf_offsets_and_types)
+            };
+            let leaf_offsets_and_types = match try_gather_leaf_offsets_and_types() {
+                Some(leaf_offsets_and_types) => leaf_offsets_and_types,
+                None => return Ok(Transformed::Unchanged),
+            };
+
+            // This is the point of no return: we're inserting several
+            // new instructions, and marking the old one for removal.
+            for (leaf_offset, leaf_type) in leaf_offsets_and_types {
+                let leaf_load_data_inst = func_at_data_inst.reborrow().data_insts.define(
+                    cx,
+                    DataInstDef {
+                        // FIXME(eddyb) filter attributes into debuginfo and
+                        // semantic, and understand the semantic ones.
+                        attrs,
+                        form: cx.intern(DataInstFormDef {
+                            kind: QPtrOp::Load {
+                                offset: src_base_offset.checked_add(leaf_offset).unwrap(),
+                            }
+                            .into(),
+                            output_types: [leaf_type].into_iter().collect(),
+                        }),
+                        inputs: [src_ptr].into_iter().collect(),
+                    }
+                    .into(),
+                );
+                let leaf_store_data_inst = func_at_data_inst.reborrow().data_insts.define(
+                    cx,
+                    DataInstDef {
+                        // FIXME(eddyb) filter attributes into debuginfo and
+                        // semantic, and understand the semantic ones.
+                        attrs,
+                        form: cx.intern(DataInstFormDef {
+                            kind: QPtrOp::Store {
+                                offset: dst_base_offset.checked_add(leaf_offset).unwrap(),
+                            }
+                            .into(),
+                            output_types: [].into_iter().collect(),
+                        }),
+                        inputs: [
+                            dst_ptr,
+                            Value::DataInstOutput { inst: leaf_load_data_inst, output_idx: 0 },
+                        ]
+                        .into_iter()
+                        .collect(),
+                    }
+                    .into(),
+                );
+
+                // HACK(eddyb) can't really use helpers like `FuncAtMut::def`,
+                // due to the need to borrow `control_nodes` and `data_insts`
+                // at the same time - perhaps some kind of `FuncAtMut` position
+                // types for "where a list is in a parent entity" could be used
+                // to make this more ergonomic, although the potential need for
+                // an actual list entity of its own, should be considered.
+                let func = func_at_data_inst.reborrow().at(());
+                match &mut func.control_nodes[parent_block].kind {
+                    ControlNodeKind::Block { insts } => {
+                        insts.insert_before(leaf_load_data_inst, data_inst, func.data_insts);
+                        insts.insert_before(leaf_store_data_inst, data_inst, func.data_insts);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            self.remove_if_dead_inst_and_parent_block.push((data_inst, parent_block));
+
+            // HACK(eddyb) this is a bit counter-intuitive (and wasteful),
+            // but we expect the original instruction to be removed as
+            // effectively unused, so this will only be kept *if that fails*.
+            return Err(LowerError(Diag::bug(["disaggregation of `OpCopyMemory` should've \
+                 removed the original instruction, but failed to"
+                .into()])));
         } else if spv_inst.opcode == wk.OpBitcast {
             if disaggregated_output_or_inputs_during_lowering {
                 return Err(LowerError(Diag::bug([format!(
