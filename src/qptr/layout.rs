@@ -99,6 +99,80 @@ pub(super) enum Components {
     },
 }
 
+impl MemTypeLayout {
+    /// Recursively expand `MemTypeLayout`s into their components, at every level
+    /// for which `predicate` returns `true`. `each_leaf` is called for each
+    /// leaf (scalar or `recurse_into` returned `false`) component, and includes
+    /// its offset (starting at `base_offset`).
+    ///
+    /// Because each array element has its own offset, each array element will
+    /// be separately flattened, such that the entire array will be covered.
+    ///
+    /// `Err` may be returned in some cases (e.g. offset overflows, dynamic arrays),
+    /// in which case the sequence of leaves `each_leaf` produced can be considered
+    /// incomplete and shouldn't be used.
+    pub(super) fn deeply_flatten_if(
+        &self,
+        base_offset: i32,
+        recurse_into: &impl Fn(&Self) -> bool,
+        each_leaf: &mut impl FnMut(i32, &Self) -> Result<(), LayoutError>,
+    ) -> Result<(), LayoutError> {
+        match &self.components {
+            Components::Scalar => each_leaf(base_offset, self),
+            _ if !recurse_into(self) => each_leaf(base_offset, self),
+
+            Components::Elements { stride, elem, fixed_len } => {
+                let len = fixed_len.ok_or_else(|| {
+                    LayoutError(Diag::err([
+                        "dynamically sized type `".into(),
+                        self.original_type.into(),
+                        "` cannot be flattened into a finite sequence of leaves".into(),
+                    ]))
+                })?;
+
+                for i in 0..len.get() {
+                    let offset = i32::try_from(i)
+                        .ok()
+                        .and_then(|i| {
+                            // HACK(eddyb) don't claim an overflow for `0 * stride`
+                            // even if `stride` doesn't fit in `i32`.
+                            if i == 0 {
+                                Some(base_offset)
+                            } else {
+                                let stride = i32::try_from(stride.get()).ok()?;
+                                base_offset.checked_add(i.checked_mul(stride)?)
+                            }
+                        })
+                        .ok_or_else(|| {
+                            LayoutError(Diag::bug([format!(
+                                "`{base_offset} + {i} * {stride}` overflowed `s32`"
+                            )
+                            .into()]))
+                        })?;
+                    elem.deeply_flatten_if(offset, recurse_into, each_leaf)?;
+                }
+                Ok(())
+            }
+
+            Components::Fields { offsets, layouts } => {
+                for (&field_offset, field) in offsets.iter().zip(layouts) {
+                    let offset = i32::try_from(field_offset)
+                        .ok()
+                        .and_then(|field_offset| base_offset.checked_add(field_offset))
+                        .ok_or_else(|| {
+                            LayoutError(Diag::bug([format!(
+                                "`{base_offset} + {field_offset}` overflowed `s32`"
+                            )
+                            .into()]))
+                        })?;
+                    field.deeply_flatten_if(offset, recurse_into, each_leaf)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 impl Components {
     /// Return all components (by index), which completely contain `offset_range`.
     ///
