@@ -547,83 +547,21 @@ impl LiftToSpvPtrInstsInFunc<'_> {
             &DataInstKind::QPtr(QPtrOp::Offset(offset)) => {
                 let base_ptr = data_inst_def.inputs[0];
                 let (addr_space, layout) = type_of_val_as_spv_ptr_with_layout(base_ptr)?;
-                let mut layout = match layout {
-                    TypeLayout::Handle(_) | TypeLayout::HandleArray(..) => {
-                        return Err(LiftError(Diag::bug(["cannot offset Handles".into()])));
-                    }
-                    TypeLayout::Concrete(mem_layout) => mem_layout,
-                };
-                let mut offset = u32::try_from(offset)
-                    .ok()
-                    .ok_or_else(|| LiftError(Diag::bug(["negative offset".into()])))?;
 
-                let mut access_chain_inputs: SmallVec<_> = [base_ptr].into_iter().collect();
-                // FIXME(eddyb) deduplicate with access chain loop for Load/Store.
-                while offset > 0 {
-                    let idx = {
-                        // HACK(eddyb) supporting ZSTs would be a pain because
-                        // they can "fit" in weird ways, e.g. given 3 offsets
-                        // A, B, C (before/between/after a pair of fields),
-                        // `B..B` is included in both `A..B` and `B..C`.
-                        let allow_zst = false;
-                        let offset_range = if allow_zst {
-                            offset..offset
-                        } else {
-                            offset..offset.saturating_add(1)
-                        };
-                        let mut component_indices =
-                            layout.components.find_components_containing(offset_range);
-                        match (component_indices.next(), component_indices.next()) {
-                            (None, _) => {
-                                // FIXME(eddyb) this could include the chosen indices,
-                                // and maybe the current type and/or layout.
-                                return Err(LiftError(Diag::bug([format!(
-                                    "offset {offset} not found in type layout, after {} access chain indices",
-                                    access_chain_inputs.len() - 1
-                                ).into()])));
-                            }
-                            (Some(idx), Some(_)) => {
-                                // FIXME(eddyb) !!! this can also be illegal overlap
-                                if allow_zst {
-                                    return Err(LiftError(Diag::bug([
-                                        "ambiguity due to ZSTs in type layout".into(),
-                                    ])));
-                                }
-                                // HACK(eddyb) letting illegal overlap through
-                                idx
-                            }
-                            (Some(idx), None) => idx,
-                        }
-                    };
-
-                    let idx_as_i32 = i32::try_from(idx).ok().ok_or_else(|| {
-                        LiftError(Diag::bug([
-                            format!("{idx} not representable as a positive s32").into()
-                        ]))
-                    })?;
-                    access_chain_inputs
-                        .push(Value::Const(cx.intern(scalar::Const::from_u32(idx_as_i32 as u32))));
-
-                    match &layout.components {
-                        Components::Scalar => unreachable!(),
-                        Components::Elements { stride, elem, .. } => {
-                            offset %= stride.get();
-                            layout = elem.clone();
-                        }
-                        Components::Fields { offsets, layouts } => {
-                            offset -= offsets[idx];
-                            layout = layouts[idx].clone();
-                        }
-                    }
-                }
-
-                if access_chain_inputs.len() == 1 {
+                self.maybe_adjust_pointer_for_offset_or_access(
+                    base_ptr,
+                    addr_space,
+                    layout.clone(),
+                    offset,
+                    None,
+                )?
+                .unwrap_or_else(|| {
                     self.deferred_ptr_noops.insert(
                         data_inst,
                         DeferredPtrNoop {
                             output_pointer: base_ptr,
                             output_pointer_addr_space: addr_space,
-                            output_pointee_layout: TypeLayout::Concrete(layout),
+                            output_pointee_layout: layout,
                             parent_block,
                         },
                     );
@@ -637,18 +575,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                         }),
                         ..data_inst_def.clone()
                     }
-                } else {
-                    DataInstDef {
-                        attrs: data_inst_def.attrs,
-                        form: cx.intern(DataInstFormDef {
-                            kind: DataInstKind::SpvInst(wk.OpAccessChain.into()),
-                            output_type: Some(
-                                self.lifter.spv_ptr_type(addr_space, layout.original_type),
-                            ),
-                        }),
-                        inputs: access_chain_inputs,
-                    }
-                }
+                })
             }
             DataInstKind::QPtr(QPtrOp::DynOffset { stride, index_bounds }) => {
                 let base_ptr = data_inst_def.inputs[0];
@@ -677,7 +604,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                         }
                     }
 
-                    // FIXME(eddyb) deduplicate with `maybe_adjust_pointer_for_access`.
+                    // FIXME(eddyb) deduplicate with `maybe_adjust_pointer_for_offset_or_access`.
                     let idx = {
                         // FIXME(eddyb) there might be a better way to
                         // estimate a relevant offset range for the array,
@@ -688,7 +615,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                             .and_then(|index_bounds| u32::try_from(index_bounds.end).ok())
                             .unwrap_or(0);
                         let offset_range =
-                            0..min_expected_len.checked_add(stride.get()).unwrap_or(0);
+                            0..min_expected_len.checked_mul(stride.get()).unwrap_or(0);
                         let mut component_indices =
                             layout.components.find_components_containing(offset_range);
                         match (component_indices.next(), component_indices.next()) {
@@ -734,10 +661,10 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     inputs: access_chain_inputs,
                 }
             }
-            DataInstKind::QPtr(op @ (QPtrOp::Load | QPtrOp::Store)) => {
+            DataInstKind::QPtr(op @ (QPtrOp::Load { offset } | QPtrOp::Store { offset })) => {
                 let (spv_opcode, access_type) = match op {
-                    QPtrOp::Load => (wk.OpLoad, data_inst_form_def.output_type.unwrap()),
-                    QPtrOp::Store => (wk.OpStore, type_of_val(data_inst_def.inputs[1])),
+                    QPtrOp::Load { .. } => (wk.OpLoad, data_inst_form_def.output_type.unwrap()),
+                    QPtrOp::Store { .. } => (wk.OpStore, type_of_val(data_inst_def.inputs[1])),
                     _ => unreachable!(),
                 };
 
@@ -746,11 +673,12 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                     let input_idx = 0;
                     let ptr = data_inst_def.inputs[input_idx];
                     let (addr_space, pointee_layout) = type_of_val_as_spv_ptr_with_layout(ptr)?;
-                    self.maybe_adjust_pointer_for_access(
+                    self.maybe_adjust_pointer_for_offset_or_access(
                         ptr,
                         addr_space,
                         pointee_layout,
-                        access_type,
+                        *offset,
+                        Some(access_type),
                     )?
                     .map(|access_chain_data_inst_def| (input_idx, access_chain_data_inst_def))
                     .into_iter()
@@ -814,11 +742,12 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                                 type_of_val_as_spv_ptr_with_layout(input_ptr)?;
 
                             if let Some(access_chain_data_inst_def) = self
-                                .maybe_adjust_pointer_for_access(
+                                .maybe_adjust_pointer_for_offset_or_access(
                                     input_ptr,
                                     input_ptr_addr_space,
                                     input_pointee_layout,
-                                    expected_pointee_type,
+                                    0,
+                                    Some(expected_pointee_type),
                                 )?
                             {
                                 to_spv_ptr_input_adjustments
@@ -882,24 +811,38 @@ impl LiftToSpvPtrInstsInFunc<'_> {
         Ok(Transformed::Changed(replacement_data_inst_def))
     }
 
-    /// If necessary, construct an `OpAccessChain` instruction to turn `ptr`
-    /// (pointing to a type with `pointee_layout`) into a pointer to `access_type`
-    /// (which can then be used with e.g. `OpLoad`/`OpStore`).
+    /// If necessary, construct an `OpAccessChain` instruction to offset `ptr`
+    /// (pointing to a type with `pointee_layout`) by `offset`, and (optionally)
+    /// turn it into a pointer to `access_type` (for e.g. `OpLoad`/`OpStore`).
     //
-    // FIXME(eddyb) customize errors, to tell apart Load/Store/ToSpvPtrInput.
-    fn maybe_adjust_pointer_for_access(
+    // FIXME(eddyb) customize errors, to tell apart Offset/Load/Store/ToSpvPtrInput.
+    fn maybe_adjust_pointer_for_offset_or_access(
         &self,
         ptr: Value,
         addr_space: AddrSpace,
         mut pointee_layout: TypeLayout,
-        access_type: Type,
+        offset: i32,
+        access_type: Option<Type>,
     ) -> Result<Option<DataInstDef>, LiftError> {
         let wk = self.lifter.wk;
 
-        let access_layout = self.lifter.layout_of(access_type)?;
+        let mk_access_chain = |access_chain_inputs: SmallVec<_>, final_pointee_type| {
+            if access_chain_inputs.len() > 1 {
+                Some(DataInstDef {
+                    attrs: Default::default(),
+                    form: self.lifter.cx.intern(DataInstFormDef {
+                        kind: DataInstKind::SpvInst(wk.OpAccessChain.into()),
+                        output_type: Some(self.lifter.spv_ptr_type(addr_space, final_pointee_type)),
+                    }),
+                    inputs: access_chain_inputs,
+                })
+            } else {
+                None
+            }
+        };
 
-        // The access type might be merely a prefix of the pointee type,
-        // requiring injecting an extra `OpAccessChain` to "dig in".
+        let access_layout = access_type.map(|ty| self.lifter.layout_of(ty)).transpose()?;
+
         let mut access_chain_inputs: SmallVec<_> = [ptr].into_iter().collect();
 
         if let TypeLayout::HandleArray(handle, _) = pointee_layout {
@@ -907,97 +850,149 @@ impl LiftToSpvPtrInstsInFunc<'_> {
                 .push(Value::Const(self.lifter.cx.intern(scalar::Const::from_u32(0))));
             pointee_layout = TypeLayout::Handle(handle);
         }
-        match (pointee_layout, access_layout) {
+        let (mut pointee_layout, access_layout) = match (pointee_layout, access_layout) {
             (TypeLayout::HandleArray(..), _) => unreachable!(),
 
             // All the illegal cases are here to keep the rest tidier.
-            (_, TypeLayout::Handle(shapes::Handle::Buffer(..))) => {
+            (_, Some(TypeLayout::Handle(shapes::Handle::Buffer(..)))) => {
                 return Err(LiftError(Diag::bug(["cannot access whole Buffer".into()])));
             }
-            (_, TypeLayout::HandleArray(..)) => {
+            (_, Some(TypeLayout::HandleArray(..))) => {
                 return Err(LiftError(Diag::bug(["cannot access whole HandleArray".into()])));
             }
-            (_, TypeLayout::Concrete(access_layout))
+            (_, Some(TypeLayout::Concrete(access_layout)))
                 if access_layout.mem_layout.dyn_unit_stride.is_some() =>
             {
                 return Err(LiftError(Diag::bug(["cannot access unsized type".into()])));
             }
-            (TypeLayout::Handle(shapes::Handle::Buffer(..)), _) => {
-                return Err(LiftError(Diag::bug(["cannot access into Buffer".into()])));
+            (TypeLayout::Handle(_), Some(_)) if offset != 0 => {
+                return Err(LiftError(Diag::bug(["cannot offset Handles for access".into()])));
             }
-            (TypeLayout::Handle(_), TypeLayout::Concrete(_)) => {
+            (TypeLayout::Handle(_), None) => {
+                // FIXME(eddyb) this disallows even a noop offset on a handle pointer.
+                return Err(LiftError(Diag::bug(["cannot offset Handles".into()])));
+            }
+            (TypeLayout::Handle(shapes::Handle::Buffer(..)), _) => {
+                return Err(LiftError(Diag::bug(["cannot offset/access into Buffer".into()])));
+            }
+            (TypeLayout::Handle(_), Some(TypeLayout::Concrete(_))) => {
                 return Err(LiftError(Diag::bug(["cannot access Handle as memory".into()])));
             }
-            (TypeLayout::Concrete(_), TypeLayout::Handle(_)) => {
+            (TypeLayout::Concrete(_), Some(TypeLayout::Handle(_))) => {
                 return Err(LiftError(Diag::bug(["cannot access memory as Handle".into()])));
             }
 
             (
                 TypeLayout::Handle(shapes::Handle::Opaque(pointee_handle_type)),
-                TypeLayout::Handle(shapes::Handle::Opaque(access_handle_type)),
+                Some(TypeLayout::Handle(shapes::Handle::Opaque(access_handle_type))),
             ) => {
+                assert_eq!(offset, 0);
+
                 if pointee_handle_type != access_handle_type {
                     return Err(LiftError(Diag::bug([
                         "(opaque handle) pointer vs access type mismatch".into(),
                     ])));
                 }
+
+                return Ok(mk_access_chain(access_chain_inputs, pointee_handle_type));
             }
 
-            (TypeLayout::Concrete(mut pointee_layout), TypeLayout::Concrete(access_layout)) => {
-                // FIXME(eddyb) deduplicate with access chain loop for Offset.
-                while pointee_layout.original_type != access_layout.original_type {
-                    let idx = {
-                        let offset_range = 0..access_layout.mem_layout.fixed_base.size;
-                        let mut component_indices =
-                            pointee_layout.components.find_components_containing(offset_range);
-                        match (component_indices.next(), component_indices.next()) {
-                            (None, _) => {
-                                return Err(LiftError(Diag::bug([
-                                    "accessed type not found in pointee type layout".into(),
-                                ])));
-                            }
-                            // FIXME(eddyb) obsolete this case entirely,
-                            // by removing stores of ZSTs, and replacing
-                            // loads of ZSTs with `OpUndef` constants.
-                            (Some(_), Some(_)) => {
-                                return Err(LiftError(Diag::bug([
-                                    "ambiguity due to ZSTs in pointee type layout".into(),
-                                ])));
-                            }
-                            (Some(idx), None) => idx,
+            (TypeLayout::Concrete(pointee_layout), Some(TypeLayout::Concrete(access_layout))) => {
+                (pointee_layout, Some(access_layout))
+            }
+            (TypeLayout::Concrete(pointee_layout), None) => (pointee_layout, None),
+        };
+
+        let mut offset = u32::try_from(offset)
+            .ok()
+            .ok_or_else(|| LiftError(Diag::bug(["negative offset".into()])))?;
+
+        // FIXME(eddyb) deduplicate with access chain loop for Offset.
+        loop {
+            let done = offset == 0
+                && access_layout.as_ref().map_or(true, |access_layout| {
+                    pointee_layout.original_type == access_layout.original_type
+                });
+            if done {
+                break;
+            }
+
+            let idx = {
+                let min_component_size = match &access_layout {
+                    Some(access_layout) => access_layout.mem_layout.fixed_base.size,
+                    None => {
+                        // HACK(eddyb) supporting ZSTs would be a pain because
+                        // they can "fit" in weird ways, e.g. given 3 offsets
+                        // A, B, C (before/between/after a pair of fields),
+                        // `B..B` is included in both `A..B` and `B..C`.
+                        let allow_zst = false;
+                        if allow_zst { 0 } else { 1 }
+                    }
+                };
+
+                let offset_range = offset..offset.saturating_add(min_component_size);
+                let mut component_indices =
+                    pointee_layout.components.find_components_containing(offset_range.clone());
+
+                let idx = component_indices
+                    .next()
+                    .or_else(|| {
+                        // HACK(eddyb) when dealing with a lone ZST, the search can
+                        // fail because it expects at least one byte, so we retry
+                        // with an empty range instead.
+                        // FIXME(eddyb) this can still fail if there's another
+                        // component that ends where the ZST is, maybe we need
+                        // some way to filter for specifically such a ZST.
+                        if access_layout.is_none() && offset_range.len() == 1 {
+                            component_indices = pointee_layout
+                                .components
+                                .find_components_containing(offset..offset);
+                            component_indices.next()
+                        } else {
+                            None
                         }
-                    };
-
-                    let idx_as_i32 = i32::try_from(idx).ok().ok_or_else(|| {
-                        LiftError(Diag::bug([
-                            format!("{idx} not representable as a positive s32").into()
-                        ]))
+                    })
+                    .ok_or_else(|| {
+                        // FIXME(eddyb) this could include the chosen indices,
+                        // and maybe the current type and/or layout.
+                        LiftError(Diag::bug([format!(
+                            "offsets {offset_range:?} not found in pointee type layout, \
+                             after {} access chain indices",
+                            access_chain_inputs.len() - 1
+                        )
+                        .into()]))
                     })?;
-                    access_chain_inputs.push(Value::Const(
-                        self.lifter.cx.intern(scalar::Const::from_u32(idx_as_i32 as u32)),
-                    ));
 
-                    pointee_layout = match &pointee_layout.components {
-                        Components::Scalar => unreachable!(),
-                        Components::Elements { elem, .. } => elem.clone(),
-                        Components::Fields { layouts, .. } => layouts[idx].clone(),
-                    };
+                if component_indices.next().is_some() {
+                    return Err(LiftError(Diag::bug([
+                        "ambiguity due to ZSTs in pointee type layout".into(),
+                    ])));
+                }
+
+                idx
+            };
+
+            let idx_as_i32 = i32::try_from(idx).ok().ok_or_else(|| {
+                LiftError(Diag::bug([format!("{idx} not representable as a positive s32").into()]))
+            })?;
+            access_chain_inputs.push(Value::Const(
+                self.lifter.cx.intern(scalar::Const::from_u32(idx_as_i32 as u32)),
+            ));
+
+            match &pointee_layout.components {
+                Components::Scalar => unreachable!(),
+                Components::Elements { stride, elem, .. } => {
+                    offset %= stride.get();
+                    pointee_layout = elem.clone();
+                }
+                Components::Fields { offsets, layouts } => {
+                    offset -= offsets[idx];
+                    pointee_layout = layouts[idx].clone();
                 }
             }
         }
 
-        Ok(if access_chain_inputs.len() > 1 {
-            Some(DataInstDef {
-                attrs: Default::default(),
-                form: self.lifter.cx.intern(DataInstFormDef {
-                    kind: DataInstKind::SpvInst(wk.OpAccessChain.into()),
-                    output_type: Some(self.lifter.spv_ptr_type(addr_space, access_type)),
-                }),
-                inputs: access_chain_inputs,
-            })
-        } else {
-            None
-        })
+        Ok(mk_access_chain(access_chain_inputs, pointee_layout.original_type))
     }
 
     /// Apply rewrites implied by `deferred_ptr_noops` to `values`.

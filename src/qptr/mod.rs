@@ -193,16 +193,19 @@ pub enum QPtrOp {
         index_bounds: Option<Range<i32>>,
     },
 
-    /// Read a single value from a `QPtr` (`inputs[0]`).
+    /// Read a single value from a `QPtr` (`inputs[0]`) at `offset`.
     //
     // FIXME(eddyb) limit this to memory, and scalars, maybe vectors at most.
-    Load,
+    Load {
+        offset: i32,
+    },
 
-    /// Write a single value (`inputs[1]`) to a `QPtr` (`inputs[0]`).
+    /// Write a single value (`inputs[1]`) to a `QPtr` (`inputs[0]`) at `offset`.
     //
     // FIXME(eddyb) limit this to memory, and scalars, maybe vectors at most.
-    Store,
+    Store {
+        offset: i32,
+    },
     //
-    // FIXME(eddyb) implement more ops! at the very least copying!
-    // (and lowering could ignore pointercasts, I guess?)
+    // FIXME(eddyb) implement more ops (e.g. copies).
 }

@@ -720,8 +720,8 @@ impl InnerTransform for DataInstFormDef {
                     | QPtrOp::BufferDynLen { .. }
                     | QPtrOp::Offset(_)
                     | QPtrOp::DynOffset { .. }
-                    | QPtrOp::Load
-                    | QPtrOp::Store => Transformed::Unchanged,
+                    | QPtrOp::Load {..}
+                    | QPtrOp::Store {..} => Transformed::Unchanged,
                 },
                 DataInstKind::Scalar(_)
                 | DataInstKind::Vector(_)

@@ -408,6 +408,20 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             _ => return Ok(Transformed::Unchanged),
         };
 
+        // Map `ptr` to its base & offset, if it points to a `QPtrOp::Offset`.
+        let ptr_to_base_ptr_and_offset = |ptr| match ptr {
+            Value::DataInstOutput(ptr_inst) => {
+                let ptr_inst_def = func.at(ptr_inst).def();
+                match cx[ptr_inst_def.form].kind {
+                    DataInstKind::QPtr(QPtrOp::Offset(ptr_offset)) => {
+                        Some((ptr_inst_def.inputs[0], ptr_offset))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
         let replacement_kind_and_inputs = if spv_inst.opcode == wk.OpVariable {
             assert!(data_inst_def.inputs.len() <= 1);
             let (_, var_data_type) =
@@ -429,14 +443,25 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                 return Ok(Transformed::Unchanged);
             }
             assert_eq!(data_inst_def.inputs.len(), 1);
-            (QPtrOp::Load.into(), data_inst_def.inputs.clone())
+
+            let ptr = data_inst_def.inputs[0];
+
+            let (ptr, offset) = ptr_to_base_ptr_and_offset(ptr).unwrap_or((ptr, 0));
+
+            (QPtrOp::Load { offset }.into(), [ptr].into_iter().collect())
         } else if spv_inst.opcode == wk.OpStore {
             // FIXME(eddyb) support memory operands somehow.
             if !spv_inst.imms.is_empty() {
                 return Ok(Transformed::Unchanged);
             }
             assert_eq!(data_inst_def.inputs.len(), 2);
-            (QPtrOp::Store.into(), data_inst_def.inputs.clone())
+
+            let ptr = data_inst_def.inputs[0];
+            let value = data_inst_def.inputs[1];
+
+            let (ptr, offset) = ptr_to_base_ptr_and_offset(ptr).unwrap_or((ptr, 0));
+
+            (QPtrOp::Store { offset }.into(), [ptr, value].into_iter().collect())
         } else if spv_inst.opcode == wk.OpArrayLength {
             let field_idx = match spv_inst.imms[..] {
                 [spv::Imm::Short(_, field_idx)] => field_idx,
@@ -527,14 +552,27 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                     self.lowerer.layout_of(base_pointee_type)?
                 };
 
+            let mut ptr = base_ptr;
             let mut steps =
                 self.try_lower_access_chain(access_chain_base_layout, &data_inst_def.inputs[1..])?;
+
+            // Fold a previous `Offset` into an initial offset step, where possible.
+            if let Some(QPtrChainStep { op: QPtrOp::Offset(first_offset), dyn_idx: None }) =
+                steps.first_mut()
+            {
+                if let Some((ptr_base_ptr, ptr_offset)) = ptr_to_base_ptr_and_offset(ptr) {
+                    if let Some(new_first_offset) = first_offset.checked_add(ptr_offset) {
+                        ptr = ptr_base_ptr;
+                        *first_offset = new_first_offset;
+                    }
+                }
+            }
+
             // HACK(eddyb) noop cases should probably not use any `DataInst`s at all,
             // but that would require the ability to replace all uses of a `Value`.
             let final_step =
                 steps.pop().unwrap_or(QPtrChainStep { op: QPtrOp::Offset(0), dyn_idx: None });
 
-            let mut ptr = base_ptr;
             for step in steps {
                 let (kind, inputs) = step.into_data_inst_kind_and_inputs(ptr);
                 let step_data_inst = func_at_data_inst.reborrow().data_insts.define(

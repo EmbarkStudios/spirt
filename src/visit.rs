@@ -538,8 +538,8 @@ impl InnerVisit for DataInstFormDef {
                 | QPtrOp::BufferDynLen { .. }
                 | QPtrOp::Offset(_)
                 | QPtrOp::DynOffset { .. }
-                | QPtrOp::Load
-                | QPtrOp::Store => {}
+                | QPtrOp::Load { .. }
+                | QPtrOp::Store { .. } => {}
             },
             DataInstKind::Scalar(_)
             | DataInstKind::Vector(_)

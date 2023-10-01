@@ -1147,10 +1147,14 @@ impl<'a> InferUsage<'a> {
                                 }),
                         );
                     }
-                    DataInstKind::QPtr(op @ (QPtrOp::Load | QPtrOp::Store)) => {
+                    DataInstKind::QPtr(
+                        op @ (QPtrOp::Load { offset } | QPtrOp::Store { offset }),
+                    ) => {
                         let (op_name, access_type) = match op {
-                            QPtrOp::Load => ("Load", data_inst_form_def.output_type.unwrap()),
-                            QPtrOp::Store => {
+                            QPtrOp::Load { .. } => {
+                                ("Load", data_inst_form_def.output_type.unwrap())
+                            }
+                            QPtrOp::Store { .. } => {
                                 ("Store", func_at_inst.at(data_inst_def.inputs[1]).type_of(&cx))
                             }
                             _ => unreachable!(),
@@ -1162,7 +1166,7 @@ impl<'a> InferUsage<'a> {
                                 .layout_of(access_type)
                                 .map_err(|LayoutError(e)| AnalysisError(e))
                                 .and_then(|layout| match layout {
-                                    TypeLayout::Handle(shapes::Handle::Opaque(ty)) => {
+                                    TypeLayout::Handle(shapes::Handle::Opaque(ty)) if *offset == 0 => {
                                         Ok(QPtrUsage::Handles(shapes::Handle::Opaque(ty)))
                                     }
                                     TypeLayout::Handle(shapes::Handle::Buffer(..)) => {
@@ -1170,6 +1174,11 @@ impl<'a> InferUsage<'a> {
                                             "{op_name}: cannot access whole Buffer"
                                         )
                                         .into()])))
+                                    }
+                                    TypeLayout::Handle(_) => {
+                                        Err(AnalysisError(Diag::bug([format!(
+                                            "{op_name} {{ offset: {offset} }}: cannot offset Handles"
+                                        ).into()])))
                                     }
                                     TypeLayout::HandleArray(..) => {
                                         Err(AnalysisError(Diag::bug([format!(
@@ -1186,9 +1195,33 @@ impl<'a> InferUsage<'a> {
                                         .into()])))
                                     }
                                     TypeLayout::Concrete(concrete) => {
-                                        Ok(QPtrUsage::Memory(QPtrMemUsage {
+                                        let usage = QPtrMemUsage {
                                             max_size: Some(concrete.mem_layout.fixed_base.size),
                                             kind: QPtrMemUsageKind::DirectAccess(access_type),
+                                        };
+
+                                        // FIXME(eddyb) deduplicate this with
+                                        // `QPtrOp::Offset` above.
+                                        let offset = u32::try_from(*offset).ok().ok_or_else(|| {
+                                            AnalysisError(Diag::bug([format!("{op_name} {{ offset: {offset} }}: negative offset").into()]))
+                                        })?;
+
+                                        if offset == 0 {
+                                            return Ok(QPtrUsage::Memory(usage));
+                                        }
+
+                                        Ok(QPtrUsage::Memory(QPtrMemUsage {
+                                            max_size: usage
+                                                .max_size
+                                                .map(|max_size| offset.checked_add(max_size).ok_or_else(|| {
+                                                    AnalysisError(Diag::bug([format!("{op_name} {{ offset: {offset} }}: size overflow ({offset}+{max_size})").into()]))
+                                                })).transpose()?,
+                                            // FIXME(eddyb) allocating `Rc<BTreeMap<_, _>>`
+                                            // to represent the one-element case, seems
+                                            // quite wasteful when it's likely consumed.
+                                            kind: QPtrMemUsageKind::OffsetBase(Rc::new(
+                                                [(offset, usage)].into(),
+                                            )),
                                         }))
                                     }
                                 }),
