@@ -137,7 +137,7 @@ fn main() -> @location(0) i32 {
 #[spv.Decoration.Location(Location: 0)]
 global_var GV0 in spv.StorageClass.Output: s32
 
-func F0() -> spv.OpTypeVoid {
+func F0() {
   loop(v0: s32 <- 1s32, v1: s32 <- 1s32) {
     v2 = s.lt(v1, 10s32): bool
     (v3: s32, v4: s32) = if v2 {

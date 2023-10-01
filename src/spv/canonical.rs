@@ -73,6 +73,7 @@ def_mappable_ops! {
     }
     const {
         OpUndef,
+        OpConstantNull,
         OpConstantFalse,
         OpConstantTrue,
         OpConstant,
@@ -264,7 +265,23 @@ impl spv::Inst {
 
     // FIXME(eddyb) automate bidirectional mappings more (although the need
     // for conditional, i.e. "partial", mappings, adds a lot of complexity).
-    pub(super) fn as_canonical_type(
+    pub fn into_canonical_type_with(
+        self,
+        cx: &Context,
+        type_and_const_inputs: SmallVec<[TypeOrConst; 2]>,
+    ) -> TypeKind {
+        let value_lowering = match spv::AggregateShape::compute(cx, &self, &type_and_const_inputs) {
+            Some(aggregate_shape) => spv::ValueLowering::Disaggregate(aggregate_shape),
+            None => spv::ValueLowering::Direct,
+        };
+        if let Some(type_kind) = self.as_canonical_non_spv_type(cx, &type_and_const_inputs) {
+            assert!(value_lowering == spv::ValueLowering::Direct);
+            type_kind
+        } else {
+            TypeKind::SpvInst { spv_inst: self, type_and_const_inputs, value_lowering }
+        }
+    }
+    fn as_canonical_non_spv_type(
         &self,
         cx: &Context,
         type_and_const_inputs: &[TypeOrConst],
@@ -357,6 +374,12 @@ impl spv::Inst {
         mo.OpUndef == self.opcode
     }
 
+    // HACK(eddyb) this only exists as a helper for `spv::lower`.
+    pub(super) fn lower_const_by_distributing_to_aggregate_leaves(&self) -> bool {
+        let mo = MappableOps::get();
+        [mo.OpUndef, mo.OpConstantNull].contains(&self.opcode)
+    }
+
     // FIXME(eddyb) automate bidirectional mappings more (although the need
     // for conditional, i.e. "partial", mappings, adds a lot of complexity).
     pub(super) fn as_canonical_const(
@@ -378,6 +401,27 @@ impl spv::Inst {
             (_, []) if opcode == mo.OpConstant => {
                 Some(scalar::Const::try_decode_from_spv_imms(ty.as_scalar(cx)?, imms)?.into())
             }
+
+            ([], []) if opcode == mo.OpConstantNull => {
+                let null_scalar = |ty: scalar::Type| {
+                    if ty.bit_width() > 128 {
+                        return None;
+                    }
+                    Some(scalar::Const::from_bits(ty, 0))
+                };
+                match cx[ty].kind {
+                    TypeKind::Scalar(ty) => Some(null_scalar(ty)?.into()),
+                    TypeKind::Vector(ty) => {
+                        let elem = null_scalar(ty.elem)?;
+                        Some(
+                            vector::Const::from_elems(ty, (0..ty.elem_count.get()).map(|_| elem))
+                                .into(),
+                        )
+                    }
+                    _ => None,
+                }
+            }
+
             _ if opcode == wk.OpConstantComposite => {
                 let ty = ty.as_vector(cx)?;
                 let elems = (const_inputs.len() == usize::from(ty.elem_count.get())
@@ -385,6 +429,7 @@ impl spv::Inst {
                 .then(|| const_inputs.iter().map(|ct| *ct.as_scalar(cx).unwrap()))?;
                 Some(vector::Const::from_elems(ty, elems).into())
             }
+
             _ => None,
         }
     }

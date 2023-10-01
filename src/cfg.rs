@@ -51,7 +51,8 @@ pub enum ControlInstKind {
     /// necessary preconditions for reaching this point, are never met.
     Unreachable,
 
-    /// Leave the current function, optionally returning a value.
+    /// Leave the current function, returning some number of [`Value`]s, as per
+    /// the function's signature (`ret_types` in [`FuncDecl`](crate::FuncDecl)).
     Return,
 
     /// Leave the current invocation, similar to returning from every function

@@ -163,7 +163,7 @@ impl<'a> LowerFromSpvPtrs<'a> {
     // (!!! may cause bad interactions with storage class inference `Generic` abuse)
     fn as_spv_ptr_type(&self, ty: Type) -> Option<(AddrSpace, Type)> {
         match &self.cx[ty].kind {
-            TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+            TypeKind::SpvInst { spv_inst, type_and_const_inputs, .. }
                 if spv_inst.opcode == self.wk.OpTypePointer =>
             {
                 let sc = match spv_inst.imms[..] {
@@ -423,17 +423,22 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         let func = func_at_data_inst_frozen.at(());
 
         let attrs = data_inst_def.attrs;
-        let DataInstFormDef { ref kind, output_type } = cx[data_inst_def.form];
+        let DataInstFormDef { kind, output_types } = &cx[data_inst_def.form];
 
-        let spv_inst = match kind {
-            DataInstKind::SpvInst(spv_inst) => spv_inst,
+        let (spv_inst, spv_inst_lowering) = match kind {
+            DataInstKind::SpvInst(spv_inst, lowering) => (spv_inst, lowering),
             _ => return Ok(Transformed::Unchanged),
         };
+
+        // HACK(eddyb) this is for easy bailing/asserting.
+        let disaggregated_output_or_inputs_during_lowering =
+            spv_inst_lowering.disaggregated_output.is_some()
+                || !spv_inst_lowering.disaggregated_inputs.is_empty();
 
         // Flatten `QPtrOp::Offset`s behind `ptr` into a base pointer and offset.
         let flatten_offsets = |mut ptr| {
             let mut offset = 0;
-            while let Value::DataInstOutput(ptr_inst) = ptr {
+            while let Value::DataInstOutput { inst: ptr_inst, output_idx: 0 } = ptr {
                 let ptr_inst_def = func.at(ptr_inst).def();
                 match cx[ptr_inst_def.form].kind {
                     DataInstKind::QPtr(QPtrOp::Offset(ptr_offset)) => {
@@ -452,9 +457,12 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         };
 
         let replacement_kind_and_inputs = if spv_inst.opcode == wk.OpVariable {
+            assert!(!disaggregated_output_or_inputs_during_lowering);
+            assert_eq!(output_types.len(), 1);
             assert!(data_inst_def.inputs.len() <= 1);
+
             let (_, var_data_type) =
-                self.lowerer.as_spv_ptr_type(output_type.unwrap()).ok_or_else(|| {
+                self.lowerer.as_spv_ptr_type(output_types[0]).ok_or_else(|| {
                     LowerError(Diag::bug(["output type not an `OpTypePointer`".into()]))
                 })?;
             match self.lowerer.layout_of(var_data_type)? {
@@ -467,6 +475,10 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                 _ => return Ok(Transformed::Unchanged),
             }
         } else if spv_inst.opcode == wk.OpLoad {
+            // FIXME(eddyb) expand into per-leaf accesses.
+            if disaggregated_output_or_inputs_during_lowering {
+                return Ok(Transformed::Unchanged);
+            }
             // FIXME(eddyb) support memory operands somehow.
             if !spv_inst.imms.is_empty() {
                 return Ok(Transformed::Unchanged);
@@ -479,6 +491,10 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
 
             (QPtrOp::Load { offset }.into(), [ptr].into_iter().collect())
         } else if spv_inst.opcode == wk.OpStore {
+            // FIXME(eddyb) expand into per-leaf accesses.
+            if disaggregated_output_or_inputs_during_lowering {
+                return Ok(Transformed::Unchanged);
+            }
             // FIXME(eddyb) support memory operands somehow.
             if !spv_inst.imms.is_empty() {
                 return Ok(Transformed::Unchanged);
@@ -492,6 +508,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
 
             (QPtrOp::Store { offset }.into(), [ptr, value].into_iter().collect())
         } else if spv_inst.opcode == wk.OpArrayLength {
+            assert!(!disaggregated_output_or_inputs_during_lowering);
             let field_idx = match spv_inst.imms[..] {
                 [spv::Imm::Short(_, field_idx)] => field_idx,
                 _ => unreachable!(),
@@ -561,6 +578,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         ]
         .contains(&spv_inst.opcode)
         {
+            assert!(!disaggregated_output_or_inputs_during_lowering);
+
             // FIXME(eddyb) avoid erasing the "inbounds" qualifier.
             let base_ptr = data_inst_def.inputs[0];
             let (_, base_pointee_type) =
@@ -572,11 +591,12 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             // a `OpTypeRuntimeArray`, with the original type as the element type.
             let access_chain_base_layout =
                 if [wk.OpPtrAccessChain, wk.OpInBoundsPtrAccessChain].contains(&spv_inst.opcode) {
-                    self.lowerer.layout_of(cx.intern(TypeKind::SpvInst {
-                        spv_inst: wk.OpTypeRuntimeArray.into(),
-                        type_and_const_inputs:
+                    self.lowerer.layout_of(cx.intern(
+                        spv::Inst::from(wk.OpTypeRuntimeArray).into_canonical_type_with(
+                            cx,
                             [TypeOrConst::Type(base_pointee_type)].into_iter().collect(),
-                    }))?
+                        ),
+                    ))?
                 } else {
                     self.lowerer.layout_of(base_pointee_type)?
                 };
@@ -609,7 +629,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                         attrs: Default::default(),
                         form: cx.intern(DataInstFormDef {
                             kind,
-                            output_type: Some(self.lowerer.qptr_type()),
+                            output_types: [self.lowerer.qptr_type()].into_iter().collect(),
                         }),
                         inputs,
                     }
@@ -635,14 +655,18 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                     _ => unreachable!(),
                 }
 
-                ptr = Value::DataInstOutput(step_data_inst);
+                ptr = Value::DataInstOutput { inst: step_data_inst, output_idx: 0 };
             }
             final_step.into_data_inst_kind_and_inputs(ptr)
         } else if spv_inst.opcode == wk.OpBitcast {
+            assert!(!disaggregated_output_or_inputs_during_lowering);
+            assert_eq!(output_types.len(), 1);
+            assert_eq!(data_inst_def.inputs.len(), 1);
+
             let input = data_inst_def.inputs[0];
             // Pointer-to-pointer casts are noops on `qptr`.
             if self.lowerer.as_spv_ptr_type(func.at(input).type_of(cx)).is_some()
-                && self.lowerer.as_spv_ptr_type(output_type.unwrap()).is_some()
+                && self.lowerer.as_spv_ptr_type(output_types[0]).is_some()
             {
                 // HACK(eddyb) this will end added to `noop_offsets_to_base_ptr`,
                 // which should replace all uses of this bitcast with its input.
@@ -660,7 +684,7 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             // FIXME(eddyb) because this is now interned, it might be better to
             // temporarily track the old output types in a map, and not actually
             // intern the non-`qptr`-output `qptr.*` instructions.
-            form: cx.intern(DataInstFormDef { kind: new_kind, output_type }),
+            form: cx.intern(DataInstFormDef { kind: new_kind, output_types: output_types.clone() }),
             inputs: new_inputs,
         }))
     }
@@ -679,18 +703,24 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
         // FIXME(eddyb) is this a good convention?
         let func = func_at_data_inst_frozen.at(());
 
-        match data_inst_form_def.kind {
+        let spv_inst_lowering = match &data_inst_form_def.kind {
             // Known semantics, no need to preserve SPIR-V pointer information.
             DataInstKind::Scalar(_)
             | DataInstKind::Vector(_)
             | DataInstKind::FuncCall(_)
             | DataInstKind::QPtr(_) => return,
 
-            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
-        }
+            DataInstKind::SpvInst(_, lowering) | DataInstKind::SpvExtInst { lowering, .. } => {
+                lowering
+            }
+        };
 
         let mut old_and_new_attrs = None;
         let get_old_attrs = || AttrSetDef { attrs: cx[data_inst_def.attrs].attrs.clone() };
+
+        if let Some(LowerError(e)) = extra_error {
+            old_and_new_attrs.get_or_insert_with(get_old_attrs).push_diag(e);
+        }
 
         for (input_idx, &v) in data_inst_def.inputs.iter().enumerate() {
             if let Some((_, pointee)) = self.lowerer.as_spv_ptr_type(func.at(v).type_of(cx)) {
@@ -703,8 +733,18 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                 );
             }
         }
-        if let Some(output_type) = data_inst_form_def.output_type {
-            if let Some((addr_space, pointee)) = self.lowerer.as_spv_ptr_type(output_type) {
+        for (output_idx, &ty) in data_inst_form_def.output_types.iter().enumerate() {
+            if let Some((addr_space, pointee)) = self.lowerer.as_spv_ptr_type(ty) {
+                // FIXME(eddyb) make this impossible by lowering all instructions
+                // that may produce aggregates with pointer leaves.
+                if output_idx != 0 || spv_inst_lowering.disaggregated_output.is_some() {
+                    old_and_new_attrs.get_or_insert_with(get_old_attrs).push_diag(Diag::bug([
+                        format!("unsupported pointer as aggregate leaf (output #{output_idx})")
+                            .into(),
+                    ]));
+                    continue;
+                }
+
                 old_and_new_attrs.get_or_insert_with(get_old_attrs).attrs.insert(
                     QPtrAttr::FromSpvPtrOutput {
                         addr_space: OrdAssertEq(addr_space),
@@ -713,10 +753,6 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
                     .into(),
                 );
             }
-        }
-
-        if let Some(LowerError(e)) = extra_error {
-            old_and_new_attrs.get_or_insert_with(get_old_attrs).push_diag(e);
         }
 
         if let Some(attrs) = old_and_new_attrs {
@@ -728,8 +764,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
     // encoded as `Option<NonZeroU32>` for (dense) map entry reasons.
     fn add_value_uses(&mut self, values: &[Value]) {
         for &v in values {
-            if let Value::DataInstOutput(data_inst) = v {
-                let count = self.data_inst_use_counts.entry(data_inst);
+            if let Value::DataInstOutput { inst, .. } = v {
+                let count = self.data_inst_use_counts.entry(inst);
                 *count = Some(
                     NonZeroU32::new(count.map_or(0, |c| c.get()).checked_add(1).unwrap()).unwrap(),
                 );
@@ -738,8 +774,8 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
     }
     fn remove_value_uses(&mut self, values: &[Value]) {
         for &v in values {
-            if let Value::DataInstOutput(data_inst) = v {
-                let count = self.data_inst_use_counts.entry(data_inst);
+            if let Value::DataInstOutput { inst, .. } = v {
+                let count = self.data_inst_use_counts.entry(inst);
                 *count = NonZeroU32::new(count.unwrap().get() - 1);
             }
         }
@@ -753,7 +789,7 @@ impl Transformer for LowerFromSpvPtrInstsInFunc<'_> {
         let mut v = *v;
 
         let transformed = match v {
-            Value::DataInstOutput(inst) => self
+            Value::DataInstOutput { inst, output_idx: 0 } => self
                 .noop_offsets_to_base_ptr
                 .get(&inst)
                 .copied()
@@ -806,7 +842,11 @@ impl Transformer for LowerFromSpvPtrInstsInFunc<'_> {
 
                             if let QPtrOp::Offset(0) = op {
                                 let mut base_ptr = new_def.inputs[0];
-                                if let Value::DataInstOutput(base_ptr_inst) = base_ptr {
+                                if let Value::DataInstOutput {
+                                    inst: base_ptr_inst,
+                                    output_idx: 0,
+                                } = base_ptr
+                                {
                                     if let Some(&base_ptr_base_ptr) =
                                         self.noop_offsets_to_base_ptr.get(&base_ptr_inst)
                                     {

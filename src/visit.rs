@@ -320,7 +320,7 @@ impl InnerVisit for TypeDef {
             | TypeKind::QPtr
             | TypeKind::SpvStringLiteralForExtInst => {}
 
-            TypeKind::SpvInst { spv_inst: _, type_and_const_inputs } => {
+            TypeKind::SpvInst { spv_inst: _, type_and_const_inputs, value_lowering: _ } => {
                 for &ty_or_ct in type_and_const_inputs {
                     match ty_or_ct {
                         TypeOrConst::Type(ty) => visitor.visit_type_use(ty),
@@ -396,10 +396,12 @@ impl InnerVisit for GlobalVarDefBody {
 
 impl InnerVisit for FuncDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs, ret_type, params, def } = self;
+        let Self { attrs, ret_types, params, def } = self;
 
         visitor.visit_attr_set_use(*attrs);
-        visitor.visit_type_use(*ret_type);
+        for &ty in ret_types {
+            visitor.visit_type_use(ty);
+        }
         for param in params {
             param.inner_visit_with(visitor);
         }
@@ -527,9 +529,10 @@ impl InnerVisit for DataInstDef {
 
 impl InnerVisit for DataInstFormDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { kind, output_type } = self;
+        let Self { kind, output_types } = self;
 
         match kind {
+            DataInstKind::Scalar(_) | DataInstKind::Vector(_) => {}
             &DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
             DataInstKind::QPtr(op) => match *op {
                 QPtrOp::FuncLocalVar(_)
@@ -541,12 +544,25 @@ impl InnerVisit for DataInstFormDef {
                 | QPtrOp::Load { .. }
                 | QPtrOp::Store { .. } => {}
             },
-            DataInstKind::Scalar(_)
-            | DataInstKind::Vector(_)
-            | DataInstKind::SpvInst(_)
-            | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::SpvInst(_, lowering)
+            | DataInstKind::SpvExtInst { ext_set: _, inst: _, lowering } => {
+                lowering.inner_visit_with(visitor);
+            }
         }
-        if let Some(ty) = *output_type {
+        for &ty in output_types {
+            visitor.visit_type_use(ty);
+        }
+    }
+}
+
+impl InnerVisit for spv::InstLowering {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { disaggregated_output, disaggregated_inputs } = self;
+
+        if let Some(ty) = *disaggregated_output {
+            visitor.visit_type_use(ty);
+        }
+        for &(_, ty) in disaggregated_inputs {
             visitor.visit_type_use(ty);
         }
     }
@@ -583,7 +599,7 @@ impl InnerVisit for Value {
             Self::Const(ct) => visitor.visit_const_use(ct),
             Self::ControlRegionInput { region: _, input_idx: _ }
             | Self::ControlNodeOutput { control_node: _, output_idx: _ }
-            | Self::DataInstOutput(_) => {}
+            | Self::DataInstOutput { inst: _, output_idx: _ } => {}
         }
     }
 }

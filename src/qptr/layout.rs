@@ -356,7 +356,7 @@ impl<'a> LayoutCache<'a> {
                     ["`layout_of(qptr)` (already lowered?)".into()],
                 )));
             }
-            TypeKind::SpvInst { spv_inst, type_and_const_inputs } => {
+            TypeKind::SpvInst { spv_inst, type_and_const_inputs, .. } => {
                 (spv_inst, type_and_const_inputs)
             }
             TypeKind::SpvStringLiteralForExtInst => {
