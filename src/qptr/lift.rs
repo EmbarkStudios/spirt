@@ -285,12 +285,15 @@ impl<'a> LiftToSpvPtrs<'a> {
             attrs: stride_attrs.unwrap_or_default(),
             kind: TypeKind::SpvInst {
                 spv_inst: spv_opcode.into(),
-                type_and_const_inputs: [TypeOrConst::Type(element_type)]
-                    .into_iter()
-                    .chain(fixed_len.map(|len| {
+                type_and_const_inputs: [
+                    Some(TypeOrConst::Type(element_type)),
+                    fixed_len.map(|len| {
                         TypeOrConst::Const(self.cx.intern(scalar::Const::from_u32(len)))
-                    }))
-                    .collect(),
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
             },
         }))
     }

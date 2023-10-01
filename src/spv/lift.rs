@@ -7,15 +7,15 @@ use crate::{
     cfg, scalar, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl, DataInst,
     DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef, EntityList, ExportKey,
-    Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeDef, TypeKind,
-    TypeOrConst, Value,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, FxIndexSet, GlobalVar,
+    GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeDef,
+    TypeKind, TypeOrConst, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU32;
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::{io, iter, mem, slice};
 
@@ -75,34 +75,29 @@ impl spv::ModuleDebugInfo {
     }
 }
 
-impl FuncDecl {
-    fn spv_func_type(&self, cx: &Context) -> Type {
-        let wk = &spec::Spec::get().well_known;
-
-        cx.intern(TypeDef {
-            attrs: AttrSet::default(),
-            kind: TypeKind::SpvInst {
-                spv_inst: wk.OpTypeFunction.into(),
-                type_and_const_inputs: iter::once(self.ret_type)
-                    .chain(self.params.iter().map(|param| param.ty))
-                    .map(TypeOrConst::Type)
-                    .collect(),
-            },
-        })
-    }
-}
-
-struct NeedsIdsCollector<'a> {
+struct IdAllocator<'a, AI: FnMut() -> spv::Id> {
     cx: &'a Context,
     module: &'a Module,
 
-    ext_inst_imports: BTreeSet<&'a str>,
-    debug_strings: BTreeSet<&'a str>,
+    /// ID allocation callback, kept as a closure (instead of having its state
+    /// be part of `IdAllocator`) to avoid misuse.
+    alloc_id: AI,
 
-    globals: FxIndexSet<Global>,
+    ids: ModuleIds<'a>,
+
     data_inst_forms_seen: FxIndexSet<DataInstForm>,
     global_vars_seen: FxIndexSet<GlobalVar>,
-    funcs: FxIndexSet<Func>,
+}
+
+#[derive(Default)]
+struct ModuleIds<'a> {
+    ext_inst_imports: BTreeMap<&'a str, spv::Id>,
+    debug_strings: BTreeMap<&'a str, spv::Id>,
+
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
+    globals: FxIndexMap<Global, spv::Id>,
+    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
+    funcs: FxIndexMap<Func, FuncIds<'a>>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -111,13 +106,27 @@ enum Global {
     Const(Const),
 }
 
-impl Visitor<'_> for NeedsIdsCollector<'_> {
+// FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
+// FIXME(eddyb) this is inconsistently named with `FuncBodyLifting`.
+struct FuncIds<'a> {
+    spv_func_ret_type: Type,
+    // FIXME(eddyb) should we even be interning an `OpTypeFunction` in `Context`?
+    // (it's easier this way, but it could also be tracked in `ModuleIds`)
+    spv_func_type: Type,
+
+    func_id: spv::Id,
+    param_ids: SmallVec<[spv::Id; 4]>,
+
+    body: Option<FuncBodyLifting<'a>>,
+}
+
+impl<AI: FnMut() -> spv::Id> Visitor<'_> for IdAllocator<'_, AI> {
     fn visit_attr_set_use(&mut self, attrs: AttrSet) {
         self.visit_attr_set_def(&self.cx[attrs]);
     }
     fn visit_type_use(&mut self, ty: Type) {
         let global = Global::Type(ty);
-        if self.globals.contains(&global) {
+        if self.ids.globals.contains_key(&global) {
             return;
         }
         let ty_def = &self.cx[ty];
@@ -153,11 +162,11 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
 
         self.visit_type_def(ty_def);
-        self.globals.insert(global);
+        self.ids.globals.insert(global, (self.alloc_id)());
     }
     fn visit_const_use(&mut self, ct: Const) {
         let global = Global::Const(ct);
-        if self.globals.contains(&global) {
+        if self.ids.globals.contains_key(&global) {
             return;
         }
         let ct_def = &self.cx[ct];
@@ -179,7 +188,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             | ConstKind::PtrToGlobalVar(_)
             | ConstKind::SpvInst { .. } => {
                 self.visit_const_def(ct_def);
-                self.globals.insert(global);
+                self.ids.globals.insert(global, (self.alloc_id)());
             }
 
             // HACK(eddyb) because this is an `OpString` and needs to go earlier
@@ -197,7 +206,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                         }
                 );
 
-                self.debug_strings.insert(&self.cx[s]);
+                self.ids.debug_strings.entry(&self.cx[s]).or_insert_with(&mut self.alloc_id);
             }
         }
     }
@@ -213,24 +222,55 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
     }
     fn visit_func_use(&mut self, func: Func) {
-        if self.funcs.contains(&func) {
+        if self.ids.funcs.contains_key(&func) {
             return;
         }
-        // NOTE(eddyb) inserting first results in a different function ordering
-        // in the resulting module, but the order doesn't matter, and we need
-        // to avoid infinite recursion for recursive functions.
-        self.funcs.insert(func);
-
         let func_decl = &self.module.funcs[func];
-        // FIXME(eddyb) should this be cached in `self.funcs`?
-        self.visit_type_use(func_decl.spv_func_type(self.cx));
+
+        // Synthesize an `OpTypeFunction` type (that SPIR-T itself doesn't carry).
+        let wk = &spec::Spec::get().well_known;
+        let spv_func_ret_type = func_decl.ret_type;
+        let spv_func_type = self.cx.intern(TypeKind::SpvInst {
+            spv_inst: wk.OpTypeFunction.into(),
+            type_and_const_inputs: iter::once(spv_func_ret_type)
+                .chain(func_decl.params.iter().map(|param| param.ty))
+                .map(TypeOrConst::Type)
+                .collect(),
+        });
+        self.visit_type_use(spv_func_type);
+
+        // NOTE(eddyb) inserting first produces a different function ordering
+        // overall in the final module, but the order doesn't matter, and we
+        // need to avoid infinite recursion for recursive functions.
+        self.ids.funcs.insert(
+            func,
+            FuncIds {
+                spv_func_ret_type,
+                spv_func_type,
+                func_id: (self.alloc_id)(),
+                param_ids: func_decl.params.iter().map(|_| (self.alloc_id)()).collect(),
+                body: None,
+            },
+        );
+
         self.visit_func_decl(func_decl);
+
+        // Handle the body last, to minimize recursion hazards (see comment above).
+        match &func_decl.def {
+            DeclDef::Imported(_) => {}
+            DeclDef::Present(func_def_body) => {
+                let func_body_lifting = FuncBodyLifting::from_func_def_body(self, func_def_body);
+                self.ids.funcs.get_mut(&func).unwrap().body = Some(func_body_lifting);
+            }
+        }
     }
 
     fn visit_spv_module_debug_info(&mut self, debug_info: &spv::ModuleDebugInfo) {
         for sources in debug_info.source_languages.values() {
             // The file operand of `OpSource` has to point to an `OpString`.
-            self.debug_strings.extend(sources.file_contents.keys().copied().map(|s| &self.cx[s]));
+            for &s in sources.file_contents.keys() {
+                self.ids.debug_strings.entry(&self.cx[s]).or_insert_with(&mut self.alloc_id);
+            }
         }
     }
     fn visit_attr(&mut self, attr: &Attr) {
@@ -240,7 +280,10 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             | Attr::SpvAnnotation { .. }
             | Attr::SpvBitflagsOperand(_) => {}
             Attr::SpvDebugLine { file_path, .. } => {
-                self.debug_strings.insert(&self.cx[file_path.0]);
+                self.ids
+                    .debug_strings
+                    .entry(&self.cx[file_path.0])
+                    .or_insert_with(&mut self.alloc_id);
             }
         }
         attr.inner_visit_with(self);
@@ -260,28 +303,18 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             | DataInstKind::SpvInst(_) => {}
 
             DataInstKind::SpvExtInst { ext_set, .. } => {
-                self.ext_inst_imports.insert(&self.cx[ext_set]);
+                self.ids
+                    .ext_inst_imports
+                    .entry(&self.cx[ext_set])
+                    .or_insert_with(&mut self.alloc_id);
             }
         }
         data_inst_form_def.inner_visit_with(self);
     }
 }
 
-struct AllocatedIds<'a> {
-    ext_inst_imports: BTreeMap<&'a str, spv::Id>,
-    debug_strings: BTreeMap<&'a str, spv::Id>,
-
-    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
-    globals: FxIndexMap<Global, spv::Id>,
-    // FIXME(eddyb) use `EntityOrientedDenseMap` here.
-    funcs: FxIndexMap<Func, FuncLifting<'a>>,
-}
-
-// FIXME(eddyb) should this use ID ranges instead of `SmallVec<[spv::Id; 4]>`?
-struct FuncLifting<'a> {
-    func_id: spv::Id,
-    param_ids: SmallVec<[spv::Id; 4]>,
-
+// FIXME(eddyb) this is inconsistently named with `FuncIds`.
+struct FuncBodyLifting<'a> {
     // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     region_inputs_source: FxHashMap<ControlRegion, RegionInputsSource>,
     // FIXME(eddyb) use `EntityOrientedDenseMap` here.
@@ -381,42 +414,6 @@ enum Merge<L> {
     },
 }
 
-impl<'a> NeedsIdsCollector<'a> {
-    fn alloc_ids<E>(
-        self,
-        mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
-    ) -> Result<AllocatedIds<'a>, E> {
-        let Self {
-            cx,
-            module,
-            ext_inst_imports,
-            debug_strings,
-            globals,
-            data_inst_forms_seen: _,
-            global_vars_seen: _,
-            funcs,
-        } = self;
-
-        Ok(AllocatedIds {
-            ext_inst_imports: ext_inst_imports
-                .into_iter()
-                .map(|name| Ok((name, alloc_id()?)))
-                .collect::<Result<_, _>>()?,
-            debug_strings: debug_strings
-                .into_iter()
-                .map(|s| Ok((s, alloc_id()?)))
-                .collect::<Result<_, _>>()?,
-            globals: globals.into_iter().map(|g| Ok((g, alloc_id()?))).collect::<Result<_, _>>()?,
-            funcs: funcs
-                .into_iter()
-                .map(|func| {
-                    Ok((func, FuncLifting::from_func_decl(cx, &module.funcs[func], &mut alloc_id)?))
-                })
-                .collect::<Result<_, _>>()?,
-        })
-    }
-}
-
 /// Helper type for deep traversal of the CFG (as a graph of [`CfgPoint`]s), which
 /// tracks the necessary context for navigating a [`ControlRegion`]/[`ControlNode`].
 #[derive(Copy, Clone)]
@@ -494,41 +491,37 @@ impl<'a, 'p> FuncAt<'a, CfgCursor<'p>> {
 impl<'a> FuncAt<'a, ControlRegion> {
     /// Traverse every [`CfgPoint`] (deeply) contained in this [`ControlRegion`],
     /// in reverse post-order (RPO), with `f` receiving each [`CfgPoint`]
-    /// in turn (wrapped in [`CfgCursor`], for further traversal flexibility),
-    /// and being able to stop iteration by returning `Err`.
+    /// in turn (wrapped in [`CfgCursor`], for further traversal flexibility).
     ///
     /// RPO iteration over a CFG provides certain guarantees, most importantly
     /// that SSA definitions are visited before any of their uses.
-    fn rev_post_order_try_for_each<E>(
-        self,
-        mut f: impl FnMut(CfgCursor<'_>) -> Result<(), E>,
-    ) -> Result<(), E> {
-        self.rev_post_order_try_for_each_inner(&mut f, None)
+    fn rev_post_order_for_each(self, mut f: impl FnMut(CfgCursor<'_>)) {
+        self.rev_post_order_for_each_inner(&mut f, None);
     }
 
-    fn rev_post_order_try_for_each_inner<E>(
+    fn rev_post_order_for_each_inner(
         self,
-        f: &mut impl FnMut(CfgCursor<'_>) -> Result<(), E>,
+        f: &mut impl FnMut(CfgCursor<'_>),
         parent: Option<&CfgCursor<'_, ControlParent>>,
-    ) -> Result<(), E> {
+    ) {
         let region = self.position;
-        f(CfgCursor { point: CfgPoint::RegionEntry(region), parent })?;
+        f(CfgCursor { point: CfgPoint::RegionEntry(region), parent });
         for func_at_control_node in self.at_children() {
-            func_at_control_node.rev_post_order_try_for_each_inner(
+            func_at_control_node.rev_post_order_for_each_inner(
                 f,
                 &CfgCursor { point: ControlParent::Region(region), parent },
-            )?;
+            );
         }
-        f(CfgCursor { point: CfgPoint::RegionExit(region), parent })
+        f(CfgCursor { point: CfgPoint::RegionExit(region), parent });
     }
 }
 
 impl<'a> FuncAt<'a, ControlNode> {
-    fn rev_post_order_try_for_each_inner<E>(
+    fn rev_post_order_for_each_inner(
         self,
-        f: &mut impl FnMut(CfgCursor<'_>) -> Result<(), E>,
+        f: &mut impl FnMut(CfgCursor<'_>),
         parent: &CfgCursor<'_, ControlParent>,
-    ) -> Result<(), E> {
+    ) {
         let child_regions: &[_] = match &self.def().kind {
             ControlNodeKind::Block { .. } => &[],
             ControlNodeKind::Select { cases, .. } => cases,
@@ -537,39 +530,23 @@ impl<'a> FuncAt<'a, ControlNode> {
 
         let control_node = self.position;
         let parent = Some(parent);
-        f(CfgCursor { point: CfgPoint::ControlNodeEntry(control_node), parent })?;
+        f(CfgCursor { point: CfgPoint::ControlNodeEntry(control_node), parent });
         for &region in child_regions {
-            self.at(region).rev_post_order_try_for_each_inner(
+            self.at(region).rev_post_order_for_each_inner(
                 f,
                 Some(&CfgCursor { point: ControlParent::ControlNode(control_node), parent }),
-            )?;
+            );
         }
-        f(CfgCursor { point: CfgPoint::ControlNodeExit(control_node), parent })
+        f(CfgCursor { point: CfgPoint::ControlNodeExit(control_node), parent });
     }
 }
 
-impl<'a> FuncLifting<'a> {
-    fn from_func_decl<E>(
-        cx: &Context,
-        func_decl: &'a FuncDecl,
-        mut alloc_id: impl FnMut() -> Result<spv::Id, E>,
-    ) -> Result<Self, E> {
-        let func_id = alloc_id()?;
-        let param_ids = func_decl.params.iter().map(|_| alloc_id()).collect::<Result<_, _>>()?;
-
-        let func_def_body = match &func_decl.def {
-            DeclDef::Imported(_) => {
-                return Ok(Self {
-                    func_id,
-                    param_ids,
-                    region_inputs_source: Default::default(),
-                    data_inst_output_ids: Default::default(),
-                    label_ids: Default::default(),
-                    blocks: Default::default(),
-                });
-            }
-            DeclDef::Present(def) => def,
-        };
+impl<'a> FuncBodyLifting<'a> {
+    fn from_func_def_body(
+        id_allocator: &mut IdAllocator<'_, impl FnMut() -> spv::Id>,
+        func_def_body: &'a FuncDefBody,
+    ) -> Self {
+        let cx = id_allocator.cx;
 
         let mut region_inputs_source = FxHashMap::default();
         region_inputs_source.insert(func_def_body.body, RegionInputsSource::FuncParams);
@@ -590,17 +567,15 @@ impl<'a> FuncLifting<'a> {
                             .def()
                             .inputs
                             .iter()
-                            .map(|&ControlRegionInputDecl { attrs, ty }| {
-                                Ok(Phi {
-                                    attrs,
-                                    ty,
+                            .map(|&ControlRegionInputDecl { attrs, ty }| Phi {
+                                attrs,
+                                ty,
 
-                                    result_id: alloc_id()?,
-                                    cases: FxIndexMap::default(),
-                                    default_value: None,
-                                })
+                                result_id: (id_allocator.alloc_id)(),
+                                cases: FxIndexMap::default(),
+                                default_value: None,
                             })
-                            .collect::<Result<_, _>>()?
+                            .collect()
                     }
                 }
                 CfgPoint::RegionExit(_) => SmallVec::new(),
@@ -624,17 +599,15 @@ impl<'a> FuncLifting<'a> {
                             loop_body_inputs
                                 .iter()
                                 .enumerate()
-                                .map(|(i, &ControlRegionInputDecl { attrs, ty })| {
-                                    Ok(Phi {
-                                        attrs,
-                                        ty,
+                                .map(|(i, &ControlRegionInputDecl { attrs, ty })| Phi {
+                                    attrs,
+                                    ty,
 
-                                        result_id: alloc_id()?,
-                                        cases: FxIndexMap::default(),
-                                        default_value: Some(initial_inputs[i]),
-                                    })
+                                    result_id: (id_allocator.alloc_id)(),
+                                    cases: FxIndexMap::default(),
+                                    default_value: Some(initial_inputs[i]),
                                 })
-                                .collect::<Result<_, _>>()?
+                                .collect()
                         }
                         _ => SmallVec::new(),
                     }
@@ -644,17 +617,15 @@ impl<'a> FuncLifting<'a> {
                     .def()
                     .outputs
                     .iter()
-                    .map(|&ControlNodeOutputDecl { attrs, ty }| {
-                        Ok(Phi {
-                            attrs,
-                            ty,
+                    .map(|&ControlNodeOutputDecl { attrs, ty }| Phi {
+                        attrs,
+                        ty,
 
-                            result_id: alloc_id()?,
-                            cases: FxIndexMap::default(),
-                            default_value: None,
-                        })
+                        result_id: (id_allocator.alloc_id)(),
+                        cases: FxIndexMap::default(),
+                        default_value: None,
                     })
-                    .collect::<Result<_, _>>()?,
+                    .collect(),
             };
 
             let insts = match point {
@@ -836,14 +807,14 @@ impl<'a> FuncLifting<'a> {
             };
 
             blocks.insert(point, BlockLifting { phis, insts, terminator });
-
-            Ok(())
         };
         match &func_def_body.unstructured_cfg {
-            None => func_def_body.at_body().rev_post_order_try_for_each(visit_cfg_point)?,
+            None => {
+                func_def_body.at_body().rev_post_order_for_each(visit_cfg_point);
+            }
             Some(cfg) => {
                 for region in cfg.rev_post_order(func_def_body) {
-                    func_def_body.at(region).rev_post_order_try_for_each(&mut visit_cfg_point)?;
+                    func_def_body.at(region).rev_post_order_for_each(&mut visit_cfg_point);
                 }
             }
         }
@@ -986,31 +957,26 @@ impl<'a> FuncLifting<'a> {
             .filter(|&func_at_inst| cx[func_at_inst.def().form].output_type.is_some())
             .map(|func_at_inst| func_at_inst.position);
 
-        Ok(Self {
-            func_id,
-            param_ids,
+        Self {
             region_inputs_source,
             data_inst_output_ids: all_insts_with_output
-                .map(|inst| Ok((inst, alloc_id()?)))
-                .collect::<Result<_, _>>()?,
-            label_ids: blocks
-                .keys()
-                .map(|&point| Ok((point, alloc_id()?)))
-                .collect::<Result<_, _>>()?,
+                .map(|inst| (inst, (id_allocator.alloc_id)()))
+                .collect(),
+            label_ids: blocks.keys().map(|&point| (point, (id_allocator.alloc_id)())).collect(),
             blocks,
-        })
+        }
     }
 }
 
-/// "Maybe-decorated "lazy" SPIR-V instruction, allowing separately emitting
+/// Maybe-decorated "lazy" SPIR-V instruction, allowing separately emitting
 /// decorations from attributes, and the instruction itself, without eagerly
 /// allocating all the instructions.
 #[derive(Copy, Clone)]
 enum LazyInst<'a, 'b> {
     Global(Global),
     OpFunction {
-        func_id: spv::Id,
         func_decl: &'a FuncDecl,
+        func_ids: &'b FuncIds<'a>,
     },
     OpFunctionParameter {
         param_id: spv::Id,
@@ -1020,17 +986,17 @@ enum LazyInst<'a, 'b> {
         label_id: spv::Id,
     },
     OpPhi {
-        parent_func: &'b FuncLifting<'a>,
+        parent_func_ids: &'b FuncIds<'a>,
         phi: &'b Phi,
     },
     DataInst {
-        parent_func: &'b FuncLifting<'a>,
+        parent_func_ids: &'b FuncIds<'a>,
         result_id: Option<spv::Id>,
         data_inst_def: &'a DataInstDef,
     },
     Merge(Merge<spv::Id>),
     Terminator {
-        parent_func: &'b FuncLifting<'a>,
+        parent_func_ids: &'b FuncIds<'a>,
         terminator: &'b Terminator<'a>,
     },
     OpFunctionEnd,
@@ -1040,7 +1006,7 @@ impl LazyInst<'_, '_> {
     fn result_id_attrs_and_import(
         self,
         module: &Module,
-        ids: &AllocatedIds<'_>,
+        ids: &ModuleIds<'_>,
     ) -> (Option<spv::Id>, AttrSet, Option<Import>) {
         let cx = module.cx_ref();
 
@@ -1073,21 +1039,21 @@ impl LazyInst<'_, '_> {
                 };
                 (Some(ids.globals[&global]), attrs, import)
             }
-            Self::OpFunction { func_id, func_decl } => {
+            Self::OpFunction { func_decl, func_ids } => {
                 let import = match func_decl.def {
                     DeclDef::Imported(import) => Some(import),
                     DeclDef::Present(_) => None,
                 };
-                (Some(func_id), func_decl.attrs, import)
+                (Some(func_ids.func_id), func_decl.attrs, import)
             }
             Self::OpFunctionParameter { param_id, param } => (Some(param_id), param.attrs, None),
             Self::OpLabel { label_id } => (Some(label_id), AttrSet::default(), None),
-            Self::OpPhi { parent_func: _, phi } => (Some(phi.result_id), phi.attrs, None),
-            Self::DataInst { parent_func: _, result_id, data_inst_def } => {
+            Self::OpPhi { parent_func_ids: _, phi } => (Some(phi.result_id), phi.attrs, None),
+            Self::DataInst { parent_func_ids: _, result_id, data_inst_def } => {
                 (result_id, data_inst_def.attrs, None)
             }
             Self::Merge(_) => (None, AttrSet::default(), None),
-            Self::Terminator { parent_func: _, terminator } => (None, terminator.attrs, None),
+            Self::Terminator { parent_func_ids: _, terminator } => (None, terminator.attrs, None),
             Self::OpFunctionEnd => (None, AttrSet::default(), None),
         }
     }
@@ -1095,12 +1061,12 @@ impl LazyInst<'_, '_> {
     fn to_inst_and_attrs(
         self,
         module: &Module,
-        ids: &AllocatedIds<'_>,
+        ids: &ModuleIds<'_>,
     ) -> (spv::InstWithIds, AttrSet) {
         let wk = &spec::Spec::get().well_known;
         let cx = module.cx_ref();
 
-        let value_to_id = |parent_func: &FuncLifting<'_>, v| match v {
+        let value_to_id = |parent_func_ids: &FuncIds<'_>, v| match v {
             Value::Const(ct) => match cx[ct].kind {
                 ConstKind::SpvStringLiteralForExtInst(s) => ids.debug_strings[&cx[s]],
 
@@ -1108,23 +1074,30 @@ impl LazyInst<'_, '_> {
             },
             Value::ControlRegionInput { region, input_idx } => {
                 let input_idx = usize::try_from(input_idx).unwrap();
-                match parent_func.region_inputs_source.get(&region) {
-                    Some(RegionInputsSource::FuncParams) => parent_func.param_ids[input_idx],
+                let parent_func_body_lifting = parent_func_ids.body.as_ref().unwrap();
+                match parent_func_body_lifting.region_inputs_source.get(&region) {
+                    Some(RegionInputsSource::FuncParams) => parent_func_ids.param_ids[input_idx],
                     Some(&RegionInputsSource::LoopHeaderPhis(loop_node)) => {
-                        parent_func.blocks[&CfgPoint::ControlNodeEntry(loop_node)].phis[input_idx]
+                        parent_func_body_lifting.blocks[&CfgPoint::ControlNodeEntry(loop_node)].phis
+                            [input_idx]
                             .result_id
                     }
                     None => {
-                        parent_func.blocks[&CfgPoint::RegionEntry(region)].phis[input_idx].result_id
+                        parent_func_body_lifting.blocks[&CfgPoint::RegionEntry(region)].phis
+                            [input_idx]
+                            .result_id
                     }
                 }
             }
             Value::ControlNodeOutput { control_node, output_idx } => {
-                parent_func.blocks[&CfgPoint::ControlNodeExit(control_node)].phis
-                    [usize::try_from(output_idx).unwrap()]
+                parent_func_ids.body.as_ref().unwrap().blocks
+                    [&CfgPoint::ControlNodeExit(control_node)]
+                    .phis[usize::try_from(output_idx).unwrap()]
                 .result_id
             }
-            Value::DataInstOutput(inst) => parent_func.data_inst_output_ids[&inst],
+            Value::DataInstOutput(inst) => {
+                parent_func_ids.body.as_ref().unwrap().data_inst_output_ids[&inst]
+            }
         };
 
         let (result_id, attrs, _) = self.result_id_attrs_and_import(module, ids);
@@ -1233,7 +1206,7 @@ impl LazyInst<'_, '_> {
                     }
                 }
             },
-            Self::OpFunction { func_id: _, func_decl } => {
+            Self::OpFunction { func_decl: _, func_ids } => {
                 // FIXME(eddyb) make this less of a search and more of a
                 // lookup by splitting attrs into key and value parts.
                 let func_ctrl = cx[attrs]
@@ -1254,10 +1227,9 @@ impl LazyInst<'_, '_> {
                         opcode: wk.OpFunction,
                         imms: iter::once(spv::Imm::Short(wk.FunctionControl, func_ctrl)).collect(),
                     },
-                    result_type_id: Some(ids.globals[&Global::Type(func_decl.ret_type)]),
+                    result_type_id: Some(ids.globals[&Global::Type(func_ids.spv_func_ret_type)]),
                     result_id,
-                    ids: iter::once(ids.globals[&Global::Type(func_decl.spv_func_type(cx))])
-                        .collect(),
+                    ids: iter::once(ids.globals[&Global::Type(func_ids.spv_func_type)]).collect(),
                 }
             }
             Self::OpFunctionParameter { param_id: _, param } => spv::InstWithIds {
@@ -1272,7 +1244,7 @@ impl LazyInst<'_, '_> {
                 result_id,
                 ids: [].into_iter().collect(),
             },
-            Self::OpPhi { parent_func, phi } => spv::InstWithIds {
+            Self::OpPhi { parent_func_ids, phi } => spv::InstWithIds {
                 without_ids: wk.OpPhi.into(),
                 result_type_id: Some(ids.globals[&Global::Type(phi.ty)]),
                 result_id: Some(phi.result_id),
@@ -1280,11 +1252,14 @@ impl LazyInst<'_, '_> {
                     .cases
                     .iter()
                     .flat_map(|(&source_point, &v)| {
-                        [value_to_id(parent_func, v), parent_func.label_ids[&source_point]]
+                        [
+                            value_to_id(parent_func_ids, v),
+                            parent_func_ids.body.as_ref().unwrap().label_ids[&source_point],
+                        ]
                     })
                     .collect(),
             },
-            Self::DataInst { parent_func, result_id: _, data_inst_def } => {
+            Self::DataInst { parent_func_ids, result_id: _, data_inst_def } => {
                 let DataInstFormDef { kind, output_type } = &cx[data_inst_def.form];
                 let (inst, extra_initial_id_operand) =
                     match spv::Inst::from_canonical_data_inst_kind(kind).ok_or(kind) {
@@ -1316,7 +1291,9 @@ impl LazyInst<'_, '_> {
                     result_id,
                     ids: extra_initial_id_operand
                         .into_iter()
-                        .chain(data_inst_def.inputs.iter().map(|&v| value_to_id(parent_func, v)))
+                        .chain(
+                            data_inst_def.inputs.iter().map(|&v| value_to_id(parent_func_ids, v)),
+                        )
                         .collect(),
                 }
             }
@@ -1341,12 +1318,18 @@ impl LazyInst<'_, '_> {
                 result_id: None,
                 ids: [merge_label_id, continue_label_id].into_iter().collect(),
             },
-            Self::Terminator { parent_func, terminator } => {
+            Self::Terminator { parent_func_ids, terminator } => {
+                let parent_func_body_lifting = parent_func_ids.body.as_ref().unwrap();
                 let mut ids: SmallVec<[_; 4]> = terminator
                     .inputs
                     .iter()
-                    .map(|&v| value_to_id(parent_func, v))
-                    .chain(terminator.targets.iter().map(|&target| parent_func.label_ids[&target]))
+                    .map(|&v| value_to_id(parent_func_ids, v))
+                    .chain(
+                        terminator
+                            .targets
+                            .iter()
+                            .map(|&target| parent_func_body_lifting.label_ids[&target]),
+                    )
                     .collect();
 
                 // FIXME(eddyb) move some of this to `spv::canonical`.
@@ -1418,19 +1401,6 @@ impl Module {
             }
         };
 
-        // Collect uses scattered throughout the module, that require def IDs.
-        let mut needs_ids_collector = NeedsIdsCollector {
-            cx: &cx,
-            module: self,
-            ext_inst_imports: BTreeSet::new(),
-            debug_strings: BTreeSet::new(),
-            globals: FxIndexSet::default(),
-            data_inst_forms_seen: FxIndexSet::default(),
-            global_vars_seen: FxIndexSet::default(),
-            funcs: FxIndexSet::default(),
-        };
-        needs_ids_collector.visit_module(self);
-
         // Because `GlobalVar`s are given IDs by the `Const`s that point to them
         // (i.e. `ConstKind::PtrToGlobalVar`), any `GlobalVar`s in other positions
         // require extra care to ensure the ID-giving `Const` is visited.
@@ -1443,84 +1413,115 @@ impl Module {
             });
             Global::Const(ptr_to_global_var)
         };
-        for &gv in &needs_ids_collector.global_vars_seen {
-            needs_ids_collector.globals.insert(global_var_to_id_giving_global(gv));
-        }
 
-        // IDs can be allocated once we have the full sets needing them, whether
-        // sorted by contents, or ordered by the first occurence in the module.
-        let mut id_bound = NonZeroU32::MIN;
-        let ids = needs_ids_collector.alloc_ids(|| {
-            let id = id_bound;
+        // Collect uses scattered throughout the module, allocating IDs for them.
+        let (ids, id_bound) = {
+            let mut id_bound = NonZeroUsize::MIN;
+            let mut id_allocator = IdAllocator {
+                cx: &cx,
+                module: self,
+                alloc_id: || {
+                    let id = id_bound;
+                    id_bound =
+                        id_bound.checked_add(1).expect("overflowing `usize` should be impossible");
 
-            match id_bound.checked_add(1) {
-                Some(new_bound) => {
-                    id_bound = new_bound;
-                    Ok(id)
-                }
-                None => Err(io::Error::new(
+                    // NOTE(eddyb) `MAX` is just a placeholder - the check for overflows
+                    // is done below, after all IDs that may be allocated, have been
+                    // (this is in order to not need this closure to return a `Result`).
+                    id.try_into().unwrap_or(spv::Id::new(u32::MAX).unwrap())
+                },
+                ids: ModuleIds::default(),
+                data_inst_forms_seen: FxIndexSet::default(),
+                global_vars_seen: FxIndexSet::default(),
+            };
+            id_allocator.visit_module(self);
+
+            // See comment on `global_var_to_id_giving_global` for why this is here.
+            for &gv in &id_allocator.global_vars_seen {
+                id_allocator
+                    .ids
+                    .globals
+                    .entry(global_var_to_id_giving_global(gv))
+                    .or_insert_with(&mut id_allocator.alloc_id);
+            }
+
+            let ids = id_allocator.ids;
+
+            let id_bound = spv::Id::try_from(id_bound).ok().ok_or_else(|| {
+                io::Error::new(
                     io::ErrorKind::InvalidData,
                     "ID bound of SPIR-V module doesn't fit in 32 bits",
-                )),
-            }
-        })?;
+                )
+            })?;
+
+            (ids, id_bound)
+        };
 
         // HACK(eddyb) allow `move` closures below to reference `cx` or `ids`
         // without causing unwanted moves out of them.
         let (cx, ids) = (&*cx, &ids);
 
         let global_and_func_insts = ids.globals.keys().copied().map(LazyInst::Global).chain(
-            ids.funcs.iter().flat_map(|(&func, func_lifting)| {
+            ids.funcs.iter().flat_map(|(&func, func_ids)| {
                 let func_decl = &self.funcs[func];
-                let func_def_body = match &func_decl.def {
-                    DeclDef::Imported(_) => None,
-                    DeclDef::Present(def) => Some(def),
+                let body_with_lifting = match (&func_decl.def, &func_ids.body) {
+                    (DeclDef::Imported(_), None) => None,
+                    (DeclDef::Present(def), Some(func_body_lifting)) => {
+                        Some((def, func_body_lifting))
+                    }
+                    _ => unreachable!(),
                 };
 
-                iter::once(LazyInst::OpFunction { func_id: func_lifting.func_id, func_decl })
-                    .chain(func_lifting.param_ids.iter().zip(&func_decl.params).map(
-                        |(&param_id, param)| LazyInst::OpFunctionParameter { param_id, param },
-                    ))
-                    .chain(func_lifting.blocks.iter().flat_map(move |(point, block)| {
+                let param_insts =
+                    func_ids.param_ids.iter().zip(&func_decl.params).map(|(&param_id, param)| {
+                        LazyInst::OpFunctionParameter { param_id, param }
+                    });
+                let body_insts = body_with_lifting.map(|(func_def_body, func_body_lifting)| {
+                    func_body_lifting.blocks.iter().flat_map(move |(point, block)| {
                         let BlockLifting { phis, insts, terminator } = block;
 
-                        iter::once(LazyInst::OpLabel { label_id: func_lifting.label_ids[point] })
-                            .chain(
-                                phis.iter()
-                                    .map(|phi| LazyInst::OpPhi { parent_func: func_lifting, phi }),
-                            )
-                            .chain(
-                                insts
-                                    .iter()
-                                    .copied()
-                                    .flat_map(move |insts| func_def_body.unwrap().at(insts))
-                                    .map(move |func_at_inst| {
-                                        let data_inst_def = func_at_inst.def();
-                                        LazyInst::DataInst {
-                                            parent_func: func_lifting,
-                                            result_id: cx[data_inst_def.form].output_type.map(
-                                                |_| {
-                                                    func_lifting.data_inst_output_ids
-                                                        [&func_at_inst.position]
-                                                },
-                                            ),
-                                            data_inst_def,
-                                        }
-                                    }),
-                            )
-                            .chain(terminator.merge.map(|merge| {
-                                LazyInst::Merge(match merge {
-                                    Merge::Selection(merge) => {
-                                        Merge::Selection(func_lifting.label_ids[&merge])
+                        iter::once(LazyInst::OpLabel {
+                            label_id: func_body_lifting.label_ids[point],
+                        })
+                        .chain(
+                            phis.iter()
+                                .map(|phi| LazyInst::OpPhi { parent_func_ids: func_ids, phi }),
+                        )
+                        .chain(
+                            insts
+                                .iter()
+                                .copied()
+                                .flat_map(move |insts| func_def_body.at(insts))
+                                .map(move |func_at_inst| {
+                                    let data_inst_def = func_at_inst.def();
+                                    LazyInst::DataInst {
+                                        parent_func_ids: func_ids,
+                                        result_id: cx[data_inst_def.form].output_type.map(|_| {
+                                            func_body_lifting.data_inst_output_ids
+                                                [&func_at_inst.position]
+                                        }),
+                                        data_inst_def,
                                     }
-                                    Merge::Loop { loop_merge, loop_continue } => Merge::Loop {
-                                        loop_merge: func_lifting.label_ids[&loop_merge],
-                                        loop_continue: func_lifting.label_ids[&loop_continue],
-                                    },
-                                })
-                            }))
-                            .chain([LazyInst::Terminator { parent_func: func_lifting, terminator }])
-                    }))
+                                }),
+                        )
+                        .chain(terminator.merge.map(|merge| {
+                            LazyInst::Merge(match merge {
+                                Merge::Selection(merge) => {
+                                    Merge::Selection(func_body_lifting.label_ids[&merge])
+                                }
+                                Merge::Loop { loop_merge, loop_continue } => Merge::Loop {
+                                    loop_merge: func_body_lifting.label_ids[&loop_merge],
+                                    loop_continue: func_body_lifting.label_ids[&loop_continue],
+                                },
+                            })
+                        }))
+                        .chain([LazyInst::Terminator { parent_func_ids: func_ids, terminator }])
+                    })
+                });
+
+                iter::once(LazyInst::OpFunction { func_decl, func_ids })
+                    .chain(param_insts)
+                    .chain(body_insts.into_iter().flatten())
                     .chain([LazyInst::OpFunctionEnd])
             }),
         );
