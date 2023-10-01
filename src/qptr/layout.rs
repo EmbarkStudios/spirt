@@ -277,8 +277,6 @@ impl<'a> LayoutCache<'a> {
         let cx = &self.cx;
         let wk = self.wk;
 
-        let ty_def = &cx[ty];
-
         let scalar_with_size_and_align = |(size, align)| {
             TypeLayout::Concrete(Rc::new(MemTypeLayout {
                 original_type: ty,
@@ -289,6 +287,7 @@ impl<'a> LayoutCache<'a> {
                 components: Components::Scalar,
             }))
         };
+
         let scalar = |width: u32| {
             assert!(width.is_power_of_two());
             let size = width / 8;
@@ -402,6 +401,7 @@ impl<'a> LayoutCache<'a> {
         // ugh this doesn't make any sense. maybe if the front-end specifies
         // offsets with "abstract types", it must configure `qptr::layout`?
 
+        let ty_def = &cx[ty];
         let (spv_inst, type_and_const_inputs) = match &ty_def.kind {
             TypeKind::Scalar(scalar::Type::Bool) => {
                 // FIXME(eddyb) make this properly abstract instead of only configurable.
@@ -424,12 +424,15 @@ impl<'a> LayoutCache<'a> {
                 );
             }
 
-            // FIXME(eddyb) treat `QPtr`s as scalars.
             TypeKind::QPtr => {
-                return Err(LayoutError(Diag::bug(
-                    ["`layout_of(qptr)` (already lowered?)".into()],
-                )));
+                // FIXME(eddyb) make this properly abstract instead of only configurable.
+                // FIXME(eddyb) avoid logical vs physical conflicts here, maybe
+                // by adding more `LayoutConfig` fields, or only allowing `qptr`s
+                // to be kept in memory if `logical_ptr_size_align` agrees with
+                // the physical pointer size from the module addressing mode?
+                return Ok(scalar_with_size_and_align(self.config.logical_ptr_size_align));
             }
+
             TypeKind::SpvInst { spv_inst, type_and_const_inputs, .. } => {
                 (spv_inst, type_and_const_inputs)
             }
