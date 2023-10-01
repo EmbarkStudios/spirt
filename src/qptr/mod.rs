@@ -18,6 +18,7 @@ mod layout;
 pub mod lift;
 pub mod lower;
 pub mod shapes;
+pub mod simplify;
 
 pub use layout::LayoutConfig;
 
