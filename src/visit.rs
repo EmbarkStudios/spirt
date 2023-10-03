@@ -7,8 +7,8 @@ use crate::{
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     ControlRegionInputDecl, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef,
     DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
+    GlobalVar, GlobalVarDecl, GlobalVarDefBody, GlobalVarInit, Import, Module, ModuleDebugInfo,
+    ModuleDialect, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -388,8 +388,27 @@ impl InnerVisit for GlobalVarDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self { initializer } = self;
 
-        if let Some(initializer) = *initializer {
-            visitor.visit_const_use(initializer);
+        if let Some(initializer) = initializer {
+            initializer.inner_visit_with(visitor);
+        }
+    }
+}
+
+impl InnerVisit for GlobalVarInit {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            &GlobalVarInit::Direct(ct) => visitor.visit_const_use(ct),
+            GlobalVarInit::SpvAggregate { ty, leaves } => {
+                visitor.visit_type_use(*ty);
+                for &ct in leaves {
+                    visitor.visit_const_use(ct);
+                }
+            }
+            GlobalVarInit::Composite { offset_to_value } => {
+                for &ct in offset_to_value.values() {
+                    visitor.visit_const_use(ct);
+                }
+            }
         }
     }
 }

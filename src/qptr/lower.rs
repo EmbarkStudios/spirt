@@ -9,13 +9,14 @@ use crate::transform::{InnerInPlaceTransform, Transformed, Transformer};
 use crate::{
     spv, AddrSpace, AttrSetDef, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeKind,
     DataInst, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef, Diag,
-    EntityOrientedDenseMap, FuncDecl, GlobalVarDecl, OrdAssertEq, Type, TypeKind, TypeOrConst,
-    Value,
+    EntityOrientedDenseMap, FuncDecl, GlobalVarDecl, GlobalVarInit, OrdAssertEq, Type, TypeKind,
+    TypeOrConst, Value,
 };
 use itertools::Either;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::mem;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -126,20 +127,116 @@ impl<'a> LowerFromSpvPtrs<'a> {
                 global_var_decl.addr_space = AddrSpace::Handles;
             }
         }
+
+        match &mut global_var_decl.def {
+            DeclDef::Imported(_) => {}
+            DeclDef::Present(global_var_def_body) => match &global_var_def_body.initializer {
+                None | Some(GlobalVarInit::Direct(_)) => {}
+
+                Some(GlobalVarInit::Composite { .. }) => {
+                    global_var_decl.attrs.push_diag(
+                        &self.cx,
+                        Diag::bug([
+                            "unexpected `GlobalVarInit::Composite` (already lowered?)".into()
+                        ]),
+                    );
+                }
+
+                Some(GlobalVarInit::SpvAggregate { ty, leaves }) => {
+                    let lowered_initializer = self
+                        .layout_of(*ty)
+                        .and_then(|layout| match layout {
+                            // FIXME(eddyb) consider bad interactions with "interface blocks"?
+                            TypeLayout::Handle(_) | TypeLayout::HandleArray(..) => {
+                                Err(LowerError(Diag::bug(["handles are not aggregates".into()])))
+                            }
+                            TypeLayout::Concrete(layout) => Ok(layout),
+                        })
+                        .and_then(|aggregate_layout| {
+                            let mut leaf_values = leaves.iter().copied();
+                            let mut offset_to_value = BTreeMap::new();
+                            aggregate_layout
+                                .deeply_flatten_if(
+                                    0,
+                                    // Whether `candidate_layout` is an aggregate (to recurse into).
+                                    &|candidate_layout| {
+                                        matches!(
+                                            &self.cx[candidate_layout.original_type].kind,
+                                            TypeKind::SpvInst {
+                                                value_lowering: spv::ValueLowering::Disaggregate(_),
+                                                ..
+                                            }
+                                        )
+                                    },
+                                    &mut |leaf_offset, leaf| {
+                                        let leaf_offset =
+                                            u32::try_from(leaf_offset).ok().ok_or_else(|| {
+                                                LayoutError(Diag::bug([format!(
+                                                    "negative initializer leaf offset {leaf_offset}"
+                                                )
+                                                .into()]))
+                                            })?;
+
+                                        let leaf_value = leaf_values.next().ok_or_else(|| {
+                                            LayoutError(Diag::bug([
+                                                "fewer initializer leaves than layout".into(),
+                                            ]))
+                                        })?;
+
+                                        // FIXME(eddyb) should this compare only size/shape?
+                                        let expected_ty = leaf.original_type;
+                                        let found_ty = self.cx[leaf_value].ty;
+                                        if expected_ty != found_ty {
+                                            return Err(LayoutError(Diag::bug([
+                                                "initializer leaf type mismatch: expected `".into(),
+                                                expected_ty.into(),
+                                                "`, found `".into(),
+                                                found_ty.into(),
+                                                "`".into(),
+                                            ])));
+                                        }
+
+                                        offset_to_value.insert(leaf_offset, leaf_value);
+
+                                        Ok(())
+                                    },
+                                )
+                                .map_err(|LayoutError(e)| LowerError(e))?;
+
+                            if leaf_values.next().is_some() {
+                                return Err(LowerError(Diag::bug([
+                                    "more initializer leaves than layout".into(),
+                                ])));
+                            }
+
+                            Ok(GlobalVarInit::Composite { offset_to_value })
+                        });
+                    match lowered_initializer {
+                        Ok(initializer) => {
+                            global_var_def_body.initializer = Some(initializer);
+                        }
+                        Err(LowerError(e)) => {
+                            global_var_decl.attrs.push_diag(&self.cx, e);
+                        }
+                    }
+                }
+            },
+        }
+
+        // HACK(eddyb) in case anything goes wrong, we want to keep `OpTypePointer`.
+        let original_type_of_ptr_to = global_var_decl.type_of_ptr_to;
+
+        EraseSpvPtrs { lowerer: self }.in_place_transform_global_var_decl(global_var_decl);
+
         match shape_result {
             Ok(shape) => {
                 global_var_decl.shape = Some(shape);
-
-                // HACK(eddyb) this should handle shallow `QPtr` in the initializer, but
-                // typed initializers should be replaced with miri/linker-style ones.
-                // FIXME(eddyb) this is even worse now, with disaggregation,
-                // the initializer should be disaggregated leaves, which then
-                // need to flattened into a miri-like representation, or at least
-                // have offsets assigned to each leaf (for `qptr::lift` to use).
-                EraseSpvPtrs { lowerer: self }.in_place_transform_global_var_decl(global_var_decl);
             }
             Err(LowerError(e)) => {
                 global_var_decl.attrs.push_diag(&self.cx, e);
+
+                // HACK(eddyb) effectively undoes `EraseSpvPtrs` for one field.
+                global_var_decl.type_of_ptr_to = original_type_of_ptr_to;
             }
         }
     }

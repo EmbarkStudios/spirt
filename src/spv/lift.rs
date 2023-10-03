@@ -8,8 +8,8 @@ use crate::{
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl, DataInst,
     DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef, EntityList,
     EntityOrientedDenseMap, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, Import, Module, ModuleDebugInfo,
-    ModuleDialect, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
+    FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody, GlobalVarInit, Import, Module,
+    ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 use std::{io, iter, mem, slice};
 
 // HACK(eddyb) getting around the lack of a `Step` impl on `spv::Id` (`NonZeroU32`).
@@ -118,6 +119,9 @@ struct ModuleIds<'a> {
     globals: FxIndexMap<Global, spv::Id>,
     // FIXME(eddyb) use `EntityOrientedDenseMap` here.
     funcs: FxIndexMap<Func, FuncIds<'a>>,
+
+    // FIXME(eddyb) should this be somehow snuck into `globals`?
+    reaggregated_global_var_initializers: FxHashMap<GlobalVar, Const>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -236,8 +240,34 @@ impl<AI: AllocIds> Visitor<'_> for Lifter<'_, AI> {
     }
 
     fn visit_global_var_use(&mut self, gv: GlobalVar) {
-        if self.global_vars_seen.insert(gv) {
-            self.visit_global_var_decl(&self.module.global_vars[gv]);
+        if !self.global_vars_seen.insert(gv) {
+            return;
+        }
+        let gv_decl = &self.module.global_vars[gv];
+        self.visit_global_var_decl(gv_decl);
+
+        match &gv_decl.def {
+            DeclDef::Imported(_) => {}
+            DeclDef::Present(gv_def_body) => match &gv_def_body.initializer {
+                None | Some(GlobalVarInit::Direct(_)) => {}
+
+                // FIXME(eddyb) this should be a proper `Result`-based error instead,
+                // and/or `spv::lift` should mutate the module for legalization.
+                Some(GlobalVarInit::Composite { .. }) => {
+                    unreachable!(
+                        "`GlobalVarInit::Composite` should be legalized away before lifting"
+                    );
+                }
+
+                // HACK(eddyb) recursively reconstruct an initializer as a tree
+                // of (otherwise illegal) `Const`s, with SPIR-V aggregate types.
+                // FIXME(eddyb) this *technically* pollutes the `Context`, but
+                // is easier than having two ways of tracking SPIR-V constants.
+                Some(GlobalVarInit::SpvAggregate { ty, leaves }) => {
+                    let init = self.reaggregate_const(*ty, leaves);
+                    self.ids.reaggregated_global_var_initializers.insert(gv, init);
+                }
+            },
         }
     }
     fn visit_func_use(&mut self, func: Func) {
@@ -342,6 +372,45 @@ impl<AI: AllocIds> Visitor<'_> for Lifter<'_, AI> {
             }
         }
         data_inst_form_def.inner_visit_with(self);
+    }
+}
+
+impl<AI: AllocIds> Lifter<'_, AI> {
+    // FIXME(eddyb) maybe use this for `DataInstDef` inputs as well, when `Const`s,
+    // not just `GlobalVarInit::SpvAggregate`?
+    fn reaggregate_const(&mut self, ty: Type, leaves: &[Const]) -> Const {
+        let ty_def = &self.cx[ty];
+        assert_eq!(leaves.len(), ty_def.disaggregated_leaf_count());
+
+        if let spv::ValueLowering::Direct = ty_def.spv_value_lowering() {
+            let &[ct] = leaves.try_into().unwrap();
+            return ct;
+        }
+
+        // HACK(eddyb) this is a bit inefficient but increases code reuse, in
+        // a case that'd otherwise require e.g. an `Iterator` w/ `nth` overload.
+        let mut used_leaves = 0..0;
+        let components = (0..)
+            .map_while(|i| ty.aggregate_component_type_and_leaf_range(self.cx, i))
+            .map(|(component_type, component_leaf_range)| {
+                assert_eq!(used_leaves.end, component_leaf_range.start);
+                used_leaves.end = component_leaf_range.end;
+                self.reaggregate_const(component_type, &leaves[component_leaf_range])
+            })
+            .collect();
+        assert_eq!(used_leaves, 0..leaves.len());
+
+        let wk = &spec::Spec::get().well_known;
+        let ct = self.cx.intern(ConstDef {
+            attrs: AttrSet::default(),
+            ty,
+            kind: ConstKind::SpvInst {
+                spv_inst_and_const_inputs: Rc::new((wk.OpConstantComposite.into(), components)),
+            },
+        });
+        // HACK(eddyb) visit constants as they're created, to ensure they're recorded.
+        self.visit_const_use(ct);
+        ct
     }
 }
 
@@ -1410,9 +1479,19 @@ impl LazyInst<'_, '_> {
                                     spv::Imm::Short(wk.StorageClass, sc)
                                 }
                             };
-                            let initializer = match gv_decl.def {
+                            let initializer = match &gv_decl.def {
                                 DeclDef::Imported(_) => None,
                                 DeclDef::Present(GlobalVarDefBody { initializer }) => initializer
+                                    .as_ref()
+                                    .map(|initializer| match initializer {
+                                        // Disallowed while visiting.
+                                        GlobalVarInit::Composite { .. } => unreachable!(),
+
+                                        &GlobalVarInit::Direct(ct) => ct,
+                                        GlobalVarInit::SpvAggregate { .. } => {
+                                            ids.reaggregated_global_var_initializers[&gv]
+                                        }
+                                    })
                                     .map(|initializer| ids.globals[&Global::Const(initializer)]),
                             };
                             spv::InstWithIds {

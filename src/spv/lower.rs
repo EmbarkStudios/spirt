@@ -7,8 +7,8 @@ use crate::{
     ControlNodeDef, ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl,
     DataInst, DataInstDef, DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList,
     ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl,
-    GlobalVarDefBody, Import, InternedStr, Module, SelectionKind, Type, TypeDef, TypeKind,
-    TypeOrConst, Value,
+    GlobalVarDefBody, GlobalVarInit, Import, InternedStr, Module, SelectionKind, Type, TypeDef,
+    TypeKind, TypeOrConst, Value,
 };
 use itertools::Either;
 use rustc_hash::FxHashMap;
@@ -29,12 +29,9 @@ enum IdDef {
     /// constants (e.g. `OpConstantComposite`s of those types, but also more
     /// general constants like `OpUndef`/`OpConstantNull` etc.).
     AggregateConst {
-        // FIXME(eddyb) remove `whole_const` by always using the `leaves`.
-        whole_const: Const,
-
         whole_type: Type,
 
-        leaves: SmallVec<[Const; 2]>,
+        leaves: SmallVec<[Const; 4]>,
     },
 
     Func(Func),
@@ -64,67 +61,20 @@ impl IdDef {
 }
 
 impl Type {
-    fn aggregate_component_leaf_range_and_type(
-        self,
-        cx: &Context,
-        idx: u32,
-    ) -> Option<(Range<usize>, Type)> {
-        let (type_and_const_inputs, aggregate_shape) = match &cx[self].kind {
-            TypeKind::SpvInst {
-                spv_inst: _,
-                type_and_const_inputs,
-                value_lowering: spv::ValueLowering::Disaggregate(aggregate_shape),
-            } => (type_and_const_inputs, aggregate_shape),
-            _ => return None,
-        };
-        let expect_type = |ty_or_ct| match ty_or_ct {
-            TypeOrConst::Type(ty) => ty,
-            TypeOrConst::Const(_) => unreachable!(),
-        };
-
-        let idx_usize = idx as usize;
-        let component_type = match aggregate_shape {
-            spv::AggregateShape::Struct { .. } => {
-                expect_type(*type_and_const_inputs.get(idx_usize)?)
-            }
-            &spv::AggregateShape::Array { fixed_len, .. } => {
-                if idx >= fixed_len {
-                    return None;
-                }
-                expect_type(type_and_const_inputs[0])
-            }
-        };
-        let component_leaf_count = cx[component_type].disaggregated_leaf_count();
-
-        let component_leaf_range = match aggregate_shape {
-            spv::AggregateShape::Struct { per_field_leaf_range_end } => {
-                let end = per_field_leaf_range_end[idx_usize] as usize;
-                let start = end.checked_sub(component_leaf_count)?;
-                start..end
-            }
-            spv::AggregateShape::Array { .. } => {
-                let start = component_leaf_count.checked_mul(idx_usize)?;
-                let end = start.checked_add(component_leaf_count)?;
-                start..end
-            }
-        };
-        Some((component_leaf_range, component_type))
-    }
-
     // HACK(eddyb) `indices` is a `&mut` because it specifically only consumes
     // the indices it needs, so when this function returns `Some`, all remaining
     // indices will be left over for the caller to process itself.
-    fn aggregate_component_path_leaf_range_and_type(
+    fn aggregate_component_path_type_and_leaf_range(
         self,
         cx: &Context,
         indices: &mut impl Iterator<Item = u32>,
-    ) -> Option<(Range<usize>, Type)> {
-        let (mut leaf_range, mut leaf_type) =
-            self.aggregate_component_leaf_range_and_type(cx, indices.next()?)?;
+    ) -> Option<(Type, Range<usize>)> {
+        let (mut leaf_type, mut leaf_range) =
+            self.aggregate_component_type_and_leaf_range(cx, indices.next()?)?;
 
         while let spv::ValueLowering::Disaggregate(_) = cx[leaf_type].spv_value_lowering() {
-            let (sub_leaf_range, sub_leaf_type) = match indices.next() {
-                Some(i) => leaf_type.aggregate_component_leaf_range_and_type(cx, i)?,
+            let (sub_leaf_type, sub_leaf_range) = match indices.next() {
+                Some(i) => leaf_type.aggregate_component_type_and_leaf_range(cx, i)?,
                 None => break,
             };
 
@@ -134,7 +84,7 @@ impl Type {
             leaf_type = sub_leaf_type;
         }
 
-        Some((leaf_range, leaf_type))
+        Some((leaf_type, leaf_range))
     }
 }
 
@@ -704,8 +654,67 @@ impl Module {
 
                 let ty = result_type.unwrap();
 
-                let mut aggregate_leaves = match cx[ty].spv_value_lowering() {
-                    spv::ValueLowering::Direct => None,
+                // HACK(eddyb) while creating constants of unsized array types
+                // is *technically* illegal in SPIR-V, array semantics always
+                // are length-independent, so we can pretend this is an array
+                // of the right length (as long as we track the error on it).
+                let maybe_fixup_unsized_array_type = |ty: Type| {
+                    if ![wk.OpConstantComposite, wk.OpSpecConstantComposite].contains(&opcode) {
+                        return None;
+                    };
+                    let actual_component_count = u32::try_from(inst.ids.len()).ok()?;
+
+                    let ty_def = &cx[ty];
+                    let elem_type_of_unsized_array = match &ty_def.kind {
+                        TypeKind::SpvInst { spv_inst: ty_inst, type_and_const_inputs, .. } => {
+                            match type_and_const_inputs[..] {
+                                [TypeOrConst::Type(elem_type), TypeOrConst::Const(len)]
+                                    if ty_inst.opcode == wk.OpTypeArray
+                                        && len.as_scalar(&cx).is_none() =>
+                                {
+                                    elem_type
+                                }
+                                [TypeOrConst::Type(elem_type)]
+                                    if ty_inst.opcode == wk.OpTypeRuntimeArray =>
+                                {
+                                    elem_type
+                                }
+                                _ => return None,
+                            }
+                        }
+                        _ => return None,
+                    };
+                    Some(
+                        cx.intern(TypeDef {
+                            attrs: ty_def.attrs.append_diag(
+                                &cx,
+                                Diag::err([
+                                    "illegal constant: values of type `".into(),
+                                    ty.into(),
+                                    "` should only be accessed through pointers".into(),
+                                ]),
+                            ),
+                            kind: spv::Inst::from(wk.OpTypeArray).into_canonical_type_with(
+                                &cx,
+                                [
+                                    TypeOrConst::Type(elem_type_of_unsized_array),
+                                    TypeOrConst::Const(
+                                        cx.intern(scalar::Const::from_u32(actual_component_count)),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ),
+                        }),
+                    )
+                };
+                let ty = maybe_fixup_unsized_array_type(ty).unwrap_or(ty);
+
+                let mut all_leaves = SmallVec::new();
+                match cx[ty].spv_value_lowering() {
+                    spv::ValueLowering::Direct => {
+                        all_leaves.reserve(inst.ids.len());
+                    }
                     spv::ValueLowering::Disaggregate(_) => {
                         // HACK(eddyb) this expands `OpUndef`/`OpConstantNull`.
                         // FIXME(eddyb) this could potentially create a very
@@ -713,101 +722,105 @@ impl Module {
                         // be expressed much more compactly in theory.
                         if inst.lower_const_by_distributing_to_aggregate_leaves() {
                             assert_eq!(inst.ids.len(), 0);
-                            Some(
-                                ty.disaggregated_leaf_types(&cx)
-                                    .map(|leaf_type| {
-                                        cx.intern(ConstDef {
-                                            attrs: Default::default(),
-                                            ty: leaf_type,
-                                            kind: inst
-                                                .as_canonical_const(&cx, leaf_type, &[])
-                                                .unwrap_or_else(|| ConstKind::SpvInst {
-                                                    spv_inst_and_const_inputs: Rc::new((
-                                                        inst.without_ids.clone(),
-                                                        [].into_iter().collect(),
-                                                    )),
-                                                }),
-                                        })
-                                    })
-                                    .collect(),
-                            )
+                            all_leaves.extend(ty.disaggregated_leaf_types(&cx).map(|leaf_type| {
+                                cx.intern(ConstDef {
+                                    attrs: Default::default(),
+                                    ty: leaf_type,
+                                    kind: inst
+                                        .as_canonical_const(&cx, leaf_type, &[])
+                                        .unwrap_or_else(|| ConstKind::SpvInst {
+                                            spv_inst_and_const_inputs: Rc::new((
+                                                inst.without_ids.clone(),
+                                                [].into_iter().collect(),
+                                            )),
+                                        }),
+                                })
+                            }));
                         } else if [wk.OpConstantComposite, wk.OpSpecConstantComposite]
                             .contains(&opcode)
                         {
-                            // NOTE(eddyb) actual leaves gathered below, while
-                            // collecting `const_inputs`.
-                            Some(SmallVec::with_capacity(cx[ty].disaggregated_leaf_count()))
+                            all_leaves.reserve(cx[ty].disaggregated_leaf_count());
                         } else {
                             attrs.push_diag(
                                 &cx,
                                 Diag::bug(["unsupported aggregate-producing constant".into()]),
                             );
-                            None
                         }
                     }
-                };
+                }
 
-                let const_inputs: SmallVec<_> = inst
-                    .ids
-                    .iter()
-                    .map(|&id| match id_defs.get(&id) {
+                let invalid = |descr| invalid(&format!("unsupported use of {descr} in a constant"));
+                for &id in &inst.ids {
+                    match id_defs.get(&id) {
                         Some(&IdDef::Const(ct)) => {
-                            if let Some(aggregate_leaves) = &mut aggregate_leaves {
-                                aggregate_leaves.push(ct);
-                            }
-                            Ok(ct)
+                            all_leaves.push(ct);
                         }
-                        Some(IdDef::AggregateConst { whole_const, whole_type: _, leaves }) => {
-                            if let Some(aggregate_leaves) = &mut aggregate_leaves {
-                                aggregate_leaves.extend(leaves.iter().copied());
-                            }
-                            Ok(*whole_const)
-                        }
-                        Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("a forward reference to %{id}")),
-                    })
-                    .map(|result| {
-                        result.map_err(|descr| {
-                            invalid(&format!("unsupported use of {descr} in a constant"))
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
+                        Some(IdDef::AggregateConst { whole_type, leaves }) => {
+                            all_leaves.extend(leaves.iter().copied());
 
-                if let (spv::ValueLowering::Disaggregate(_), Some(leaves)) =
-                    (cx[ty].spv_value_lowering(), &aggregate_leaves)
-                {
-                    if cx[ty].disaggregated_leaf_count() != leaves.len() {
+                            match cx[ty].spv_value_lowering() {
+                                // FIXME(eddyb) this also covers invalid consts
+                                // of e.g. unsized aggregate types, as well.
+                                spv::ValueLowering::Direct => {
+                                    attrs.push_diag(
+                                        &cx,
+                                        Diag::err([
+                                            "unexpected aggregate constant of type `".into(),
+                                            (*whole_type).into(),
+                                            "`".into(),
+                                        ]),
+                                    );
+                                }
+                                spv::ValueLowering::Disaggregate(_) => {}
+                            }
+                        }
+                        Some(id_def) => return Err(invalid(&id_def.descr(&cx))),
+                        None => return Err(invalid(&format!("a forward reference to %{id}"))),
+                    }
+                }
+
+                let lowering = &cx[ty].spv_value_lowering();
+                let lowering = match lowering {
+                    spv::ValueLowering::Disaggregate(_)
+                        if cx[ty].disaggregated_leaf_count() != all_leaves.len() =>
+                    {
                         attrs.push_diag(
                             &cx,
                             Diag::err([format!(
                                 "aggregate leaf count mismatch (expected {}, found {})",
                                 cx[ty].disaggregated_leaf_count(),
-                                leaves.len()
+                                all_leaves.len()
                             )
                             .into()]),
                         );
-                        aggregate_leaves = None;
+                        // HACK(eddyb) pretend the type isn't an aggregate, so
+                        // that it doesn't end up using `IdDef::AggregateConst`,
+                        // which requires having the exact number of leaves.
+                        &spv::ValueLowering::Direct
                     }
-                }
+                    _ => lowering,
+                };
 
-                let ct = cx.intern(ConstDef {
-                    attrs: mem::take(&mut attrs),
-                    ty,
-                    kind: inst.as_canonical_const(&cx, ty, &const_inputs).unwrap_or_else(|| {
-                        ConstKind::SpvInst {
-                            spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
-                        }
-                    }),
-                });
+                let attrs = mem::take(&mut attrs);
                 id_defs.insert(
                     id,
-                    match (cx[ty].spv_value_lowering(), aggregate_leaves) {
-                        (spv::ValueLowering::Disaggregate(_), Some(leaves)) => {
-                            // FIXME(eddyb) this may lose semantic `attrs` when
-                            // `leaves` are directly used.
-                            IdDef::AggregateConst { whole_const: ct, whole_type: ty, leaves }
+                    match lowering {
+                        spv::ValueLowering::Direct => IdDef::Const(cx.intern(ConstDef {
+                            attrs,
+                            ty,
+                            kind: inst.as_canonical_const(&cx, ty, &all_leaves).unwrap_or_else(
+                                || ConstKind::SpvInst {
+                                    spv_inst_and_const_inputs: Rc::new((
+                                        inst.without_ids,
+                                        all_leaves,
+                                    )),
+                                },
+                            ),
+                        })),
+                        spv::ValueLowering::Disaggregate(_) => {
+                            // FIXME(eddyb) this may lose semantic `attrs`.
+                            IdDef::AggregateConst { whole_type: ty, leaves: all_leaves }
                         }
-                        _ => IdDef::Const(ct),
                     },
                 );
 
@@ -841,10 +854,12 @@ impl Module {
 
                 let initializer = initializer
                     .map(|id| match id_defs.get(&id) {
-                        Some(&IdDef::Const(ct)) => Ok(ct),
-                        Some(&IdDef::AggregateConst { whole_const, .. }) => {
-                            // FIXME(eddyb) disaggregate global initializers.
-                            Ok(whole_const)
+                        Some(&IdDef::Const(ct)) => Ok(GlobalVarInit::Direct(ct)),
+                        Some(IdDef::AggregateConst { whole_type, leaves }) => {
+                            Ok(GlobalVarInit::SpvAggregate {
+                                ty: *whole_type,
+                                leaves: leaves.clone(),
+                            })
                         }
                         Some(id_def) => Err(id_def.descr(&cx)),
                         None => Err(format!("a forward reference to %{id}")),
@@ -1257,14 +1272,12 @@ impl Module {
                         whole_type: cx[ct].ty,
                         leaves: Either::Right(Either::Left([Value::Const(ct)].into_iter())),
                     }),
-                    Some(IdDef::AggregateConst { whole_const: _, whole_type, leaves }) => {
-                        Ok(LocalIdDef::Value {
-                            whole_type: *whole_type,
-                            leaves: Either::Right(Either::Right(
-                                leaves.iter().copied().map(Value::Const),
-                            )),
-                        })
-                    }
+                    Some(IdDef::AggregateConst { whole_type, leaves }) => Ok(LocalIdDef::Value {
+                        whole_type: *whole_type,
+                        leaves: Either::Right(Either::Right(
+                            leaves.iter().copied().map(Value::Const),
+                        )),
+                    }),
                     Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
                         "unsupported use of {} as an operand for \
                          an instruction in a function",
@@ -1758,11 +1771,11 @@ impl Module {
                         }
 
                         let mut imms = imms.iter();
-                        let (leaf_range, leaf_type) = match cx[composite_type].spv_value_lowering()
+                        let (leaf_type, leaf_range) = match cx[composite_type].spv_value_lowering()
                         {
                             spv::ValueLowering::Direct => return None,
                             spv::ValueLowering::Disaggregate(_) => composite_type
-                                .aggregate_component_path_leaf_range_and_type(
+                                .aggregate_component_path_type_and_leaf_range(
                                     &cx,
                                     &mut imms.by_ref().map(|&imm| match imm {
                                         spv::Imm::Short(_, i) => i,

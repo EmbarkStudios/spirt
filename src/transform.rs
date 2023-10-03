@@ -7,8 +7,8 @@ use crate::{
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind,
     DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    OrdAssertEq, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
+    GlobalVar, GlobalVarDecl, GlobalVarDefBody, GlobalVarInit, Import, Module, ModuleDebugInfo,
+    ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -526,7 +526,26 @@ impl InnerInPlaceTransform for GlobalVarDefBody {
         let Self { initializer } = self;
 
         if let Some(initializer) = initializer {
-            transformer.transform_const_use(*initializer).apply_to(initializer);
+            initializer.inner_in_place_transform_with(transformer);
+        }
+    }
+}
+
+impl InnerInPlaceTransform for GlobalVarInit {
+    fn inner_in_place_transform_with(&mut self, transformer: &mut impl Transformer) {
+        match self {
+            GlobalVarInit::Direct(ct) => transformer.transform_const_use(*ct).apply_to(ct),
+            GlobalVarInit::SpvAggregate { ty, leaves } => {
+                transformer.transform_type_use(*ty).apply_to(ty);
+                for ct in leaves {
+                    transformer.transform_const_use(*ct).apply_to(ct);
+                }
+            }
+            GlobalVarInit::Composite { offset_to_value } => {
+                for ct in offset_to_value.values_mut() {
+                    transformer.transform_const_use(*ct).apply_to(ct);
+                }
+            }
         }
     }
 }

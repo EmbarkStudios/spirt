@@ -29,8 +29,8 @@ use crate::{
     ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef,
     DataInstKind, DeclDef, Diag, DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func,
     FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeDef,
-    TypeKind, TypeOrConst, Value,
+    GlobalVarInit, Import, Module, ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind,
+    Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use arrayvec::ArrayVec;
 use itertools::Either;
@@ -2722,6 +2722,36 @@ impl Print for AddrSpace {
                 let wk = &spv::spec::Spec::get().well_known;
                 printer.pretty_spv_imm(wk.StorageClass, sc)
             }
+        }
+    }
+}
+
+impl Print for GlobalVarInit {
+    type Output = pretty::Fragment;
+    fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
+        match self {
+            GlobalVarInit::Direct(ct) => ct.print(printer),
+            // FIXME(eddyb) should this be recursive?
+            GlobalVarInit::SpvAggregate { ty, leaves } => pretty::Fragment::new([
+                pretty::join_comma_sep("(", leaves.iter().map(|v| v.print(printer)), ")"),
+                printer.pretty_type_ascription_suffix(*ty),
+            ]),
+            GlobalVarInit::Composite { offset_to_value } => pretty::join_comma_sep(
+                "{",
+                offset_to_value
+                    .iter()
+                    .map(|(&offset, &ct)| {
+                        pretty::Fragment::new([
+                            printer.numeric_literal_style().apply(format!("{offset}")).into(),
+                            " => ".into(),
+                            ct.print(printer),
+                        ])
+                    })
+                    .map(|entry| {
+                        pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), entry])
+                    }),
+                "}",
+            ),
         }
     }
 }

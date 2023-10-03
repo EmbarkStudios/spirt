@@ -302,6 +302,51 @@ impl Type {
             parent_component_path: SmallVec::new(),
         }))
     }
+
+    fn aggregate_component_type_and_leaf_range(
+        self,
+        cx: &Context,
+        idx: u32,
+    ) -> Option<(Type, Range<usize>)> {
+        let (type_and_const_inputs, aggregate_shape) = match &cx[self].kind {
+            TypeKind::SpvInst {
+                spv_inst: _,
+                type_and_const_inputs,
+                value_lowering: ValueLowering::Disaggregate(aggregate_shape),
+            } => (type_and_const_inputs, aggregate_shape),
+            _ => return None,
+        };
+        let expect_type = |ty_or_ct| match ty_or_ct {
+            TypeOrConst::Type(ty) => ty,
+            TypeOrConst::Const(_) => unreachable!(),
+        };
+
+        let idx_usize = idx as usize;
+        let component_type = match aggregate_shape {
+            AggregateShape::Struct { .. } => expect_type(*type_and_const_inputs.get(idx_usize)?),
+            &AggregateShape::Array { fixed_len, .. } => {
+                if idx >= fixed_len {
+                    return None;
+                }
+                expect_type(type_and_const_inputs[0])
+            }
+        };
+        let component_leaf_count = cx[component_type].disaggregated_leaf_count();
+
+        let component_leaf_range = match aggregate_shape {
+            AggregateShape::Struct { per_field_leaf_range_end } => {
+                let end = per_field_leaf_range_end[idx_usize] as usize;
+                let start = end.checked_sub(component_leaf_count)?;
+                start..end
+            }
+            AggregateShape::Array { .. } => {
+                let start = component_leaf_count.checked_mul(idx_usize)?;
+                let end = start.checked_add(component_leaf_count)?;
+                start..end
+            }
+        };
+        Some((component_type, component_leaf_range))
+    }
 }
 
 /// Aspects of how a [`spv::Inst`](Inst) was produced by [`spv::lower`](lower),
