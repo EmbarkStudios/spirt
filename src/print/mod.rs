@@ -2566,139 +2566,148 @@ impl Print for GlobalVarDecl {
 
         let wk = &spv::spec::Spec::get().well_known;
 
-        // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
-        // ideally the `GlobalVarDecl` would hold that type itself.
-        let type_ascription_suffix = match &printer.cx[*type_of_ptr_to].kind {
-            TypeKind::QPtr if shape.is_some() => match shape.unwrap() {
-                qptr::shapes::GlobalVarShape::Handles { handle, fixed_count } => {
-                    let handle = match handle {
-                        qptr::shapes::Handle::Opaque(ty) => ty.print(printer),
-                        qptr::shapes::Handle::Buffer(addr_space, buf) => pretty::Fragment::new([
-                            printer.declarative_keyword_style().apply("buffer").into(),
-                            pretty::join_comma_sep(
-                                "(",
-                                [
-                                    addr_space.print(printer),
-                                    pretty::Fragment::new([
-                                        printer.pretty_named_argument_prefix("size"),
-                                        pretty::Fragment::new(
-                                            Some(buf.fixed_base.size)
-                                                .filter(|&base_size| {
-                                                    base_size > 0 || buf.dyn_unit_stride.is_none()
-                                                })
-                                                .map(|base_size| {
-                                                    printer
-                                                        .numeric_literal_style()
-                                                        .apply(base_size.to_string())
-                                                        .into()
-                                                })
-                                                .into_iter()
-                                                .chain(buf.dyn_unit_stride.map(|stride| {
-                                                    pretty::Fragment::new([
-                                                        "N × ".into(),
-                                                        printer
-                                                            .numeric_literal_style()
-                                                            .apply(stride.to_string()),
-                                                    ])
-                                                }))
-                                                .intersperse_with(|| " + ".into()),
-                                        ),
-                                    ]),
-                                    pretty::Fragment::new([
-                                        printer.pretty_named_argument_prefix("align"),
-                                        printer
-                                            .numeric_literal_style()
-                                            .apply(buf.fixed_base.align.to_string())
-                                            .into(),
-                                    ]),
-                                ],
-                                ")",
-                            ),
-                        ]),
-                    };
+        // HACK(eddyb) to avoid too many syntax variations, most details (other
+        // than the type, if present) use named arguments in `GV123(...)`.
+        let mut details = SmallVec::<[_; 4]>::new();
 
-                    let handles = if fixed_count.map_or(0, |c| c.get()) == 1 {
-                        handle
-                    } else {
-                        pretty::Fragment::new([
-                            "[".into(),
-                            fixed_count
-                                .map(|count| {
-                                    pretty::Fragment::new([
-                                        printer.numeric_literal_style().apply(count.to_string()),
-                                        " × ".into(),
-                                    ])
-                                })
-                                .unwrap_or_default(),
-                            handle,
-                            "]".into(),
-                        ])
-                    };
-                    pretty::join_space(":", [handles])
-                }
-                qptr::shapes::GlobalVarShape::UntypedData(mem_layout) => pretty::Fragment::new([
-                    " ".into(),
-                    printer.declarative_keyword_style().apply("layout").into(),
-                    pretty::join_comma_sep(
-                        "(",
-                        [
-                            pretty::Fragment::new([
-                                printer.pretty_named_argument_prefix("size"),
-                                printer
-                                    .numeric_literal_style()
-                                    .apply(mem_layout.size.to_string())
-                                    .into(),
-                            ]),
-                            pretty::Fragment::new([
-                                printer.pretty_named_argument_prefix("align"),
-                                printer
-                                    .numeric_literal_style()
-                                    .apply(mem_layout.align.to_string())
-                                    .into(),
-                            ]),
-                        ],
-                        ")",
-                    ),
-                ]),
-                qptr::shapes::GlobalVarShape::TypedInterface(ty) => {
-                    printer.pretty_type_ascription_suffix(ty)
-                }
-            },
+        match addr_space {
+            AddrSpace::Handles => {}
+            AddrSpace::SpvStorageClass(_) => {
+                details.push(addr_space.print(printer));
+            }
+        }
+
+        // FIXME(eddyb) should this be a helper on `Printer`?
+        let num_lit = |x: u32| printer.numeric_literal_style().apply(format!("{x}")).into();
+
+        // FIXME(eddyb) should the pointer type be shown as something like
+        // `&GV123: OpTypePointer(..., T123)` *after* the variable definition?
+        // (but each reference can technically have a different type...)
+        let (qptr_shape, spv_ptr_pointee_type) = match &printer.cx[*type_of_ptr_to].kind {
+            TypeKind::QPtr => (shape.as_ref(), None),
+
+            // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
+            // ideally the `GlobalVarDecl` would hold that type itself.
             TypeKind::SpvInst { spv_inst, type_and_const_inputs, .. }
                 if spv_inst.opcode == wk.OpTypePointer =>
             {
                 match type_and_const_inputs[..] {
-                    [TypeOrConst::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
-                    _ => unreachable!(),
+                    [TypeOrConst::Type(pointee_type)] => (None, Some(pointee_type)),
+                    _ => (None, None),
                 }
             }
-            _ => pretty::Fragment::new([
-                ": ".into(),
-                printer.error_style().apply("pointee_type_of").into(),
-                "(".into(),
-                type_of_ptr_to.print(printer),
-                ")".into(),
-            ]),
-        };
-        let addr_space_suffix = match addr_space {
-            AddrSpace::Handles => pretty::Fragment::default(),
-            AddrSpace::SpvStorageClass(_) => {
-                pretty::Fragment::new([" in ".into(), addr_space.print(printer)])
-            }
-        };
-        let header = pretty::Fragment::new([addr_space_suffix, type_ascription_suffix]);
 
-        let maybe_rhs = match def {
+            _ => (None, None),
+        };
+        let ascribe_type = match qptr_shape {
+            Some(qptr::shapes::GlobalVarShape::Handles { handle, fixed_count }) => {
+                let handle = match handle {
+                    qptr::shapes::Handle::Opaque(ty) => ty.print(printer),
+                    qptr::shapes::Handle::Buffer(addr_space, buf) => pretty::Fragment::new([
+                        printer.declarative_keyword_style().apply("buffer").into(),
+                        pretty::join_comma_sep(
+                            "(",
+                            [
+                                addr_space.print(printer),
+                                pretty::Fragment::new([
+                                    printer.pretty_named_argument_prefix("size"),
+                                    pretty::Fragment::new(
+                                        [
+                                            Some(buf.fixed_base.size)
+                                                .filter(|&base_size| {
+                                                    base_size > 0 || buf.dyn_unit_stride.is_none()
+                                                })
+                                                .map(num_lit),
+                                            buf.dyn_unit_stride.map(|stride| {
+                                                pretty::Fragment::new([
+                                                    "N × ".into(),
+                                                    num_lit(stride.get()),
+                                                ])
+                                            }),
+                                        ]
+                                        .into_iter()
+                                        .flatten()
+                                        .intersperse_with(|| " + ".into()),
+                                    ),
+                                ]),
+                                pretty::Fragment::new([
+                                    printer.pretty_named_argument_prefix("align"),
+                                    num_lit(buf.fixed_base.align),
+                                ]),
+                            ],
+                            ")",
+                        ),
+                    ]),
+                };
+
+                let handles = if fixed_count.map_or(0, |c| c.get()) == 1 {
+                    handle
+                } else {
+                    pretty::Fragment::new([
+                        "[".into(),
+                        fixed_count
+                            .map(|count| {
+                                pretty::Fragment::new([num_lit(count.get()), " × ".into()])
+                            })
+                            .unwrap_or_default(),
+                        handle,
+                        "]".into(),
+                    ])
+                };
+                Some(handles)
+            }
+            Some(qptr::shapes::GlobalVarShape::UntypedData(mem_layout)) => {
+                details.extend([
+                    pretty::Fragment::new([
+                        printer.pretty_named_argument_prefix("size"),
+                        num_lit(mem_layout.size),
+                    ]),
+                    pretty::Fragment::new([
+                        printer.pretty_named_argument_prefix("align"),
+                        num_lit(mem_layout.align),
+                    ]),
+                ]);
+                None
+            }
+            Some(qptr::shapes::GlobalVarShape::TypedInterface(ty)) => Some(ty.print(printer)),
+
+            None => Some(match spv_ptr_pointee_type {
+                Some(ty) => ty.print(printer),
+                None => pretty::Fragment::new([
+                    printer.error_style().apply("pointee_type_of").into(),
+                    "(".into(),
+                    type_of_ptr_to.print(printer),
+                    ")".into(),
+                ]),
+            }),
+        };
+
+        let import = match def {
+            // FIXME(eddyb) deduplicate with `FuncDecl`, and maybe consider
+            // putting the import *before* the declaration, to end up with:
+            // import "..."
+            //   as global_var GV...
             DeclDef::Imported(import) => Some(import.print(printer)),
             DeclDef::Present(GlobalVarDefBody { initializer }) => {
-                // FIXME(eddyb) `global_varX in AS: T = Y` feels a bit wonky for
-                // the initializer, but it's cleaner than obvious alternatives.
-                initializer.map(|initializer| initializer.print(printer))
+                if let Some(initializer) = initializer {
+                    details.push(pretty::Fragment::new([
+                        printer.pretty_named_argument_prefix("init"),
+                        initializer.print(printer),
+                    ]));
+                }
+                None
             }
         };
-        let body = maybe_rhs.map(|rhs| pretty::Fragment::new(["= ".into(), rhs]));
 
-        let def_without_name = pretty::Fragment::new([header, pretty::join_space("", body)]);
+        let def_without_name = pretty::Fragment::new(
+            [
+                (!details.is_empty()).then(|| pretty::join_comma_sep("(", details, ")")),
+                ascribe_type.map(|ty| pretty::join_space(":", [ty])),
+                import.map(|import| pretty::Fragment::new([" = ".into(), import])),
+            ]
+            .into_iter()
+            .flatten(),
+        );
 
         AttrsAndDef { attrs: attrs.print(printer), def_without_name }
     }
@@ -2754,9 +2763,17 @@ impl Print for FuncDecl {
         ]);
 
         let def_without_name = match def {
-            DeclDef::Imported(import) => {
-                pretty::Fragment::new([sig, " = ".into(), import.print(printer)])
-            }
+            // FIXME(eddyb) deduplicate with `GlobalVarDecl`, and maybe consider
+            // putting the import *before* the declaration, to end up with:
+            // import "..."
+            //   as func F...
+            DeclDef::Imported(import) => pretty::Fragment::new([
+                sig,
+                pretty::join_space(
+                    "",
+                    [pretty::Fragment::new(["= ".into(), import.print(printer)])],
+                ),
+            ]),
 
             // FIXME(eddyb) this can probably go into `impl Print for FuncDefBody`.
             DeclDef::Present(def) => pretty::Fragment::new([

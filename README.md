@@ -135,7 +135,7 @@ fn main() -> @location(0) i32 {
 ```cxx
 #[spv.Decoration.Flat]
 #[spv.Decoration.Location(Location: 0)]
-global_var GV0 in spv.StorageClass.Output: s32
+global_var GV0(spv.StorageClass.Output): s32
 
 func F0() {
   loop(v0: s32 <- 1s32, v1: s32 <- 1s32) {
