@@ -33,10 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed 🛠
+- [PR#48](https://github.com/EmbarkStudios/spirt/pull/48) changed CFG structurization
+  from "maximal loops" to "minimal loops" (computed using Tarjan's SCC algorithm),
+  and added `OpLoopMerge` support on top (by extending a "minimal loop" as needed)
+
 ## [0.3.0] - 2023-07-25
 
 ### Added ⭐
-- [PR#45](https://github.com/EmbarkStudios/spirt/pull/45) added the abilit to
+- [PR#45](https://github.com/EmbarkStudios/spirt/pull/45) added the ability to
   pretty-print `OpExtInst`s (SPIR-V "extended instructions") using official
   `extinst.*.grammar.json` descriptions and/or custom ones (registered via `Context`)
 

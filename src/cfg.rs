@@ -1,10 +1,10 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
-use crate::func_at::FuncAt;
 use crate::{
     spv, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode, ControlNodeDef,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef, EntityList,
-    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, SelectionKind, Type, TypeCtor, TypeDef, Value,
+    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeCtor,
+    TypeDef, Value,
 };
 use smallvec::SmallVec;
 use std::mem;
@@ -15,6 +15,10 @@ use std::mem;
 #[derive(Clone, Default)]
 pub struct ControlFlowGraph {
     pub control_inst_on_exit_from: EntityOrientedDenseMap<ControlRegion, ControlInst>,
+
+    // HACK(eddyb) this currently only comes from `OpLoopMerge`, and cannot be
+    // inferred (because implies too strong of an ownership/uniqueness notion).
+    pub loop_merge_to_loop_header: FxIndexMap<ControlRegion, ControlRegion>,
 }
 
 #[derive(Clone)]
@@ -148,16 +152,14 @@ impl ControlFlowGraph {
         assert!(std::ptr::eq(func_def_body.unstructured_cfg.as_ref().unwrap(), self));
         assert!(func_at_body.def().outputs.is_empty());
 
-        self.traverse(func_at_body, state);
+        self.traverse(func_def_body.body, state);
     }
 
     fn traverse(
         &self,
-        func_at_region: FuncAt<'_, ControlRegion>,
+        region: ControlRegion,
         state: &mut TraversalState<impl FnMut(ControlRegion), impl FnMut(ControlRegion)>,
     ) {
-        let region = func_at_region.position;
-
         // FIXME(eddyb) `EntityOrientedDenseMap` should have an `entry` API.
         if let Some(existing_count) = state.incoming_edge_counts.get_mut(region) {
             *existing_count += IncomingEdgeCount::ONE;
@@ -179,10 +181,178 @@ impl ControlFlowGraph {
             Either::Right(targets)
         };
         for target in targets {
-            self.traverse(func_at_region.at(target), state);
+            self.traverse(target, state);
         }
 
         (state.post_order_visit)(region);
+    }
+}
+
+/// Minimal loop analysis, based on Tarjan's SCC (strongly connected components)
+/// algorithm, applied recursively (for every level of loop nesting).
+///
+/// Here "minimal" means that each loops is the smallest CFG subgraph possible
+/// (excluding any control-flow paths that cannot reach a backedge and cycle),
+/// i.e. each loop is a CFG SCC (strongly connected component).
+///
+/// These "minimal loops" contrast with the "maximal loops" that the greedy
+/// architecture of the structurizer would naively produce, with the main impact
+/// of the difference being where loop exits (`break`s) "merge" (or "reconverge"),
+/// which SPIR-V encodes via `OpLoopMerge`, and is significant for almost anything
+/// where shared memory and/or subgroup ops can allow observing when invocations
+/// "wait for others in the subgroup to exit the loop" (or when they fail to wait).
+///
+/// This analysis was added to because of two observations wrt "reconvergence":
+/// 1. syntactic loops (from some high-level language), when truly structured
+///    (i.e. only using `while`/`do`-`while` exit conditions, not `break` etc.),
+///    *always* map to "minimal loops" on a CFG, as the only loop exit edge is
+///    built-in, and no part of the syntactic "loop body" can be its successor
+/// 2. more pragmatically, compiling shader languages to SPIR-V seems to (almost?)
+///    always *either* fully preserve syntactic loops (via SPIR-V `OpLoopMerge`),
+///    *or* structurize CFGs in a way that produces "minimal loops", which can
+///    be misleading with explicit `break`s (moving user code from just before
+///    the `break` to after the loop), but is less impactful than "maximal loops"
+struct LoopFinder<'a> {
+    cfg: &'a ControlFlowGraph,
+
+    // FIXME(eddyb) this feels a bit inefficient (are many-exit loops rare?).
+    loop_header_to_exit_targets: FxIndexMap<ControlRegion, FxIndexSet<ControlRegion>>,
+
+    /// SCC accumulation stack, where CFG nodes collect during the depth-first
+    /// traversal, and are only popped when their "SCC root" (loop header) is
+    /// (note that multiple SCCs on the stack does *not* indicate SCC nesting,
+    /// but rather a path between two SCCs, i.e. a loop *following* another).
+    scc_stack: Vec<ControlRegion>,
+    /// Per-CFG-node traversal state (often just pointing to a `scc_stack` slot).
+    scc_state: EntityOrientedDenseMap<ControlRegion, SccState>,
+}
+
+// FIXME(eddyb) make `Option<Option<SccStackIdx>>` the same size somehow.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SccStackIdx(u32);
+
+#[derive(PartialEq, Eq)]
+enum SccState {
+    /// CFG node has been reached and ended up somewhere on the `scc_stack`,
+    /// where it will remain after the SCC it's part of will be completed.
+    Pending(SccStackIdx),
+
+    /// CFG node had been reached once, but is no longer on the `scc_stack`, its
+    /// parent SCC having been completed (or it wasn't in an SCC to begin with).
+    Complete,
+}
+
+impl<'a> LoopFinder<'a> {
+    fn new(cfg: &'a ControlFlowGraph) -> Self {
+        Self {
+            cfg,
+            loop_header_to_exit_targets: FxIndexMap::default(),
+            scc_stack: vec![],
+            scc_state: EntityOrientedDenseMap::new(),
+        }
+    }
+
+    /// Tarjan's SCC algorithm works by computing the "earliest" reachable node,
+    /// from every node (often using the name `lowlink`), which will be equal
+    /// to the origin node itself iff that node is an "SCC root" (loop header),
+    /// and always point to an "earlier" node if a cycle (via loop backedge) was
+    /// found from somewhere else in the SCC (i.e. from inside the loop body).
+    ///
+    /// Here we track stack indices (as the stack order is the traversal order),
+    /// and distinguish the acyclic case to avoid treating most nodes as self-loops.
+    fn find_earliest_scc_root_of(&mut self, node: ControlRegion) -> Option<SccStackIdx> {
+        let state_entry = self.scc_state.entry(node);
+        if let Some(state) = &state_entry {
+            return match *state {
+                SccState::Pending(scc_stack_idx) => Some(scc_stack_idx),
+                SccState::Complete => None,
+            };
+        }
+        let scc_stack_idx = SccStackIdx(self.scc_stack.len().try_into().unwrap());
+        self.scc_stack.push(node);
+        *state_entry = Some(SccState::Pending(scc_stack_idx));
+
+        let control_inst = self
+            .cfg
+            .control_inst_on_exit_from
+            .get(node)
+            .expect("cfg: missing `ControlInst`, despite having left structured control-flow");
+
+        let earliest_scc_root = control_inst
+            .targets
+            .iter()
+            .flat_map(|&target| {
+                // HACK(eddyb) if one of the edges is already known to be a loop exit
+                // (from `OpLoopMerge` specifically), treat it almost like a backedge,
+                // but with the additional requirement that the loop header is already
+                // on the stack (i.e. this `node` is reachable from that loop header).
+                let root_candidate_from_loop_merge =
+                    self.cfg.loop_merge_to_loop_header.get(&target).and_then(|&loop_header| {
+                        match self.scc_state.get(loop_header) {
+                            Some(&SccState::Pending(scc_stack_idx)) => Some(scc_stack_idx),
+                            _ => None,
+                        }
+                    });
+
+                self.find_earliest_scc_root_of(target)
+                    .into_iter()
+                    .chain(root_candidate_from_loop_merge)
+            })
+            .min();
+
+        // If this node has been chosen as the root of an SCC, complete that SCC.
+        if earliest_scc_root == Some(scc_stack_idx) {
+            let scc_start = scc_stack_idx.0 as usize;
+
+            // It's now possible to find all the loop exits: they're all the
+            // edges from nodes of this SCC (loop) to nodes not in the SCC.
+            let target_in_scc = |target| match self.scc_state.get(target) {
+                Some(&SccState::Pending(i)) => i >= scc_stack_idx,
+                _ => false,
+            };
+            self.loop_header_to_exit_targets.insert(
+                node,
+                self.scc_stack[scc_start..]
+                    .iter()
+                    .flat_map(|&scc_node| {
+                        self.cfg.control_inst_on_exit_from[scc_node]
+                            .targets
+                            .iter()
+                            .copied()
+                            .filter(|&target| !target_in_scc(target))
+                    })
+                    .collect(),
+            );
+
+            // Find nested loops by marking *only* the loop header as complete,
+            // clearing loop body nodes' state, and recursing on them: all the
+            // nodes outside the loop (otherwise reachable from within), and the
+            // loop header itself, are already marked as complete, meaning that
+            // all exits and backedges will be ignored, and the recursion will
+            // only find more SCCs within the loop body (i.e. nested loops).
+            self.scc_state[node] = SccState::Complete;
+            let loop_body_range = scc_start + 1..self.scc_stack.len();
+            for &scc_node in &self.scc_stack[loop_body_range.clone()] {
+                self.scc_state.remove(scc_node);
+            }
+            for i in loop_body_range.clone() {
+                self.find_earliest_scc_root_of(self.scc_stack[i]);
+            }
+            assert_eq!(self.scc_stack.len(), loop_body_range.end);
+
+            // Remove the entire SCC from the accumulation stack all at once.
+            self.scc_stack.truncate(scc_start);
+
+            return None;
+        }
+
+        // Not actually in an SCC at all, just some node outside any CFG cycles.
+        if earliest_scc_root.is_none() {
+            assert!(self.scc_stack.pop() == Some(node));
+            self.scc_state[node] = SccState::Complete;
+        }
+
+        earliest_scc_root
     }
 }
 
@@ -225,7 +395,15 @@ pub struct Structurizer<'a> {
     const_false: Const,
 
     func_def_body: &'a mut FuncDefBody,
-    incoming_edge_counts: EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
+
+    // FIXME(eddyb) this feels a bit inefficient (are many-exit loops rare?).
+    loop_header_to_exit_targets: FxIndexMap<ControlRegion, FxIndexSet<ControlRegion>>,
+
+    // HACK(eddyb) this also tracks all of `loop_header_to_exit_targets`, as
+    // "false edges" from every loop header to each exit target of that loop,
+    // which structurizing that loop consumes to "unlock" its own exits.
+    incoming_edge_counts_including_loop_exits:
+        EntityOrientedDenseMap<ControlRegion, IncomingEdgeCount>,
 
     /// Keyed by the input to `structurize_region_from` (the start [`ControlRegion`]),
     /// and describing the state of that partial structurization step.
@@ -384,21 +562,42 @@ impl<'a> Structurizer<'a> {
             ctor_args: [].into_iter().collect(),
         });
 
-        let incoming_edge_counts = func_def_body
-            .unstructured_cfg
-            .as_ref()
-            .map(|cfg| {
-                let mut state = TraversalState {
-                    incoming_edge_counts: EntityOrientedDenseMap::new(),
+        let (loop_header_to_exit_targets, incoming_edge_counts_including_loop_exits) =
+            func_def_body
+                .unstructured_cfg
+                .as_ref()
+                .map(|cfg| {
+                    let loop_header_to_exit_targets = {
+                        let mut loop_finder = LoopFinder::new(cfg);
+                        loop_finder.find_earliest_scc_root_of(func_def_body.body);
+                        loop_finder.loop_header_to_exit_targets
+                    };
 
-                    pre_order_visit: |_| {},
-                    post_order_visit: |_| {},
-                    reverse_targets: false,
-                };
-                cfg.traverse_whole_func(func_def_body, &mut state);
-                state.incoming_edge_counts
-            })
-            .unwrap_or_default();
+                    let mut state = TraversalState {
+                        incoming_edge_counts: EntityOrientedDenseMap::new(),
+
+                        pre_order_visit: |_| {},
+                        post_order_visit: |_| {},
+                        reverse_targets: false,
+                    };
+                    cfg.traverse_whole_func(func_def_body, &mut state);
+
+                    // HACK(eddyb) treat loop exits as "false edges", that their
+                    // respective loop header "owns", such that structurization
+                    // naturally stops at those loop exits, instead of continuing
+                    // greedily into the loop exterior (producing "maximal loops").
+                    for loop_exit_targets in loop_header_to_exit_targets.values() {
+                        for &exit_target in loop_exit_targets {
+                            *state
+                                .incoming_edge_counts
+                                .entry(exit_target)
+                                .get_or_insert(Default::default()) += IncomingEdgeCount::ONE;
+                        }
+                    }
+
+                    (loop_header_to_exit_targets, state.incoming_edge_counts)
+                })
+                .unwrap_or_default();
 
         Self {
             cx,
@@ -407,7 +606,9 @@ impl<'a> Structurizer<'a> {
             const_false,
 
             func_def_body,
-            incoming_edge_counts,
+
+            loop_header_to_exit_targets,
+            incoming_edge_counts_including_loop_exits,
 
             structurize_region_state: FxIndexMap::default(),
             control_region_input_replacements: EntityOrientedDenseMap::new(),
@@ -530,7 +731,9 @@ impl<'a> Structurizer<'a> {
         };
         let backedge_count = backedge.map(|e| e.edge_bundle.accumulated_count).unwrap_or_default();
 
-        if self.incoming_edge_counts[target] != edge_bundle.accumulated_count + backedge_count {
+        if self.incoming_edge_counts_including_loop_exits[target]
+            != edge_bundle.accumulated_count + backedge_count
+        {
             return Err(DeferredEdgeBundle {
                 condition: Value::Const(self.const_true),
                 edge_bundle,
@@ -612,6 +815,20 @@ impl<'a> Structurizer<'a> {
             // being encoded in `region.deferred_*`.
             region.children = EntityList::empty();
             region.children.insert_last(loop_node, &mut self.func_def_body.control_nodes);
+
+            // HACK(eddyb) we've treated loop exits as extra "false edges", so
+            // here they have to be added to the loop (potentially unlocking
+            // structurization to the outside of the loop, in the caller).
+            if let Some(exit_targets) = self.loop_header_to_exit_targets.get(&target) {
+                for &exit_target in exit_targets {
+                    // FIXME(eddyb) what if this is `None`, is that impossible?
+                    if let Some(deferred) =
+                        region.deferred_edges.target_to_deferred.get_mut(&exit_target)
+                    {
+                        deferred.edge_bundle.accumulated_count += IncomingEdgeCount::ONE;
+                    }
+                }
+            }
         }
 
         if !edge_bundle.target_inputs.is_empty() {
@@ -759,7 +976,8 @@ impl<'a> Structurizer<'a> {
                     .control_inst_on_exit_from
                     .insert(proxy, control_inst);
                 self.structurize_region_state.insert(proxy, StructurizeRegionState::InProgress);
-                self.incoming_edge_counts.insert(proxy, IncomingEdgeCount::ONE);
+                self.incoming_edge_counts_including_loop_exits
+                    .insert(proxy, IncomingEdgeCount::ONE);
                 let deferred_proxy = DeferredEdgeBundle {
                     condition: Value::Const(self.const_true),
                     edge_bundle: IncomingEdgeBundle {

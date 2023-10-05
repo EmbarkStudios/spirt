@@ -1265,7 +1265,26 @@ impl Module {
                         ));
                     }
 
-                    // HACK(eddyb) merges are ignored - this may be lossy,
+                    // HACK(eddyb) we want to at least record `OpLoopMerge`s'
+                    // impact on the shape of a loop, for restructurization.
+                    if opcode == wk.OpLoopMerge {
+                        assert_eq!(ids.len(), 2);
+                        let loop_merge_target =
+                            match lookup_global_or_local_id_for_data_or_control_inst_input(ids[0])?
+                            {
+                                LocalIdDef::Value(_) => return Err(invalid("expected label ID")),
+                                LocalIdDef::BlockLabel(target) => target,
+                            };
+
+                        func_def_body
+                            .unstructured_cfg
+                            .as_mut()
+                            .unwrap()
+                            .loop_merge_to_loop_header
+                            .insert(loop_merge_target, current_block_control_region);
+                    }
+
+                    // HACK(eddyb) merges are mostly ignored - this may be lossy,
                     // especially wrt the `SelectionControl` and `LoopControl`
                     // operands, but it's not obvious how they should map to
                     // some "structured regions" replacement for the CFG.
