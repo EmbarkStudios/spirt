@@ -69,6 +69,11 @@ pub fn partition_and_propagate(module: &mut Module, layout_config: &qptr::Layout
                     func_def_body,
                 );
 
+                if true {
+                    crate::flow::flow_func(cx.clone(), func_def_body);
+                    break;
+                }
+
                 let report = qptr::simplify::propagate_contents_of_local_vars_in_func(
                     cx.clone(),
                     layout_config,

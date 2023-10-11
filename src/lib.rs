@@ -154,6 +154,7 @@
 // (i.e. using inner doc comments).
 pub mod cfg;
 mod context;
+pub mod flow;
 pub mod func_at;
 pub mod print;
 pub mod transform;
@@ -1073,7 +1074,7 @@ pub enum DataInstKind {
 ///   avoid them because of their (negative) impact on analyses and transforms,
 ///   with their main vestigial purpose being to encode multiple return values
 ///   from functions, which can be done more directly in other IRs (and SPIR-T)
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
     Const(Const),
 
