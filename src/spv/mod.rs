@@ -51,17 +51,27 @@ pub struct DebugSources {
     pub file_contents: FxIndexMap<InternedStr, String>,
 }
 
+// TODO(eddyb) the idea here would be that instead of wasting so much space on
+// on effectively `(bool, OperandKind, u32)`, the `u32` part of the immediates
+// could be kept compact, with everything else more like a `SmallVec<[OperandKind; _]>`,
+// *but*, crucially, using a custom `enum` to avoid the `Vec` overhead of `SmallVec`
+
 /// A SPIR-V instruction, in its minimal form (opcode and immediate operands).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Inst {
-    pub opcode: spec::Opcode,
+    internal_opcode: spec::Opcode,
 
     // FIXME(eddyb) change the inline size of this to fit most instructions.
     // FIXME(eddyb) it might be worth investigating the performance implications
     // of interning "long immediates", compared to the flattened representation.
     // NOTE(eddyb) interning these separately is likely unnecessary in many cases,
     // now that `DataInstForm`s are interned, and `Const`s etc. were already.
-    pub imms: SmallVec<[Imm; 2]>,
+    internal_imms: SmallVec<[Imm; 2]>,
+}
+
+impl Inst {
+    pub fn opcode(&self) -> spec::Opcode {}
+    pub fn imms(&self) -> &[Imm] {}
 }
 
 impl From<spec::Opcode> for Inst {
