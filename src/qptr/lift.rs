@@ -7,7 +7,7 @@ use crate::func_at::FuncAtMut;
 use crate::qptr::{shapes, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::transform::{InnerInPlaceTransform, InnerTransform, Transformed, Transformer};
 use crate::{
-    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, ControlNode,
+    spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, Context, ControlNode,
     ControlNodeKind, DataInst, DataInstDef, DataInstFormDef, DataInstKind, DeclDef, Diag,
     DiagLevel, EntityDefs, EntityOrientedDenseMap, Func, FuncDecl, FxIndexMap, GlobalVar,
     GlobalVarDecl, Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
@@ -356,11 +356,17 @@ impl<'a> LiftToSpvPtrs<'a> {
         self.cx.intern(ConstDef {
             attrs: AttrSet::default(),
             ty: self.u32_type(),
-            ctor: ConstCtor::SpvInst(spv::Inst {
-                opcode: wk.OpConstant,
-                imms: [spv::Imm::Short(wk.LiteralContextDependentNumber, x)].into_iter().collect(),
-            }),
-            ctor_args: [].into_iter().collect(),
+            kind: ConstKind::SpvInst {
+                spv_inst_and_const_inputs: Rc::new((
+                    spv::Inst {
+                        opcode: wk.OpConstant,
+                        imms: [spv::Imm::Short(wk.LiteralContextDependentNumber, x)]
+                            .into_iter()
+                            .collect(),
+                    },
+                    [].into_iter().collect(),
+                )),
+            },
         })
     }
 
@@ -1081,12 +1087,11 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
     fn transform_const_use(&mut self, ct: Const) -> Transformed<Const> {
         // FIXME(eddyb) maybe cache this remap (in `LiftToSpvPtrs`, globally).
         let ct_def = &self.lifter.cx[ct];
-        if let ConstCtor::PtrToGlobalVar(gv) = ct_def.ctor {
+        if let ConstKind::PtrToGlobalVar(gv) = ct_def.kind {
             Transformed::Changed(self.lifter.cx.intern(ConstDef {
                 attrs: ct_def.attrs,
                 ty: self.global_vars[gv].type_of_ptr_to,
-                ctor: ct_def.ctor.clone(),
-                ctor_args: ct_def.ctor_args.clone(),
+                kind: ct_def.kind.clone(),
             }))
         } else {
             Transformed::Unchanged

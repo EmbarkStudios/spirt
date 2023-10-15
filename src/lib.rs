@@ -173,6 +173,7 @@ pub mod spv;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 // HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
 #[doc(hidden)]
@@ -482,7 +483,7 @@ pub enum TypeCtor {
 
     SpvInst(spv::Inst),
 
-    /// The type of a [`ConstCtor::SpvStringLiteralForExtInst`] constant, i.e.
+    /// The type of a [`ConstKind::SpvStringLiteralForExtInst`] constant, i.e.
     /// a SPIR-V `OpString` with no actual type in SPIR-V.
     SpvStringLiteralForExtInst,
 }
@@ -503,16 +504,18 @@ pub use context::Const;
 pub struct ConstDef {
     pub attrs: AttrSet,
     pub ty: Type,
-    pub ctor: ConstCtor,
-    pub ctor_args: SmallVec<[Const; 2]>,
+    pub kind: ConstKind,
 }
 
-/// [`Const`] "constructor": a [`ConstDef`] wiithout any nested [`Const`]s.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub enum ConstCtor {
+pub enum ConstKind {
     PtrToGlobalVar(GlobalVar),
 
-    SpvInst(spv::Inst),
+    // HACK(eddyb) this is a fallback case that should become increasingly rare
+    // (especially wrt recursive consts), `Rc` means it can't bloat `ConstDef`.
+    SpvInst {
+        spv_inst_and_const_inputs: Rc<(spv::Inst, SmallVec<[Const; 4]>)>,
+    },
 
     /// SPIR-V `OpString`, but only when used as an operand for an `OpExtInst`,
     /// which can't have literals itself - for non-string literals `OpConstant*`

@@ -24,7 +24,7 @@ use crate::print::multiversion::Versions;
 use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::visit::{InnerVisit, Visit, Visitor};
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, Context,
     ControlNode, ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion,
     ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef,
     DataInstKind, DeclDef, Diag, DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func,
@@ -525,7 +525,7 @@ impl<'a> Visitor<'a> for Plan<'a> {
 
     fn visit_const_def(&mut self, ct_def: &'a ConstDef) {
         // HACK(eddyb) the type of a `PtrToGlobalVar` is never printed, skip it.
-        if let ConstCtor::PtrToGlobalVar(gv) = ct_def.ctor {
+        if let ConstKind::PtrToGlobalVar(gv) = ct_def.kind {
             self.visit_attr_set_use(ct_def.attrs);
             self.visit_global_var_use(gv);
         } else {
@@ -836,16 +836,26 @@ impl<'a> Printer<'a> {
 
                                     // FIXME(eddyb) remove the duplication between
                                     // here and `ConstDef`'s `Print` impl.
-                                    let has_compact_print = match &ct_def.ctor {
-                                        ConstCtor::SpvInst(inst) => {
-                                            [wk.OpConstantFalse, wk.OpConstantTrue, wk.OpConstant]
-                                                .contains(&inst.opcode)
+                                    let (has_compact_print, has_nested_consts) = match &ct_def.kind
+                                    {
+                                        ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                                            let (spv_inst, const_inputs) =
+                                                &**spv_inst_and_const_inputs;
+                                            (
+                                                [
+                                                    wk.OpConstantFalse,
+                                                    wk.OpConstantTrue,
+                                                    wk.OpConstant,
+                                                ]
+                                                .contains(&spv_inst.opcode),
+                                                !const_inputs.is_empty(),
+                                            )
                                         }
-                                        _ => false,
+                                        _ => (false, false),
                                     };
 
                                     ct_def.attrs == AttrSet::default()
-                                        && (has_compact_print || ct_def.ctor_args.is_empty())
+                                        && (has_compact_print || !has_nested_consts)
                                 }
                             }
                     }
@@ -2439,7 +2449,7 @@ impl Print for TypeDef {
 impl Print for ConstDef {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self { attrs, ty, ctor, ctor_args } = self;
+        let Self { attrs, ty, kind } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
@@ -2453,7 +2463,10 @@ impl Print for ConstDef {
             }
             .apply(ty)
         };
-        let compact_def = if let &ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) = ctor {
+        let compact_def = if let ConstKind::SpvInst { spv_inst_and_const_inputs } = kind {
+            let (spv_inst, _const_inputs) = &**spv_inst_and_const_inputs;
+            let &spv::Inst { opcode, ref imms } = spv_inst;
+
             if opcode == wk.OpConstantFalse {
                 Some(kw("false"))
             } else if opcode == wk.OpConstantTrue {
@@ -2556,20 +2569,23 @@ impl Print for ConstDef {
 
         AttrsAndDef {
             attrs: attrs.print(printer),
-            def_without_name: compact_def.unwrap_or_else(|| match *ctor {
-                ConstCtor::PtrToGlobalVar(gv) => {
+            def_without_name: compact_def.unwrap_or_else(|| match kind {
+                &ConstKind::PtrToGlobalVar(gv) => {
                     pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
-                ConstCtor::SpvInst(spv::Inst { opcode, ref imms }) => pretty::Fragment::new([
-                    printer.pretty_spv_inst(
-                        printer.spv_op_style(),
-                        opcode,
-                        imms,
-                        ctor_args.iter().map(|arg| arg.print(printer)),
-                    ),
-                    printer.pretty_type_ascription_suffix(*ty),
-                ]),
-                ConstCtor::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
+                ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                    let (spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
+                    pretty::Fragment::new([
+                        printer.pretty_spv_inst(
+                            printer.spv_op_style(),
+                            spv_inst.opcode,
+                            &spv_inst.imms,
+                            const_inputs.iter().map(|ct| ct.print(printer)),
+                        ),
+                        printer.pretty_type_ascription_suffix(*ty),
+                    ])
+                }
+                &ConstKind::SpvStringLiteralForExtInst(s) => pretty::Fragment::new([
                     printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
                     "(".into(),
                     printer.pretty_string_literal(&printer.cx[s]),
@@ -3273,25 +3289,27 @@ impl Print for FuncAt<'_, DataInst> {
                     Str(&'a str),
                     U32(u32),
                 }
-                let pseudo_imm_from_value = |v: Value| match v {
-                    Value::Const(ct) => match &printer.cx[ct].ctor {
-                        &ConstCtor::SpvStringLiteralForExtInst(s) => {
-                            Some(PseudoImm::Str(&printer.cx[s]))
-                        }
-                        ConstCtor::SpvInst(spv_inst) if spv_inst.opcode == wk.OpConstant => {
-                            match spv_inst.imms[..] {
-                                // HACK(eddyb) only allow unambiguously positive values.
-                                [spv::Imm::Short(_, x)]
-                                    if i32::try_from(x).and_then(u32::try_from) == Ok(x) =>
-                                {
-                                    Some(PseudoImm::U32(x))
-                                }
-                                _ => None,
+                let pseudo_imm_from_value = |v: Value| {
+                    if let Value::Const(ct) = v {
+                        match &printer.cx[ct].kind {
+                            &ConstKind::SpvStringLiteralForExtInst(s) => {
+                                return Some(PseudoImm::Str(&printer.cx[s]));
                             }
+                            ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                                let (spv_inst, _const_inputs) = &**spv_inst_and_const_inputs;
+                                if spv_inst.opcode == wk.OpConstant {
+                                    if let [spv::Imm::Short(_, x)] = spv_inst.imms[..] {
+                                        // HACK(eddyb) only allow unambiguously positive values.
+                                        if i32::try_from(x).and_then(u32::try_from) == Ok(x) {
+                                            return Some(PseudoImm::U32(x));
+                                        }
+                                    }
+                                }
+                            }
+                            ConstKind::PtrToGlobalVar(_) => {}
                         }
-                        _ => None,
-                    },
-                    _ => None,
+                    }
+                    None
                 };
 
                 let debuginfo_with_pseudo_imm_inputs: Option<SmallVec<[_; 8]>> = known_inst_desc

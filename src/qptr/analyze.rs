@@ -7,7 +7,7 @@ use super::{shapes, QPtrAttr, QPtrMemUsage, QPtrOp, QPtrUsage};
 use crate::func_at::FuncAt;
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, Context, ControlNode, ControlNodeKind,
+    AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstKind, Context, ControlNode, ControlNodeKind,
     DataInst, DataInstForm, DataInstKind, DeclDef, Diag, EntityList, ExportKey, Exportee, Func,
     FxIndexMap, GlobalVar, Module, OrdAssertEq, Type, TypeCtor, Value,
 };
@@ -872,8 +872,8 @@ impl<'a> InferUsage<'a> {
 
                 let mut generate_usage = |this: &mut Self, ptr: Value, new_usage| {
                     let slot = match ptr {
-                        Value::Const(ct) => match cx[ct].ctor {
-                            ConstCtor::PtrToGlobalVar(gv) => {
+                        Value::Const(ct) => match cx[ct].kind {
+                            ConstKind::PtrToGlobalVar(gv) => {
                                 this.global_var_usages.entry(gv).or_default()
                             }
                             // FIXME(eddyb) may be relevant?

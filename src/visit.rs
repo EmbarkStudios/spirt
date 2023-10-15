@@ -3,7 +3,7 @@
 use crate::func_at::FuncAt;
 use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     ControlRegionInputDecl, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef,
     DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
@@ -328,16 +328,19 @@ impl InnerVisit for TypeDef {
 
 impl InnerVisit for ConstDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs, ty, ctor, ctor_args } = self;
+        let Self { attrs, ty, kind } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ty);
-        match *ctor {
-            ConstCtor::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
-            ConstCtor::SpvInst(_) | ConstCtor::SpvStringLiteralForExtInst(_) => {}
-        }
-        for &ct in ctor_args {
-            visitor.visit_const_use(ct);
+        match kind {
+            &ConstKind::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
+            ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                let (_spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
+                for &ct in const_inputs {
+                    visitor.visit_const_use(ct);
+                }
+            }
+            ConstKind::SpvStringLiteralForExtInst(_) => {}
         }
     }
 }

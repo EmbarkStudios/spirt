@@ -3,7 +3,7 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeDef,
+    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, ControlNodeDef,
     ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
     DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList, ExportKey, Exportee,
     Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
@@ -581,7 +581,7 @@ impl Module {
                 Seq::TypeConstOrGlobalVar
             } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
                 let id = inst.result_id.unwrap();
-                let const_ctor_args = inst
+                let const_inputs = inst
                     .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
@@ -599,8 +599,9 @@ impl Module {
                 let ct = cx.intern(ConstDef {
                     attrs: mem::take(&mut attrs),
                     ty: result_type.unwrap(),
-                    ctor: ConstCtor::SpvInst(inst.without_ids),
-                    ctor_args: const_ctor_args,
+                    kind: ConstKind::SpvInst {
+                        spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
+                    },
                 });
                 id_defs.insert(id, IdDef::Const(ct));
 
@@ -671,8 +672,7 @@ impl Module {
                 let ptr_to_global_var = cx.intern(ConstDef {
                     attrs: AttrSet::default(),
                     ty: type_of_ptr_to_global_var,
-                    ctor: ConstCtor::PtrToGlobalVar(global_var),
-                    ctor_args: [].into_iter().collect(),
+                    kind: ConstKind::PtrToGlobalVar(global_var),
                 });
                 id_defs.insert(global_var_id, IdDef::Const(ptr_to_global_var));
 
@@ -1045,8 +1045,7 @@ impl Module {
                                 let ct = cx.intern(ConstDef {
                                     attrs: AttrSet::default(),
                                     ty,
-                                    ctor: ConstCtor::SpvStringLiteralForExtInst(*s),
-                                    ctor_args: [].into_iter().collect(),
+                                    kind: ConstKind::SpvStringLiteralForExtInst(*s),
                                 });
                                 Ok(LocalIdDef::Value(Value::Const(ct)))
                             } else {
@@ -1497,8 +1496,8 @@ impl Module {
             .map(|export| match export {
                 Export::Linkage { name, target_id } => {
                     let exportee = match id_defs.get(&target_id) {
-                        Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
-                            ConstCtor::PtrToGlobalVar(gv) => Ok(Exportee::GlobalVar(gv)),
+                        Some(id_def @ &IdDef::Const(ct)) => match cx[ct].kind {
+                            ConstKind::PtrToGlobalVar(gv) => Ok(Exportee::GlobalVar(gv)),
                             _ => Err(id_def.descr(&cx)),
                         },
                         Some(&IdDef::Func(func)) => Ok(Exportee::Func(func)),
@@ -1532,8 +1531,8 @@ impl Module {
                     let interface_global_vars = interface_ids
                         .into_iter()
                         .map(|id| match id_defs.get(&id) {
-                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
-                                ConstCtor::PtrToGlobalVar(gv) => Ok(gv),
+                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].kind {
+                                ConstKind::PtrToGlobalVar(gv) => Ok(gv),
                                 _ => Err(id_def.descr(&cx)),
                             },
                             Some(id_def) => Err(id_def.descr(&cx)),

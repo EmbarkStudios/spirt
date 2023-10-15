@@ -4,7 +4,7 @@ use crate::func_at::FuncAt;
 use crate::spv::{self, spec};
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    cfg, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode,
+    cfg, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl, DataInst,
     DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef, EntityList, ExportKey,
     Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody,
@@ -130,7 +130,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             TypeCtor::SpvStringLiteralForExtInst => {
                 unreachable!(
                     "`TypeCtor::SpvStringLiteralForExtInst` should not be used \
-                     as a type outside of `ConstCtor::SpvStringLiteralForExtInst`"
+                     as a type outside of `ConstKind::SpvStringLiteralForExtInst`"
                 );
             }
         }
@@ -143,8 +143,8 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             return;
         }
         let ct_def = &self.cx[ct];
-        match ct_def.ctor {
-            ConstCtor::PtrToGlobalVar(_) | ConstCtor::SpvInst(_) => {
+        match ct_def.kind {
+            ConstKind::PtrToGlobalVar(_) | ConstKind::SpvInst { .. } => {
                 self.visit_const_def(ct_def);
                 self.globals.insert(global);
             }
@@ -152,8 +152,8 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             // HACK(eddyb) because this is an `OpString` and needs to go earlier
             // in the module than any `OpConstant*`, it needs to be special-cased,
             // without visiting its type, or an entry in `self.globals`.
-            ConstCtor::SpvStringLiteralForExtInst(s) => {
-                let ConstDef { attrs, ty, ctor: _, ctor_args } = ct_def;
+            ConstKind::SpvStringLiteralForExtInst(s) => {
+                let ConstDef { attrs, ty, kind: _ } = ct_def;
 
                 assert!(*attrs == AttrSet::default());
                 assert!(
@@ -164,7 +164,6 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                             ctor_args: SmallVec::new(),
                         }
                 );
-                assert!(ctor_args.is_empty());
 
                 self.debug_strings.insert(&self.cx[s]);
             }
@@ -758,9 +757,14 @@ impl<'a> FuncLifting<'a> {
                                 .collect();
 
                             let is_infinite_loop = match repeat_condition {
-                                Value::Const(cond) => {
-                                    cx[cond].ctor == ConstCtor::SpvInst(wk.OpConstantTrue.into())
-                                }
+                                Value::Const(cond) => match &cx[cond].kind {
+                                    ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                                        let (spv_inst, _const_inputs) =
+                                            &**spv_inst_and_const_inputs;
+                                        spv_inst.opcode == wk.OpConstantTrue
+                                    }
+                                    _ => false,
+                                },
 
                                 _ => false,
                             };
@@ -1022,8 +1026,8 @@ impl LazyInst<'_, '_> {
                     Global::Type(ty) => (cx[ty].attrs, None),
                     Global::Const(ct) => {
                         let ct_def = &cx[ct];
-                        match ct_def.ctor {
-                            ConstCtor::PtrToGlobalVar(gv) => {
+                        match ct_def.kind {
+                            ConstKind::PtrToGlobalVar(gv) => {
                                 let gv_decl = &module.global_vars[gv];
                                 let import = match gv_decl.def {
                                     DeclDef::Imported(import) => Some(import),
@@ -1031,10 +1035,10 @@ impl LazyInst<'_, '_> {
                                 };
                                 (gv_decl.attrs, import)
                             }
-                            ConstCtor::SpvInst { .. } => (ct_def.attrs, None),
+                            ConstKind::SpvInst { .. } => (ct_def.attrs, None),
 
                             // Not inserted into `globals` while visiting.
-                            ConstCtor::SpvStringLiteralForExtInst(_) => unreachable!(),
+                            ConstKind::SpvStringLiteralForExtInst(_) => unreachable!(),
                         }
                     }
                 };
@@ -1068,8 +1072,8 @@ impl LazyInst<'_, '_> {
         let cx = module.cx_ref();
 
         let value_to_id = |parent_func: &FuncLifting<'_>, v| match v {
-            Value::Const(ct) => match cx[ct].ctor {
-                ConstCtor::SpvStringLiteralForExtInst(s) => ids.debug_strings[&cx[s]],
+            Value::Const(ct) => match cx[ct].kind {
+                ConstKind::SpvStringLiteralForExtInst(s) => ids.debug_strings[&cx[s]],
 
                 _ => ids.globals[&Global::Const(ct)],
             },
@@ -1122,10 +1126,9 @@ impl LazyInst<'_, '_> {
                 }
                 Global::Const(ct) => {
                     let ct_def = &cx[ct];
-                    match &ct_def.ctor {
-                        &ConstCtor::PtrToGlobalVar(gv) => {
+                    match &ct_def.kind {
+                        &ConstKind::PtrToGlobalVar(gv) => {
                             assert!(ct_def.attrs == AttrSet::default());
-                            assert!(ct_def.ctor_args.is_empty());
 
                             let gv_decl = &module.global_vars[gv];
 
@@ -1157,19 +1160,21 @@ impl LazyInst<'_, '_> {
                             }
                         }
 
-                        ConstCtor::SpvInst(inst) => spv::InstWithIds {
-                            without_ids: inst.clone(),
-                            result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
-                            result_id,
-                            ids: ct_def
-                                .ctor_args
-                                .iter()
-                                .map(|&ct| ids.globals[&Global::Const(ct)])
-                                .collect(),
-                        },
+                        ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                            let (spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
+                            spv::InstWithIds {
+                                without_ids: spv_inst.clone(),
+                                result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
+                                result_id,
+                                ids: const_inputs
+                                    .iter()
+                                    .map(|&ct| ids.globals[&Global::Const(ct)])
+                                    .collect(),
+                            }
+                        }
 
                         // Not inserted into `globals` while visiting.
-                        ConstCtor::SpvStringLiteralForExtInst(_) => unreachable!(),
+                        ConstKind::SpvStringLiteralForExtInst(_) => unreachable!(),
                     }
                 }
             },
@@ -1359,15 +1364,14 @@ impl Module {
         needs_ids_collector.visit_module(self);
 
         // Because `GlobalVar`s are given IDs by the `Const`s that point to them
-        // (i.e. `ConstCtor::PtrToGlobalVar`), any `GlobalVar`s in other positions
+        // (i.e. `ConstKind::PtrToGlobalVar`), any `GlobalVar`s in other positions
         // require extra care to ensure the ID-giving `Const` is visited.
         let global_var_to_id_giving_global = |gv| {
             let type_of_ptr_to_global_var = self.global_vars[gv].type_of_ptr_to;
             let ptr_to_global_var = cx.intern(ConstDef {
                 attrs: AttrSet::default(),
                 ty: type_of_ptr_to_global_var,
-                ctor: ConstCtor::PtrToGlobalVar(gv),
-                ctor_args: [].into_iter().collect(),
+                kind: ConstKind::PtrToGlobalVar(gv),
             });
             Global::Const(ptr_to_global_var)
         };

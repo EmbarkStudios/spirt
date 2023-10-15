@@ -3,7 +3,7 @@
 use crate::func_at::FuncAtMut;
 use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind,
     DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
@@ -447,28 +447,31 @@ impl InnerTransform for TypeDef {
 
 impl InnerTransform for ConstDef {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
-        let Self { attrs, ty, ctor, ctor_args } = self;
+        let Self { attrs, ty, kind } = self;
 
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
             ty -> transformer.transform_type_use(*ty),
-            ctor -> match ctor {
-                ConstCtor::PtrToGlobalVar(gv) => transform!({
+            kind -> match kind {
+                ConstKind::PtrToGlobalVar(gv) => transform!({
                     gv -> transformer.transform_global_var_use(*gv),
-                } => ConstCtor::PtrToGlobalVar(gv)),
+                } => ConstKind::PtrToGlobalVar(gv)),
 
-                ConstCtor::SpvInst(_)
-                | ConstCtor::SpvStringLiteralForExtInst(_) => Transformed::Unchanged
+                ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                    let (spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
+                    Transformed::map_iter(
+                        const_inputs.iter(),
+                        |&ct| transformer.transform_const_use(ct),
+                    ).map(|new_iter| ConstKind::SpvInst {
+                        spv_inst_and_const_inputs: Rc::new((spv_inst.clone(), new_iter.collect())),
+                    })
+                }
+                ConstKind::SpvStringLiteralForExtInst(_) => Transformed::Unchanged
             },
-            ctor_args -> Transformed::map_iter(
-                ctor_args.iter(),
-                |&ct| transformer.transform_const_use(ct),
-            ).map(|new_iter| new_iter.collect()),
         } => Self {
             attrs,
             ty,
-            ctor,
-            ctor_args,
+            kind,
         })
     }
 }

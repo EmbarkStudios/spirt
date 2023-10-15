@@ -7,7 +7,7 @@ use crate::func_at::FuncAtMut;
 use crate::qptr::{shapes, QPtrAttr, QPtrOp};
 use crate::transform::{InnerInPlaceTransform, Transformed, Transformer};
 use crate::{
-    spv, AddrSpace, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, Context, ControlNode,
+    spv, AddrSpace, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, Context, ControlNode,
     ControlNodeKind, DataInst, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, Diag,
     FuncDecl, GlobalVarDecl, OrdAssertEq, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
 };
@@ -172,17 +172,16 @@ impl<'a> LowerFromSpvPtrs<'a> {
 
     // FIXME(eddyb) properly distinguish between zero-extension and sign-extension.
     fn const_as_u32(&self, ct: Const) -> Option<u32> {
-        match &self.cx[ct].ctor {
-            ConstCtor::SpvInst(spv_inst)
-                if spv_inst.opcode == self.wk.OpConstant && spv_inst.imms.len() == 1 =>
-            {
+        if let ConstKind::SpvInst { spv_inst_and_const_inputs } = &self.cx[ct].kind {
+            let (spv_inst, _const_inputs) = &**spv_inst_and_const_inputs;
+            if spv_inst.opcode == self.wk.OpConstant && spv_inst.imms.len() == 1 {
                 match spv_inst.imms[..] {
-                    [spv::Imm::Short(_, x)] => Some(x),
+                    [spv::Imm::Short(_, x)] => return Some(x),
                     _ => unreachable!(),
                 }
             }
-            _ => None,
         }
+        None
     }
 
     /// Get the (likely cached) `QPtr` type.
@@ -226,12 +225,11 @@ impl Transformer for EraseSpvPtrs<'_> {
     fn transform_const_use(&mut self, ct: Const) -> Transformed<Const> {
         // FIXME(eddyb) maybe cache this remap (in `LowerFromSpvPtrs`, globally).
         let ct_def = &self.lowerer.cx[ct];
-        if let ConstCtor::PtrToGlobalVar(_) = ct_def.ctor {
+        if let ConstKind::PtrToGlobalVar(_) = ct_def.kind {
             Transformed::Changed(self.lowerer.cx.intern(ConstDef {
                 attrs: ct_def.attrs,
                 ty: self.lowerer.qptr_type(),
-                ctor: ct_def.ctor.clone(),
-                ctor_args: ct_def.ctor_args.clone(),
+                kind: ct_def.kind.clone(),
             }))
         } else {
             Transformed::Unchanged

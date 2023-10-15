@@ -2,7 +2,7 @@
 
 use crate::qptr::shapes;
 use crate::{
-    spv, AddrSpace, Attr, Const, ConstCtor, Context, Diag, FxIndexMap, Type, TypeCtor, TypeCtorArg,
+    spv, AddrSpace, Attr, Const, ConstKind, Context, Diag, FxIndexMap, Type, TypeCtor, TypeCtorArg,
 };
 use itertools::Either;
 use smallvec::SmallVec;
@@ -184,17 +184,16 @@ impl<'a> LayoutCache<'a> {
 
     // FIXME(eddyb) properly distinguish between zero-extension and sign-extension.
     fn const_as_u32(&self, ct: Const) -> Option<u32> {
-        match &self.cx[ct].ctor {
-            ConstCtor::SpvInst(spv_inst)
-                if spv_inst.opcode == self.wk.OpConstant && spv_inst.imms.len() == 1 =>
-            {
+        if let ConstKind::SpvInst { spv_inst_and_const_inputs } = &self.cx[ct].kind {
+            let (spv_inst, _const_inputs) = &**spv_inst_and_const_inputs;
+            if spv_inst.opcode == self.wk.OpConstant && spv_inst.imms.len() == 1 {
                 match spv_inst.imms[..] {
-                    [spv::Imm::Short(_, x)] => Some(x),
+                    [spv::Imm::Short(_, x)] => return Some(x),
                     _ => unreachable!(),
                 }
             }
-            _ => None,
         }
+        None
     }
 
     /// Attempt to compute a `TypeLayout` for a given (SPIR-V) `Type`.
