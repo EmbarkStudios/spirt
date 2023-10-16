@@ -1,15 +1,13 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
+    scalar, spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
-    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeKind,
-    Value,
+    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, Value,
 };
 use itertools::{Either, Itertools};
 use smallvec::SmallVec;
 use std::mem;
-use std::rc::Rc;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
 /// ([`ControlInst`]s) attached to [`ControlRegion`]s, as an "action on exit", i.e.
@@ -593,32 +591,9 @@ struct PartialControlRegion {
 
 impl<'a> Structurizer<'a> {
     pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
-        // FIXME(eddyb) SPIR-T should have native booleans itself.
-        let wk = &spv::spec::Spec::get().well_known;
-        let type_bool = cx.intern(TypeKind::SpvInst {
-            spv_inst: wk.OpTypeBool.into(),
-            type_and_const_inputs: [].into_iter().collect(),
-        });
-        let const_true = cx.intern(ConstDef {
-            attrs: AttrSet::default(),
-            ty: type_bool,
-            kind: ConstKind::SpvInst {
-                spv_inst_and_const_inputs: Rc::new((
-                    wk.OpConstantTrue.into(),
-                    [].into_iter().collect(),
-                )),
-            },
-        });
-        let const_false = cx.intern(ConstDef {
-            attrs: AttrSet::default(),
-            ty: type_bool,
-            kind: ConstKind::SpvInst {
-                spv_inst_and_const_inputs: Rc::new((
-                    wk.OpConstantFalse.into(),
-                    [].into_iter().collect(),
-                )),
-            },
-        });
+        let type_bool = cx.intern(scalar::Type::Bool);
+        let const_true = cx.intern(scalar::Const::TRUE);
+        let const_false = cx.intern(scalar::Const::FALSE);
 
         let (loop_header_to_exit_targets, incoming_edge_counts_including_loop_exits) =
             func_def_body

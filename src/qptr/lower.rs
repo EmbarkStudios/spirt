@@ -171,18 +171,10 @@ impl<'a> LowerFromSpvPtrs<'a> {
         }
     }
 
-    // FIXME(eddyb) properly distinguish between zero-extension and sign-extension.
     fn const_as_u32(&self, ct: Const) -> Option<u32> {
-        if let ConstKind::SpvInst { spv_inst_and_const_inputs } = &self.cx[ct].kind {
-            let (spv_inst, _const_inputs) = &**spv_inst_and_const_inputs;
-            if spv_inst.opcode == self.wk.OpConstant && spv_inst.imms.len() == 1 {
-                match spv_inst.imms[..] {
-                    [spv::Imm::Short(_, x)] => return Some(x),
-                    _ => unreachable!(),
-                }
-            }
-        }
-        None
+        // HACK(eddyb) lossless roundtrip through `i32` is most conservative
+        // option (only `0..=i32::MAX`, i.e. `0 <= x < 2**32, is allowed).
+        u32::try_from(ct.as_scalar(&self.cx)?.int_as_i32()?).ok()
     }
 
     /// Get the (likely cached) `QPtr` type.

@@ -557,7 +557,7 @@ impl Module {
             } else if inst_category == spec::InstructionCategory::Type {
                 assert!(inst.result_type_id.is_none());
                 let id = inst.result_id.unwrap();
-                let type_and_const_inputs = inst
+                let type_and_const_inputs: SmallVec<_> = inst
                     .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
@@ -575,36 +575,26 @@ impl Module {
 
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    kind: TypeKind::SpvInst { spv_inst: inst.without_ids, type_and_const_inputs },
+                    kind: match inst.as_canonical_type() {
+                        Some(type_kind) => {
+                            assert_eq!(type_and_const_inputs.len(), 0);
+                            type_kind
+                        }
+                        None => {
+                            TypeKind::SpvInst { spv_inst: inst.without_ids, type_and_const_inputs }
+                        }
+                    },
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
                 Seq::TypeConstOrGlobalVar
-            } else if let Some(const_kind) = inst.as_canonical_const() {
+            } else if inst_category == spec::InstructionCategory::Const
+                || inst.always_lower_as_const()
+            {
                 let id = inst.result_id.unwrap();
-                assert_eq!(inst.ids.len(), 0);
+                let ty = result_type.unwrap();
 
-                // FIXME(eddyb) this is used below for sequencing, so maybe it
-                // may be useful to still have some access here to `wk.OpUndef`.
-                let is_op_undef = matches!(const_kind, ConstKind::Undef);
-
-                let ct = cx.intern(ConstDef {
-                    attrs: mem::take(&mut attrs),
-                    ty: result_type.unwrap(),
-                    kind: const_kind,
-                });
-                id_defs.insert(id, IdDef::Const(ct));
-
-                if is_op_undef {
-                    // `OpUndef` can appear either among constants, or in a
-                    // function, so at most advance `seq` to globals.
-                    seq.max(Some(Seq::TypeConstOrGlobalVar)).unwrap()
-                } else {
-                    Seq::TypeConstOrGlobalVar
-                }
-            } else if inst_category == spec::InstructionCategory::Const {
-                let id = inst.result_id.unwrap();
-                let const_inputs = inst
+                let const_inputs: SmallVec<_> = inst
                     .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
@@ -621,14 +611,26 @@ impl Module {
 
                 let ct = cx.intern(ConstDef {
                     attrs: mem::take(&mut attrs),
-                    ty: result_type.unwrap(),
-                    kind: ConstKind::SpvInst {
-                        spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
+                    ty,
+                    kind: match inst.as_canonical_const(&cx, ty) {
+                        Some(const_kind) => {
+                            assert_eq!(const_inputs.len(), 0);
+                            const_kind
+                        }
+                        None => ConstKind::SpvInst {
+                            spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
+                        },
                     },
                 });
                 id_defs.insert(id, IdDef::Const(ct));
 
-                Seq::TypeConstOrGlobalVar
+                if inst_category != spec::InstructionCategory::Const {
+                    // `OpUndef` can appear either among constants, or in a
+                    // function, so at most advance `seq` to globals.
+                    seq.max(Some(Seq::TypeConstOrGlobalVar)).unwrap()
+                } else {
+                    Seq::TypeConstOrGlobalVar
+                }
             } else if opcode == wk.OpVariable && current_func_body.is_none() {
                 let global_var_id = inst.result_id.unwrap();
                 let type_of_ptr_to_global_var = result_type.unwrap();
