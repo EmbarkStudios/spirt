@@ -580,7 +580,29 @@ impl Module {
                 id_defs.insert(id, IdDef::Type(ty));
 
                 Seq::TypeConstOrGlobalVar
-            } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
+            } else if let Some(const_kind) = inst.as_canonical_const() {
+                let id = inst.result_id.unwrap();
+                assert_eq!(inst.ids.len(), 0);
+
+                // FIXME(eddyb) this is used below for sequencing, so maybe it
+                // may be useful to still have some access here to `wk.OpUndef`.
+                let is_op_undef = matches!(const_kind, ConstKind::Undef);
+
+                let ct = cx.intern(ConstDef {
+                    attrs: mem::take(&mut attrs),
+                    ty: result_type.unwrap(),
+                    kind: const_kind,
+                });
+                id_defs.insert(id, IdDef::Const(ct));
+
+                if is_op_undef {
+                    // `OpUndef` can appear either among constants, or in a
+                    // function, so at most advance `seq` to globals.
+                    seq.max(Some(Seq::TypeConstOrGlobalVar)).unwrap()
+                } else {
+                    Seq::TypeConstOrGlobalVar
+                }
+            } else if inst_category == spec::InstructionCategory::Const {
                 let id = inst.result_id.unwrap();
                 let const_inputs = inst
                     .ids
@@ -606,13 +628,7 @@ impl Module {
                 });
                 id_defs.insert(id, IdDef::Const(ct));
 
-                if opcode == wk.OpUndef {
-                    // `OpUndef` can appear either among constants, or in a
-                    // function, so at most advance `seq` to globals.
-                    seq.max(Some(Seq::TypeConstOrGlobalVar)).unwrap()
-                } else {
-                    Seq::TypeConstOrGlobalVar
-                }
+                Seq::TypeConstOrGlobalVar
             } else if opcode == wk.OpVariable && current_func_body.is_none() {
                 let global_var_id = inst.result_id.unwrap();
                 let type_of_ptr_to_global_var = result_type.unwrap();

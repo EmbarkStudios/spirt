@@ -146,7 +146,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
         }
         let ct_def = &self.cx[ct];
         match ct_def.kind {
-            ConstKind::PtrToGlobalVar(_) | ConstKind::SpvInst { .. } => {
+            ConstKind::Undef | ConstKind::PtrToGlobalVar(_) | ConstKind::SpvInst { .. } => {
                 self.visit_const_def(ct_def);
                 self.globals.insert(global);
             }
@@ -1036,7 +1036,8 @@ impl LazyInst<'_, '_> {
                                 };
                                 (gv_decl.attrs, import)
                             }
-                            ConstKind::SpvInst { .. } => (ct_def.attrs, None),
+
+                            ConstKind::Undef | ConstKind::SpvInst { .. } => (ct_def.attrs, None),
 
                             // Not inserted into `globals` while visiting.
                             ConstKind::SpvStringLiteralForExtInst(_) => unreachable!(),
@@ -1123,8 +1124,19 @@ impl LazyInst<'_, '_> {
                 },
                 Global::Const(ct) => {
                     let ct_def = &cx[ct];
-                    match &ct_def.kind {
-                        &ConstKind::PtrToGlobalVar(gv) => {
+                    match spv::Inst::from_canonical_const(&ct_def.kind).ok_or(&ct_def.kind) {
+                        Ok(spv_inst) => spv::InstWithIds {
+                            without_ids: spv_inst,
+                            result_type_id: Some(ids.globals[&Global::Type(ct_def.ty)]),
+                            result_id,
+                            ids: [].into_iter().collect(),
+                        },
+
+                        Err(ConstKind::Undef) => {
+                            unreachable!("should've been handled as canonical")
+                        }
+
+                        Err(&ConstKind::PtrToGlobalVar(gv)) => {
                             assert!(ct_def.attrs == AttrSet::default());
 
                             let gv_decl = &module.global_vars[gv];
@@ -1157,7 +1169,7 @@ impl LazyInst<'_, '_> {
                             }
                         }
 
-                        ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                        Err(ConstKind::SpvInst { spv_inst_and_const_inputs }) => {
                             let (spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
                             spv::InstWithIds {
                                 without_ids: spv_inst.clone(),
@@ -1171,7 +1183,7 @@ impl LazyInst<'_, '_> {
                         }
 
                         // Not inserted into `globals` while visiting.
-                        ConstKind::SpvStringLiteralForExtInst(_) => unreachable!(),
+                        Err(ConstKind::SpvStringLiteralForExtInst(_)) => unreachable!(),
                     }
                 }
             },

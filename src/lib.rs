@@ -520,6 +520,12 @@ pub struct ConstDef {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum ConstKind {
+    /// Undeterminate value (i.e. SPIR-V `OpUndef`, LLVM `undef`).
+    //
+    // FIXME(eddyb) could it be possible to adopt LLVM's newer `poison`+`freeze`
+    // model, without being forced to never lift back to `OpUndef`?
+    Undef,
+
     PtrToGlobalVar(GlobalVar),
 
     // HACK(eddyb) this is a fallback case that should become increasingly rare

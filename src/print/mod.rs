@@ -2581,9 +2581,14 @@ impl Print for ConstDef {
         AttrsAndDef {
             attrs: attrs.print(printer),
             def_without_name: compact_def.unwrap_or_else(|| match kind {
+                ConstKind::Undef => pretty::Fragment::new([
+                    printer.imperative_keyword_style().apply("undef").into(),
+                    printer.pretty_type_ascription_suffix(*ty),
+                ]),
                 &ConstKind::PtrToGlobalVar(gv) => {
                     pretty::Fragment::new(["&".into(), gv.print(printer)])
                 }
+
                 ConstKind::SpvInst { spv_inst_and_const_inputs } => {
                     let (spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
                     pretty::Fragment::new([
@@ -3294,6 +3299,8 @@ impl Print for FuncAt<'_, DataInst> {
                 let pseudo_imm_from_value = |v: Value| {
                     if let Value::Const(ct) = v {
                         match &printer.cx[ct].kind {
+                            ConstKind::Undef | ConstKind::PtrToGlobalVar(_) => {}
+
                             &ConstKind::SpvStringLiteralForExtInst(s) => {
                                 return Some(PseudoImm::Str(&printer.cx[s]));
                             }
@@ -3308,7 +3315,6 @@ impl Print for FuncAt<'_, DataInst> {
                                     }
                                 }
                             }
-                            ConstKind::PtrToGlobalVar(_) => {}
                         }
                     }
                     None

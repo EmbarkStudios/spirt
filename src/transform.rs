@@ -457,6 +457,9 @@ impl InnerTransform for ConstDef {
             attrs -> transformer.transform_attr_set_use(*attrs),
             ty -> transformer.transform_type_use(*ty),
             kind -> match kind {
+                ConstKind::Undef
+                | ConstKind::SpvStringLiteralForExtInst(_) => Transformed::Unchanged,
+
                 ConstKind::PtrToGlobalVar(gv) => transform!({
                     gv -> transformer.transform_global_var_use(*gv),
                 } => ConstKind::PtrToGlobalVar(gv)),
@@ -470,7 +473,6 @@ impl InnerTransform for ConstDef {
                         spv_inst_and_const_inputs: Rc::new((spv_inst.clone(), new_iter.collect())),
                     })
                 }
-                ConstKind::SpvStringLiteralForExtInst(_) => Transformed::Unchanged
             },
         } => Self {
             attrs,
