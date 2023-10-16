@@ -1568,14 +1568,6 @@ impl<'a> Structurizer<'a> {
     /// Create an undefined constant (as a placeholder where a value needs to be
     /// present, but won't actually be used), of type `ty`.
     fn const_undef(&self, ty: Type) -> Const {
-        // FIXME(eddyb) SPIR-T should have native undef itself.
-        let wk = &spv::spec::Spec::get().well_known;
-        self.cx.intern(ConstDef {
-            attrs: AttrSet::default(),
-            ty,
-            kind: ConstKind::SpvInst {
-                spv_inst_and_const_inputs: Rc::new((wk.OpUndef.into(), [].into_iter().collect())),
-            },
-        })
+        self.cx.intern(ConstDef { attrs: AttrSet::default(), ty, kind: ConstKind::Undef })
     }
 }

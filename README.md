@@ -145,7 +145,7 @@ func F0() -> spv.OpTypeVoid {
       v6 = spv.OpIAdd(v1, 1s32): s32
       (v5, v6)
     } else {
-      (spv.OpUndef: s32, spv.OpUndef: s32)
+      (undef: s32, undef: s32)
     }
     (v3, v4) -> (v0, v1)
   } while v2
