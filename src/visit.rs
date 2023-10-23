@@ -535,7 +535,9 @@ impl InnerVisit for DataInstFormDef {
                 | QPtrOp::Load
                 | QPtrOp::Store => {}
             },
-            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::Scalar(_)
+            | DataInstKind::SpvInst(_)
+            | DataInstKind::SpvExtInst { .. } => {}
         }
         if let Some(ty) = *output_type {
             visitor.visit_type_use(ty);

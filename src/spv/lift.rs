@@ -220,7 +220,6 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
     }
 
     fn visit_data_inst_form_def(&mut self, data_inst_form_def: &DataInstFormDef) {
-        #[allow(clippy::match_same_arms)]
         match data_inst_form_def.kind {
             // FIXME(eddyb) this should be a proper `Result`-based error instead,
             // and/or `spv::lift` should mutate the module for legalization.
@@ -228,9 +227,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                 unreachable!("`DataInstKind::QPtr` should be legalized away before lifting");
             }
 
-            DataInstKind::FuncCall(_) => {}
-
-            DataInstKind::SpvInst(_) => {}
+            DataInstKind::Scalar(_) | DataInstKind::FuncCall(_) | DataInstKind::SpvInst(_) => {}
             DataInstKind::SpvExtInst { ext_set, .. } => {
                 self.ext_inst_imports.insert(&self.cx[ext_set]);
             }
@@ -1256,23 +1253,30 @@ impl LazyInst<'_, '_> {
             },
             Self::DataInst { parent_func, result_id: _, data_inst_def } => {
                 let DataInstFormDef { kind, output_type } = &cx[data_inst_def.form];
-                let (inst, extra_initial_id_operand) = match kind {
-                    // Disallowed while visiting.
-                    DataInstKind::QPtr(_) => unreachable!(),
+                let (inst, extra_initial_id_operand) =
+                    match spv::Inst::from_canonical_data_inst_kind(kind).ok_or(kind) {
+                        Ok(spv_inst) => (spv_inst, None),
 
-                    &DataInstKind::FuncCall(callee) => {
-                        (wk.OpFunctionCall.into(), Some(ids.funcs[&callee].func_id))
-                    }
-                    DataInstKind::SpvInst(inst) => (inst.clone(), None),
-                    &DataInstKind::SpvExtInst { ext_set, inst } => (
-                        spv::Inst {
-                            opcode: wk.OpExtInst,
-                            imms: iter::once(spv::Imm::Short(wk.LiteralExtInstInteger, inst))
-                                .collect(),
-                        },
-                        Some(ids.ext_inst_imports[&cx[ext_set]]),
-                    ),
-                };
+                        Err(DataInstKind::Scalar(_)) => {
+                            unreachable!("should've been handled as canonical")
+                        }
+
+                        // Disallowed while visiting.
+                        Err(DataInstKind::QPtr(_)) => unreachable!(),
+
+                        Err(&DataInstKind::FuncCall(callee)) => {
+                            (wk.OpFunctionCall.into(), Some(ids.funcs[&callee].func_id))
+                        }
+                        Err(DataInstKind::SpvInst(inst)) => (inst.clone(), None),
+                        Err(&DataInstKind::SpvExtInst { ext_set, inst }) => (
+                            spv::Inst {
+                                opcode: wk.OpExtInst,
+                                imms: iter::once(spv::Imm::Short(wk.LiteralExtInstInteger, inst))
+                                    .collect(),
+                            },
+                            Some(ids.ext_inst_imports[&cx[ext_set]]),
+                        ),
+                    };
                 spv::InstWithIds {
                     without_ids: inst,
                     result_type_id: output_type.map(|ty| ids.globals[&Global::Type(ty)]),

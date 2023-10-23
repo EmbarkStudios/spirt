@@ -3044,6 +3044,19 @@ impl Print for FuncAt<'_, DataInst> {
         let mut output_type_to_print = *output_type;
 
         let def_without_type = match kind {
+            &DataInstKind::Scalar(op) => {
+                let name = op.name();
+                let (namespace_prefix, name) = name.split_at(name.find('.').unwrap() + 1);
+                pretty::Fragment::new([
+                    printer
+                        .demote_style_for_namespace_prefix(printer.declarative_keyword_style())
+                        .apply(namespace_prefix)
+                        .into(),
+                    printer.declarative_keyword_style().apply(name).into(),
+                    pretty::join_comma_sep("(", inputs.iter().map(|v| v.print(printer)), ")"),
+                ])
+            }
+
             &DataInstKind::FuncCall(func) => pretty::Fragment::new([
                 printer.declarative_keyword_style().apply("call").into(),
                 " ".into(),

@@ -938,6 +938,12 @@ pub struct DataInstFormDef {
 
 #[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum DataInstKind {
+    /// Scalar (`bool`, integer, and floating-point) pure operations.
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    #[from]
+    Scalar(scalar::Op),
+
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),

@@ -721,7 +721,9 @@ impl InnerTransform for DataInstFormDef {
                     | QPtrOp::Load
                     | QPtrOp::Store => Transformed::Unchanged,
                 },
-                DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => Transformed::Unchanged,
+                DataInstKind::Scalar(_)
+                | DataInstKind::SpvInst(_)
+                | DataInstKind::SpvExtInst { .. } => Transformed::Unchanged,
             },
             // FIXME(eddyb) this should be replaced with an impl of `InnerTransform`
             // for `Option<T>` or some other helper, to avoid "manual transpose".
