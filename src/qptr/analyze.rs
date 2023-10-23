@@ -906,6 +906,8 @@ impl<'a> InferUsage<'a> {
                     });
                 };
                 match &data_inst_form_def.kind {
+                    DataInstKind::Scalar(_) => {}
+
                     &DataInstKind::FuncCall(callee) => {
                         match self.infer_usage_in_func(module, callee) {
                             FuncInferUsageState::Complete(callee_results) => {

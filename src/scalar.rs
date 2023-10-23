@@ -196,3 +196,274 @@ impl Const {
         self.int_as_u128()?.try_into().ok()
     }
 }
+
+/// Pure operations with scalar inputs and outputs.
+//
+// FIXME(eddyb) these are not some "perfect" grouping, but allow for more
+// flexibility in users of this `enum` (and its component `enum`s).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, derive_more::From)]
+pub enum Op {
+    BoolUnary(BoolUnOp),
+    BoolBinary(BoolBinOp),
+
+    IntUnary(IntUnOp),
+    IntBinary(IntBinOp),
+
+    FloatUnary(FloatUnOp),
+    FloatBinary(FloatBinOp),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum BoolUnOp {
+    Not,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum BoolBinOp {
+    Eq,
+    // FIXME(eddyb) should this be `Xor` instead?
+    Ne,
+    Or,
+    And,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum IntUnOp {
+    Neg,
+    Not,
+    CountOnes,
+
+    // FIXME(eddyb) ideally `Trunc` should be separated and common.
+    TruncOrZeroExtend,
+    TruncOrSignExtend,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum IntBinOp {
+    // I×I→I
+    Add,
+    Sub,
+    Mul,
+    DivU,
+    DivS,
+    ModU,
+    RemS,
+    ModS,
+    ShrU,
+    ShrS,
+    Shl,
+    Or,
+    Xor,
+    And,
+
+    // I×I→I×I
+    CarryingAdd,
+    BorrowingSub,
+    WideningMulU,
+    WideningMulS,
+
+    // I×I→B
+    Eq,
+    Ne,
+    // FIXME(eddyb) deduplicate between signed and unsigned.
+    GtU,
+    GtS,
+    GeU,
+    GeS,
+    LtU,
+    LtS,
+    LeU,
+    LeS,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum FloatUnOp {
+    // F→F
+    Neg,
+
+    // F→B
+    IsNan,
+    IsInf,
+
+    // FIXME(eddyb) these are a complicated mix of signatures.
+    FromUInt,
+    FromSInt,
+    ToUInt,
+    ToSInt,
+    Convert,
+    QuantizeAsF16,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum FloatBinOp {
+    // F×F→F
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Mod,
+
+    // F×F→B
+    Cmp(FloatCmp),
+    // FIXME(eddyb) this doesn't properly convey that this is effectively the
+    // boolean flip of the opposite comparison, e.g. `CmpOrUnord(Ge)` is really
+    // a fused version of `Not(Cmp(Lt))`, because `x < y` is never `true` for
+    // unordered `x` and `y` (i.e. `PartialOrd::partial_cmp(x, y) == None`),
+    // but that maps to `!(x < y)` always being `true` for unordered `x` and `y`,
+    // and thus `x >= y` is only equivalent for the ordered cases.
+    CmpOrUnord(FloatCmp),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum FloatCmp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+impl Op {
+    pub fn output_count(self) -> usize {
+        match self {
+            Op::IntBinary(op) => op.output_count(),
+            _ => 1,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::BoolUnary(op) => op.name(),
+            Op::BoolBinary(op) => op.name(),
+
+            Op::IntUnary(op) => op.name(),
+            Op::IntBinary(op) => op.name(),
+
+            Op::FloatUnary(op) => op.name(),
+            Op::FloatBinary(op) => op.name(),
+        }
+    }
+}
+
+impl BoolUnOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            BoolUnOp::Not => "bool.not",
+        }
+    }
+}
+
+impl BoolBinOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            BoolBinOp::Eq => "bool.eq",
+            BoolBinOp::Ne => "bool.ne",
+            BoolBinOp::Or => "bool.or",
+            BoolBinOp::And => "bool.and",
+        }
+    }
+}
+
+impl IntUnOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            IntUnOp::Neg => "i.neg",
+            IntUnOp::Not => "i.not",
+            IntUnOp::CountOnes => "i.count_ones",
+
+            IntUnOp::TruncOrZeroExtend => "u.trunc_or_zext",
+            IntUnOp::TruncOrSignExtend => "s.trunc_or_sext",
+        }
+    }
+}
+
+impl IntBinOp {
+    pub fn output_count(self) -> usize {
+        // FIXME(eddyb) should these 4 go into a different `enum`?
+        match self {
+            IntBinOp::CarryingAdd
+            | IntBinOp::BorrowingSub
+            | IntBinOp::WideningMulU
+            | IntBinOp::WideningMulS => 2,
+            _ => 1,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            IntBinOp::Add => "i.add",
+            IntBinOp::Sub => "i.sub",
+            IntBinOp::Mul => "i.mul",
+            IntBinOp::DivU => "u.div",
+            IntBinOp::DivS => "s.div",
+            IntBinOp::ModU => "u.mod",
+            IntBinOp::RemS => "s.rem",
+            IntBinOp::ModS => "s.mod",
+            IntBinOp::ShrU => "u.shr",
+            IntBinOp::ShrS => "s.shr",
+            IntBinOp::Shl => "i.shl",
+            IntBinOp::Or => "i.or",
+            IntBinOp::Xor => "i.xor",
+            IntBinOp::And => "i.and",
+            IntBinOp::CarryingAdd => "i.carrying_add",
+            IntBinOp::BorrowingSub => "i.borrowing_sub",
+            IntBinOp::WideningMulU => "u.widening_mul",
+            IntBinOp::WideningMulS => "s.widening_mul",
+            IntBinOp::Eq => "i.eq",
+            IntBinOp::Ne => "i.ne",
+            IntBinOp::GtU => "u.gt",
+            IntBinOp::GtS => "s.gt",
+            IntBinOp::GeU => "u.ge",
+            IntBinOp::GeS => "s.ge",
+            IntBinOp::LtU => "u.lt",
+            IntBinOp::LtS => "s.lt",
+            IntBinOp::LeU => "u.le",
+            IntBinOp::LeS => "s.le",
+        }
+    }
+}
+
+impl FloatUnOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            FloatUnOp::Neg => "f.neg",
+
+            FloatUnOp::IsNan => "f.is_nan",
+            FloatUnOp::IsInf => "f.is_inf",
+
+            FloatUnOp::FromUInt => "f.from_uint",
+            FloatUnOp::FromSInt => "f.from_sint",
+            FloatUnOp::ToUInt => "f.to_uint",
+            FloatUnOp::ToSInt => "f.to_sint",
+            FloatUnOp::Convert => "f.convert",
+            FloatUnOp::QuantizeAsF16 => "f.quantize_as_f16",
+        }
+    }
+}
+
+impl FloatBinOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            FloatBinOp::Add => "f.add",
+            FloatBinOp::Sub => "f.sub",
+            FloatBinOp::Mul => "f.mul",
+            FloatBinOp::Div => "f.div",
+            FloatBinOp::Rem => "f.rem",
+            FloatBinOp::Mod => "f.mod",
+            FloatBinOp::Cmp(FloatCmp::Eq) => "f.eq",
+            FloatBinOp::Cmp(FloatCmp::Ne) => "f.ne",
+            FloatBinOp::Cmp(FloatCmp::Lt) => "f.lt",
+            FloatBinOp::Cmp(FloatCmp::Gt) => "f.gt",
+            FloatBinOp::Cmp(FloatCmp::Le) => "f.le",
+            FloatBinOp::Cmp(FloatCmp::Ge) => "f.ge",
+            FloatBinOp::CmpOrUnord(FloatCmp::Eq) => "f.eq_or_unord",
+            FloatBinOp::CmpOrUnord(FloatCmp::Ne) => "f.ne_or_unord",
+            FloatBinOp::CmpOrUnord(FloatCmp::Lt) => "f.lt_or_unord",
+            FloatBinOp::CmpOrUnord(FloatCmp::Gt) => "f.gt_or_unord",
+            FloatBinOp::CmpOrUnord(FloatCmp::Le) => "f.le_or_unord",
+            FloatBinOp::CmpOrUnord(FloatCmp::Ge) => "f.ge_or_unord",
+        }
+    }
+}

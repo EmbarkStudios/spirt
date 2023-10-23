@@ -8,15 +8,21 @@
 // FIXME(eddyb) should interning attempts check/apply these canonicalizations?
 
 use crate::spv::{self, spec};
-use crate::{scalar, ConstKind, Context, Type, TypeKind};
+use crate::{scalar, ConstKind, Context, DataInstKind, Type, TypeKind};
 use lazy_static::lazy_static;
 
 // FIXME(eddyb) these ones could maybe make use of build script generation.
 macro_rules! def_mappable_ops {
-    ($($op:ident),+ $(,)?) => {
+    (
+        type { $($ty_op:ident),+ $(,)? }
+        const { $($ct_op:ident),+ $(,)? }
+        $($enum_path:path { $($variant_op:ident <=> $variant:ident$(($($variant_args:tt)*))?),+ $(,)? })*
+    ) => {
         #[allow(non_snake_case)]
         struct MappableOps {
-            $($op: spec::Opcode,)+
+            $($ty_op: spec::Opcode,)+
+            $($ct_op: spec::Opcode,)+
+            $($($variant_op: spec::Opcode,)+)*
         }
         impl MappableOps {
             #[inline(always)]
@@ -26,24 +32,136 @@ macro_rules! def_mappable_ops {
                     static ref MAPPABLE_OPS: MappableOps = {
                         let spv_spec = spec::Spec::get();
                         MappableOps {
-                            $($op: spv_spec.instructions.lookup(stringify!($op)).unwrap(),)+
+                            $($ty_op: spv_spec.instructions.lookup(stringify!($ty_op)).unwrap(),)+
+                            $($ct_op: spv_spec.instructions.lookup(stringify!($ct_op)).unwrap(),)+
+                            $($($variant_op: spv_spec.instructions.lookup(stringify!($variant_op)).unwrap(),)+)*
                         }
                     };
                 }
                 &MAPPABLE_OPS
             }
         }
+        // NOTE(eddyb) these should stay private, hence not implementing `TryFrom`.
+        $(impl $enum_path {
+            fn try_from_opcode(opcode: spec::Opcode) -> Option<Self> {
+                let mo = MappableOps::get();
+                $(if opcode == mo.$variant_op {
+                    return Some(Self::$variant$(($($variant_args)*))?);
+                })+
+                None
+            }
+            fn to_opcode(self) -> spec::Opcode {
+                let mo = MappableOps::get();
+                match self {
+                    $(Self::$variant$(($($variant_args)*))? => mo.$variant_op,)+
+                }
+            }
+        })*
     };
 }
 def_mappable_ops! {
-    OpTypeBool,
-    OpTypeInt,
-    OpTypeFloat,
+    // FIXME(eddyb) these categories don't actually do anything right now
+    type {
+        OpTypeBool,
+        OpTypeInt,
+        OpTypeFloat,
+    }
+    const {
+        OpUndef,
+        OpConstantFalse,
+        OpConstantTrue,
+        OpConstant,
+    }
+    scalar::BoolUnOp {
+        OpLogicalNot <=> Not,
+    }
+    scalar::BoolBinOp {
+        OpLogicalEqual <=> Eq,
+        OpLogicalNotEqual <=> Ne,
+        OpLogicalOr <=> Or,
+        OpLogicalAnd <=> And,
+    }
+    scalar::IntUnOp {
+        OpSNegate <=> Neg,
+        OpNot <=> Not,
+        OpBitCount <=> CountOnes,
 
-    OpUndef,
-    OpConstantFalse,
-    OpConstantTrue,
-    OpConstant,
+        OpUConvert <=> TruncOrZeroExtend,
+        OpSConvert <=> TruncOrSignExtend,
+    }
+    scalar::IntBinOp {
+        // I×I→I
+        OpIAdd <=> Add,
+        OpISub <=> Sub,
+        OpIMul <=> Mul,
+        OpUDiv <=> DivU,
+        OpSDiv <=> DivS,
+        OpUMod <=> ModU,
+        OpSRem <=> RemS,
+        OpSMod <=> ModS,
+        OpShiftRightLogical <=> ShrU,
+        OpShiftRightArithmetic <=> ShrS,
+        OpShiftLeftLogical <=> Shl,
+        OpBitwiseOr <=> Or,
+        OpBitwiseXor <=> Xor,
+        OpBitwiseAnd <=> And,
+
+        // I×I→I×I
+        OpIAddCarry <=> CarryingAdd,
+        OpISubBorrow <=> BorrowingSub,
+        OpUMulExtended <=> WideningMulU,
+        OpSMulExtended <=> WideningMulS,
+
+        // I×I→B
+        OpIEqual <=> Eq,
+        OpINotEqual <=> Ne,
+        OpUGreaterThan <=> GtU,
+        OpSGreaterThan <=> GtS,
+        OpUGreaterThanEqual <=> GeU,
+        OpSGreaterThanEqual <=> GeS,
+        OpULessThan <=> LtU,
+        OpSLessThan <=> LtS,
+        OpULessThanEqual <=> LeU,
+        OpSLessThanEqual <=> LeS,
+    }
+    scalar::FloatUnOp {
+        // F→F
+        OpFNegate <=> Neg,
+
+        // F→B
+        OpIsNan <=> IsNan,
+        OpIsInf <=> IsInf,
+
+        OpConvertUToF <=> FromUInt,
+        OpConvertSToF <=> FromSInt,
+        OpConvertFToU <=> ToUInt,
+        OpConvertFToS <=> ToSInt,
+        OpFConvert <=> Convert,
+        OpQuantizeToF16 <=> QuantizeAsF16,
+    }
+    scalar::FloatBinOp {
+        // F×F→F
+        OpFAdd <=> Add,
+        OpFSub <=> Sub,
+        OpFMul <=> Mul,
+        OpFDiv <=> Div,
+        OpFRem <=> Rem,
+        OpFMod <=> Mod,
+
+        // F×F→B
+        OpFOrdEqual <=> Cmp(scalar::FloatCmp::Eq),
+        OpFOrdNotEqual <=> Cmp(scalar::FloatCmp::Ne),
+        OpFOrdLessThan <=> Cmp(scalar::FloatCmp::Lt),
+        OpFOrdGreaterThan <=> Cmp(scalar::FloatCmp::Gt),
+        OpFOrdLessThanEqual <=> Cmp(scalar::FloatCmp::Le),
+        OpFOrdGreaterThanEqual <=> Cmp(scalar::FloatCmp::Ge),
+        OpFUnordEqual <=> CmpOrUnord(scalar::FloatCmp::Eq),
+        OpFUnordNotEqual <=> CmpOrUnord(scalar::FloatCmp::Ne),
+        OpFUnordLessThan <=> CmpOrUnord(scalar::FloatCmp::Lt),
+        OpFUnordGreaterThan <=> CmpOrUnord(scalar::FloatCmp::Gt),
+        OpFUnordLessThanEqual <=> CmpOrUnord(scalar::FloatCmp::Le),
+        OpFUnordGreaterThanEqual <=> CmpOrUnord(scalar::FloatCmp::Ge),
+    }
 }
 
 impl scalar::Const {
@@ -221,6 +339,50 @@ impl spv::Inst {
             ConstKind::PtrToGlobalVar(_)
             | ConstKind::SpvInst { .. }
             | ConstKind::SpvStringLiteralForExtInst(_) => None,
+        }
+    }
+
+    pub(super) fn as_canonical_data_inst_kind(
+        &self,
+        cx: &Context,
+        output_types: &[Type],
+    ) -> Option<DataInstKind> {
+        let Self { opcode, imms } = self;
+        let (&opcode, imms) = (opcode, &imms[..]);
+
+        let scalar_op = (scalar::BoolUnOp::try_from_opcode(opcode).map(scalar::Op::from))
+            .or_else(|| scalar::BoolBinOp::try_from_opcode(opcode).map(scalar::Op::from))
+            .or_else(|| scalar::IntUnOp::try_from_opcode(opcode).map(scalar::Op::from))
+            .or_else(|| scalar::IntBinOp::try_from_opcode(opcode).map(scalar::Op::from))
+            .or_else(|| scalar::FloatUnOp::try_from_opcode(opcode).map(scalar::Op::from))
+            .or_else(|| scalar::FloatBinOp::try_from_opcode(opcode).map(scalar::Op::from));
+        if let Some(op) = scalar_op {
+            assert_eq!(imms.len(), 0);
+
+            // FIXME(eddyb) support vector versions of these ops as well.
+            if output_types.len() == op.output_count()
+                && output_types.iter().all(|ty| ty.as_scalar(cx).is_some())
+            {
+                Some(op.into())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn from_canonical_data_inst_kind(data_inst_kind: &DataInstKind) -> Option<Self> {
+        match data_inst_kind {
+            &DataInstKind::Scalar(op) => Some(match op {
+                scalar::Op::BoolUnary(op) => op.to_opcode().into(),
+                scalar::Op::BoolBinary(op) => op.to_opcode().into(),
+                scalar::Op::IntUnary(op) => op.to_opcode().into(),
+                scalar::Op::IntBinary(op) => op.to_opcode().into(),
+                scalar::Op::FloatUnary(op) => op.to_opcode().into(),
+                scalar::Op::FloatBinary(op) => op.to_opcode().into(),
+            }),
+            _ => None,
         }
     }
 }

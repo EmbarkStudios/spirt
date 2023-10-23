@@ -1292,7 +1292,13 @@ impl Module {
                     // some "structured regions" replacement for the CFG.
                 } else {
                     let mut ids = &ids[..];
-                    let kind = if opcode == wk.OpFunctionCall {
+                    let kind = if let Some(kind) = raw_inst.without_ids.as_canonical_data_inst_kind(
+                        &cx,
+                        result_type.map(|ty| [ty]).as_ref().map_or(&[][..], |tys| &tys[..]),
+                    ) {
+                        // FIXME(eddyb) sanity-check the number/types of inputs.
+                        kind
+                    } else if opcode == wk.OpFunctionCall {
                         assert!(imms.is_empty());
                         let callee_id = ids[0];
                         let maybe_callee = id_defs
