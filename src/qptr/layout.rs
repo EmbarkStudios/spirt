@@ -2,7 +2,7 @@
 
 use crate::qptr::shapes;
 use crate::{
-    spv, AddrSpace, Attr, Const, ConstKind, Context, Diag, FxIndexMap, Type, TypeCtor, TypeCtorArg,
+    spv, AddrSpace, Attr, Const, ConstKind, Context, Diag, FxIndexMap, Type, TypeKind, TypeOrConst,
 };
 use itertools::Either;
 use smallvec::SmallVec;
@@ -206,15 +206,17 @@ impl<'a> LayoutCache<'a> {
         let wk = self.wk;
 
         let ty_def = &cx[ty];
-        let spv_inst = match &ty_def.ctor {
+        let (spv_inst, type_and_const_inputs) = match &ty_def.kind {
             // FIXME(eddyb) treat `QPtr`s as scalars.
-            TypeCtor::QPtr => {
+            TypeKind::QPtr => {
                 return Err(LayoutError(Diag::bug(
                     ["`layout_of(qptr)` (already lowered?)".into()],
                 )));
             }
-            TypeCtor::SpvInst(spv_inst) => spv_inst,
-            TypeCtor::SpvStringLiteralForExtInst => {
+            TypeKind::SpvInst { spv_inst, type_and_const_inputs } => {
+                (spv_inst, type_and_const_inputs)
+            }
+            TypeKind::SpvStringLiteralForExtInst => {
                 return Err(LayoutError(Diag::bug([
                     "`layout_of(type_of(OpString<\"...\">))`".into()
                 ])));
@@ -368,8 +370,8 @@ impl<'a> LayoutCache<'a> {
             };
             // NOTE(eddyb) `RowMajor` is disallowed on `OpTypeStruct` members below.
             array(
-                match ty_def.ctor_args[..] {
-                    [TypeCtorArg::Type(elem_type)] => elem_type,
+                match type_and_const_inputs[..] {
+                    [TypeOrConst::Type(elem_type)] => elem_type,
                     _ => unreachable!(),
                 },
                 ArrayParams {
@@ -380,13 +382,12 @@ impl<'a> LayoutCache<'a> {
                 },
             )?
         } else if [wk.OpTypeArray, wk.OpTypeRuntimeArray].contains(&spv_inst.opcode) {
-            let len = ty_def
-                .ctor_args
+            let len = type_and_const_inputs
                 .get(1)
                 .map(|&len| {
                     let len = match len {
-                        TypeCtorArg::Const(len) => len,
-                        TypeCtorArg::Type(_) => unreachable!(),
+                        TypeOrConst::Const(len) => len,
+                        TypeOrConst::Type(_) => unreachable!(),
                     };
                     self.const_as_u32(len).ok_or_else(|| {
                         LayoutError(Diag::bug(
@@ -413,9 +414,9 @@ impl<'a> LayoutCache<'a> {
                 }
             }
             array(
-                match ty_def.ctor_args[0] {
-                    TypeCtorArg::Type(elem_type) => elem_type,
-                    TypeCtorArg::Const(_) => unreachable!(),
+                match type_and_const_inputs[0] {
+                    TypeOrConst::Type(elem_type) => elem_type,
+                    TypeOrConst::Const(_) => unreachable!(),
                 },
                 ArrayParams {
                     fixed_len: len,
@@ -425,12 +426,11 @@ impl<'a> LayoutCache<'a> {
                 },
             )?
         } else if spv_inst.opcode == wk.OpTypeStruct {
-            let field_layouts: SmallVec<[_; 4]> = ty_def
-                .ctor_args
+            let field_layouts: SmallVec<[_; 4]> = type_and_const_inputs
                 .iter()
-                .map(|&arg| match arg {
-                    TypeCtorArg::Type(field_type) => field_type,
-                    TypeCtorArg::Const(_) => unreachable!(),
+                .map(|&ty_or_ct| match ty_or_ct {
+                    TypeOrConst::Type(field_type) => field_type,
+                    TypeOrConst::Const(_) => unreachable!(),
                 })
                 .map(|field_type| match self.layout_of(field_type)? {
                     TypeLayout::Handle(_) | TypeLayout::HandleArray(..) => {

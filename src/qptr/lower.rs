@@ -1,4 +1,4 @@
-//! [`QPtr`](crate::TypeCtor::QPtr) lowering (e.g. from SPIR-V).
+//! [`QPtr`](crate::TypeKind::QPtr) lowering (e.g. from SPIR-V).
 
 // HACK(eddyb) layout code used to be in this module.
 use super::layout::*;
@@ -9,7 +9,7 @@ use crate::transform::{InnerInPlaceTransform, Transformed, Transformer};
 use crate::{
     spv, AddrSpace, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, Context, ControlNode,
     ControlNodeKind, DataInst, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, Diag,
-    FuncDecl, GlobalVarDecl, OrdAssertEq, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    FuncDecl, GlobalVarDecl, OrdAssertEq, Type, TypeKind, TypeOrConst, Value,
 };
 use smallvec::SmallVec;
 use std::cell::Cell;
@@ -153,15 +153,16 @@ impl<'a> LowerFromSpvPtrs<'a> {
     // `Block`-annotated type is a buffer or just interface nonsense.
     // (!!! may cause bad interactions with storage class inference `Generic` abuse)
     fn as_spv_ptr_type(&self, ty: Type) -> Option<(AddrSpace, Type)> {
-        let ty_def = &self.cx[ty];
-        match &ty_def.ctor {
-            TypeCtor::SpvInst(spv_inst) if spv_inst.opcode == self.wk.OpTypePointer => {
+        match &self.cx[ty].kind {
+            TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+                if spv_inst.opcode == self.wk.OpTypePointer =>
+            {
                 let sc = match spv_inst.imms[..] {
                     [spv::Imm::Short(_, sc)] => sc,
                     _ => unreachable!(),
                 };
-                let pointee = match ty_def.ctor_args[..] {
-                    [TypeCtorArg::Type(elem_type)] => elem_type,
+                let pointee = match type_and_const_inputs[..] {
+                    [TypeOrConst::Type(elem_type)] => elem_type,
                     _ => unreachable!(),
                 };
                 Some((AddrSpace::SpvStorageClass(sc), pointee))
@@ -189,11 +190,7 @@ impl<'a> LowerFromSpvPtrs<'a> {
         if let Some(cached) = self.cached_qptr_type.get() {
             return cached;
         }
-        let ty = self.cx.intern(TypeDef {
-            attrs: Default::default(),
-            ctor: TypeCtor::QPtr,
-            ctor_args: Default::default(),
-        });
+        let ty = self.cx.intern(TypeKind::QPtr);
         self.cached_qptr_type.set(Some(ty));
         ty
     }
@@ -529,10 +526,10 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
             // a `OpTypeRuntimeArray`, with the original type as the element type.
             let access_chain_base_layout =
                 if [wk.OpPtrAccessChain, wk.OpInBoundsPtrAccessChain].contains(&spv_inst.opcode) {
-                    self.lowerer.layout_of(cx.intern(TypeDef {
-                        attrs: AttrSet::default(),
-                        ctor: TypeCtor::SpvInst(wk.OpTypeRuntimeArray.into()),
-                        ctor_args: [TypeCtorArg::Type(base_pointee_type)].into_iter().collect(),
+                    self.lowerer.layout_of(cx.intern(TypeKind::SpvInst {
+                        spv_inst: wk.OpTypeRuntimeArray.into(),
+                        type_and_const_inputs:
+                            [TypeOrConst::Type(base_pointee_type)].into_iter().collect(),
                     }))?
                 } else {
                     self.lowerer.layout_of(base_pointee_type)?

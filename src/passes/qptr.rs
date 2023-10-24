@@ -1,4 +1,4 @@
-//! [`QPtr`](crate::TypeCtor::QPtr) transforms.
+//! [`QPtr`](crate::TypeKind::QPtr) transforms.
 
 use crate::visit::{InnerVisit, Visitor};
 use crate::{qptr, DataInstForm};

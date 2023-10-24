@@ -8,7 +8,7 @@ use crate::{
     ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind,
     DeclDef, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
     GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    OrdAssertEq, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    OrdAssertEq, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -419,28 +419,32 @@ impl InnerTransform for QPtrMemUsageKind {
 
 impl InnerTransform for TypeDef {
     fn inner_transform_with(&self, transformer: &mut impl Transformer) -> Transformed<Self> {
-        let Self { attrs, ctor, ctor_args } = self;
+        let Self { attrs, kind } = self;
 
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
-            ctor -> match ctor {
-                TypeCtor::QPtr
-                | TypeCtor::SpvInst(_)
-                | TypeCtor::SpvStringLiteralForExtInst => Transformed::Unchanged,
-            },
-            ctor_args -> Transformed::map_iter(ctor_args.iter(), |arg| match *arg {
-                TypeCtorArg::Type(ty) => transform!({
-                    ty -> transformer.transform_type_use(ty),
-                } => TypeCtorArg::Type(ty)),
+            kind -> match kind {
+                TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => Transformed::Unchanged,
 
-                TypeCtorArg::Const(ct) => transform!({
-                    ct -> transformer.transform_const_use(ct),
-                } => TypeCtorArg::Const(ct)),
-            }).map(|new_iter| new_iter.collect()),
+                TypeKind::SpvInst { spv_inst, type_and_const_inputs } => Transformed::map_iter(
+                    type_and_const_inputs.iter(),
+                    |ty_or_ct| match *ty_or_ct {
+                        TypeOrConst::Type(ty) => transform!({
+                            ty -> transformer.transform_type_use(ty),
+                        } => TypeOrConst::Type(ty)),
+
+                        TypeOrConst::Const(ct) => transform!({
+                            ct -> transformer.transform_const_use(ct),
+                        } => TypeOrConst::Const(ct)),
+                    },
+                ).map(|new_iter| TypeKind::SpvInst {
+                    spv_inst: spv_inst.clone(),
+                    type_and_const_inputs: new_iter.collect(),
+                }),
+            },
         } => Self {
             attrs,
-            ctor,
-            ctor_args,
+            kind,
         })
     }
 }

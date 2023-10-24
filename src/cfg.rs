@@ -3,8 +3,8 @@
 use crate::{
     spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef, EntityList,
-    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeCtor,
-    TypeDef, Value,
+    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeKind,
+    Value,
 };
 use itertools::Either;
 use smallvec::SmallVec;
@@ -545,10 +545,9 @@ impl<'a> Structurizer<'a> {
     pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
         // FIXME(eddyb) SPIR-T should have native booleans itself.
         let wk = &spv::spec::Spec::get().well_known;
-        let type_bool = cx.intern(TypeDef {
-            attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst(wk.OpTypeBool.into()),
-            ctor_args: [].into_iter().collect(),
+        let type_bool = cx.intern(TypeKind::SpvInst {
+            spv_inst: wk.OpTypeBool.into(),
+            type_and_const_inputs: [].into_iter().collect(),
         });
         let const_true = cx.intern(ConstDef {
             attrs: AttrSet::default(),

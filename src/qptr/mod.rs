@@ -1,6 +1,6 @@
-//! [`QPtr`](crate::TypeCtor::QPtr)-related type definitions and passes.
+//! [`QPtr`](crate::TypeKind::QPtr)-related type definitions and passes.
 //
-// FIXME(eddyb) consider `#[cfg(doc)] use crate::TypeCtor::QPtr;` for doc comments.
+// FIXME(eddyb) consider `#[cfg(doc)] use crate::TypeKind::QPtr;` for doc comments.
 // FIXME(eddyb) PR description of https://github.com/EmbarkStudios/spirt/pull/24
 // has more useful docs that could be copied here.
 

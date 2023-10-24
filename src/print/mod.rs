@@ -29,8 +29,8 @@ use crate::{
     ControlRegionDef, ControlRegionInputDecl, DataInst, DataInstDef, DataInstForm, DataInstFormDef,
     DataInstKind, DeclDef, Diag, DiagLevel, DiagMsgPart, EntityListIter, ExportKey, Exportee, Func,
     FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDecl, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeCtor,
-    TypeCtorArg, TypeDef, Value,
+    Import, Module, ModuleDebugInfo, ModuleDialect, OrdAssertEq, SelectionKind, Type, TypeDef,
+    TypeKind, TypeOrConst, Value,
 };
 use arrayvec::ArrayVec;
 use itertools::Either;
@@ -539,11 +539,12 @@ impl<'a> Visitor<'a> for Plan<'a> {
         let pointee_type = {
             let wk = &spv::spec::Spec::get().well_known;
 
-            let type_of_ptr_to_def = &self.cx[gv_decl.type_of_ptr_to];
-            match &type_of_ptr_to_def.ctor {
-                TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypePointer => {
-                    match type_of_ptr_to_def.ctor_args[..] {
-                        [TypeCtorArg::Type(ty)] => Some(ty),
+            match &self.cx[gv_decl.type_of_ptr_to].kind {
+                TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+                    if spv_inst.opcode == wk.OpTypePointer =>
+                {
+                    match type_and_const_inputs[..] {
+                        [TypeOrConst::Type(ty)] => Some(ty),
                         _ => unreachable!(),
                     }
                 }
@@ -814,22 +815,25 @@ impl<'a> Printer<'a> {
 
                                     // FIXME(eddyb) remove the duplication between
                                     // here and `TypeDef`'s `Print` impl.
-                                    let has_compact_print = match &ty_def.ctor {
-                                        TypeCtor::SpvInst(inst) => [
-                                            wk.OpTypeBool,
-                                            wk.OpTypeInt,
-                                            wk.OpTypeFloat,
-                                            wk.OpTypeVector,
-                                        ]
-                                        .contains(&inst.opcode),
+                                    let has_compact_print_or_is_leaf = match &ty_def.kind {
+                                        TypeKind::SpvInst { spv_inst, type_and_const_inputs } => {
+                                            [
+                                                wk.OpTypeBool,
+                                                wk.OpTypeInt,
+                                                wk.OpTypeFloat,
+                                                wk.OpTypeVector,
+                                            ]
+                                            .contains(&spv_inst.opcode)
+                                                || type_and_const_inputs.is_empty()
+                                        }
 
-                                        TypeCtor::QPtr | TypeCtor::SpvStringLiteralForExtInst => {
+                                        TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => {
                                             true
                                         }
                                     };
 
                                     ty_def.attrs == AttrSet::default()
-                                        && (has_compact_print || ty_def.ctor_args.is_empty())
+                                        && has_compact_print_or_is_leaf
                                 }
                                 CxInterned::Const(ct) => {
                                     let ct_def = &cx[ct];
@@ -2370,14 +2374,17 @@ impl Print for QPtrMemUsage {
 impl Print for TypeDef {
     type Output = AttrsAndDef;
     fn print(&self, printer: &Printer<'_>) -> AttrsAndDef {
-        let Self { attrs, ctor, ctor_args } = self;
+        let Self { attrs, kind } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
 
         // FIXME(eddyb) should this be done by lowering SPIR-V types to SPIR-T?
         let kw = |kw| printer.declarative_keyword_style().apply(kw).into();
-        #[allow(irrefutable_let_patterns)]
-        let compact_def = if let &TypeCtor::SpvInst(spv::Inst { opcode, ref imms }) = ctor {
+        let compact_def = if let &TypeKind::SpvInst {
+            spv_inst: spv::Inst { opcode, ref imms },
+            ref type_and_const_inputs,
+        } = kind
+        {
             if opcode == wk.OpTypeBool {
                 Some(kw("bool".into()))
             } else if opcode == wk.OpTypeInt {
@@ -2397,8 +2404,8 @@ impl Print for TypeDef {
 
                 Some(kw(format!("f{width}")))
             } else if opcode == wk.OpTypeVector {
-                let (elem_ty, elem_count) = match (&imms[..], &ctor_args[..]) {
-                    (&[spv::Imm::Short(_, elem_count)], &[TypeCtorArg::Type(elem_ty)]) => {
+                let (elem_ty, elem_count) = match (&imms[..], &type_and_const_inputs[..]) {
+                    (&[spv::Imm::Short(_, elem_count)], &[TypeOrConst::Type(elem_ty)]) => {
                         (elem_ty, elem_count)
                     }
                     _ => unreachable!(),
@@ -2421,20 +2428,21 @@ impl Print for TypeDef {
             def_without_name: if let Some(def) = compact_def {
                 def
             } else {
-                match *ctor {
+                match kind {
                     // FIXME(eddyb) should this be shortened to `qtr`?
-                    TypeCtor::QPtr => printer.declarative_keyword_style().apply("qptr").into(),
+                    TypeKind::QPtr => printer.declarative_keyword_style().apply("qptr").into(),
 
-                    TypeCtor::SpvInst(spv::Inst { opcode, ref imms }) => printer.pretty_spv_inst(
-                        printer.spv_op_style(),
-                        opcode,
-                        imms,
-                        ctor_args.iter().map(|&arg| match arg {
-                            TypeCtorArg::Type(ty) => ty.print(printer),
-                            TypeCtorArg::Const(ct) => ct.print(printer),
-                        }),
-                    ),
-                    TypeCtor::SpvStringLiteralForExtInst => pretty::Fragment::new([
+                    TypeKind::SpvInst { spv_inst, type_and_const_inputs } => printer
+                        .pretty_spv_inst(
+                            printer.spv_op_style(),
+                            spv_inst.opcode,
+                            &spv_inst.imms,
+                            type_and_const_inputs.iter().map(|&ty_or_ct| match ty_or_ct {
+                                TypeOrConst::Type(ty) => ty.print(printer),
+                                TypeOrConst::Const(ct) => ct.print(printer),
+                            }),
+                        ),
+                    TypeKind::SpvStringLiteralForExtInst => pretty::Fragment::new([
                         printer.error_style().apply("type_of").into(),
                         "(".into(),
                         printer.pretty_spv_opcode(printer.spv_op_style(), wk.OpString),
@@ -2484,8 +2492,11 @@ impl Print for ConstDef {
 
                 if let (
                     Some(raw_bits),
-                    &TypeCtor::SpvInst(spv::Inst { opcode: ty_opcode, imms: ref ty_imms }),
-                ) = (raw_bits, &printer.cx[*ty].ctor)
+                    &TypeKind::SpvInst {
+                        spv_inst: spv::Inst { opcode: ty_opcode, imms: ref ty_imms },
+                        ..
+                    },
+                ) = (raw_bits, &printer.cx[*ty].kind)
                 {
                     if ty_opcode == wk.OpTypeInt {
                         let (width, signed) = match ty_imms[..] {
@@ -2616,128 +2627,119 @@ impl Print for GlobalVarDecl {
 
         let wk = &spv::spec::Spec::get().well_known;
 
-        let type_ascription_suffix = {
-            // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
-            // ideally the `GlobalVarDecl` would hold that type itself.
-            let type_of_ptr_to_def = &printer.cx[*type_of_ptr_to];
-
-            match &type_of_ptr_to_def.ctor {
-                TypeCtor::QPtr if shape.is_some() => match shape.unwrap() {
-                    qptr::shapes::GlobalVarShape::Handles { handle, fixed_count } => {
-                        let handle = match handle {
-                            qptr::shapes::Handle::Opaque(ty) => ty.print(printer),
-                            qptr::shapes::Handle::Buffer(addr_space, buf) => {
-                                pretty::Fragment::new([
-                                    printer.declarative_keyword_style().apply("buffer").into(),
-                                    pretty::join_comma_sep(
-                                        "(",
-                                        [
-                                            addr_space.print(printer),
-                                            pretty::Fragment::new([
-                                                printer.pretty_named_argument_prefix("size"),
-                                                pretty::Fragment::new(
-                                                    Some(buf.fixed_base.size)
-                                                        .filter(|&base_size| {
-                                                            base_size > 0
-                                                                || buf.dyn_unit_stride.is_none()
-                                                        })
-                                                        .map(|base_size| {
-                                                            printer
-                                                                .numeric_literal_style()
-                                                                .apply(base_size.to_string())
-                                                                .into()
-                                                        })
-                                                        .into_iter()
-                                                        .chain(buf.dyn_unit_stride.map(|stride| {
-                                                            pretty::Fragment::new([
-                                                                "N × ".into(),
-                                                                printer
-                                                                    .numeric_literal_style()
-                                                                    .apply(stride.to_string()),
-                                                            ])
-                                                        }))
-                                                        .intersperse_with(|| " + ".into()),
-                                                ),
-                                            ]),
-                                            pretty::Fragment::new([
-                                                printer.pretty_named_argument_prefix("align"),
-                                                printer
-                                                    .numeric_literal_style()
-                                                    .apply(buf.fixed_base.align.to_string())
-                                                    .into(),
-                                            ]),
-                                        ],
-                                        ")",
-                                    ),
-                                ])
-                            }
-                        };
-
-                        let handles = if fixed_count.map_or(0, |c| c.get()) == 1 {
-                            handle
-                        } else {
-                            pretty::Fragment::new([
-                                "[".into(),
-                                fixed_count
-                                    .map(|count| {
-                                        pretty::Fragment::new([
-                                            printer
-                                                .numeric_literal_style()
-                                                .apply(count.to_string()),
-                                            " × ".into(),
-                                        ])
-                                    })
-                                    .unwrap_or_default(),
-                                handle,
-                                "]".into(),
-                            ])
-                        };
-                        pretty::join_space(":", [handles])
-                    }
-                    qptr::shapes::GlobalVarShape::UntypedData(mem_layout) => {
-                        pretty::Fragment::new([
-                            " ".into(),
-                            printer.declarative_keyword_style().apply("layout").into(),
+        // HACK(eddyb) get the pointee type from SPIR-V `OpTypePointer`, but
+        // ideally the `GlobalVarDecl` would hold that type itself.
+        let type_ascription_suffix = match &printer.cx[*type_of_ptr_to].kind {
+            TypeKind::QPtr if shape.is_some() => match shape.unwrap() {
+                qptr::shapes::GlobalVarShape::Handles { handle, fixed_count } => {
+                    let handle = match handle {
+                        qptr::shapes::Handle::Opaque(ty) => ty.print(printer),
+                        qptr::shapes::Handle::Buffer(addr_space, buf) => pretty::Fragment::new([
+                            printer.declarative_keyword_style().apply("buffer").into(),
                             pretty::join_comma_sep(
                                 "(",
                                 [
+                                    addr_space.print(printer),
                                     pretty::Fragment::new([
                                         printer.pretty_named_argument_prefix("size"),
-                                        printer
-                                            .numeric_literal_style()
-                                            .apply(mem_layout.size.to_string())
-                                            .into(),
+                                        pretty::Fragment::new(
+                                            Some(buf.fixed_base.size)
+                                                .filter(|&base_size| {
+                                                    base_size > 0 || buf.dyn_unit_stride.is_none()
+                                                })
+                                                .map(|base_size| {
+                                                    printer
+                                                        .numeric_literal_style()
+                                                        .apply(base_size.to_string())
+                                                        .into()
+                                                })
+                                                .into_iter()
+                                                .chain(buf.dyn_unit_stride.map(|stride| {
+                                                    pretty::Fragment::new([
+                                                        "N × ".into(),
+                                                        printer
+                                                            .numeric_literal_style()
+                                                            .apply(stride.to_string()),
+                                                    ])
+                                                }))
+                                                .intersperse_with(|| " + ".into()),
+                                        ),
                                     ]),
                                     pretty::Fragment::new([
                                         printer.pretty_named_argument_prefix("align"),
                                         printer
                                             .numeric_literal_style()
-                                            .apply(mem_layout.align.to_string())
+                                            .apply(buf.fixed_base.align.to_string())
                                             .into(),
                                     ]),
                                 ],
                                 ")",
                             ),
+                        ]),
+                    };
+
+                    let handles = if fixed_count.map_or(0, |c| c.get()) == 1 {
+                        handle
+                    } else {
+                        pretty::Fragment::new([
+                            "[".into(),
+                            fixed_count
+                                .map(|count| {
+                                    pretty::Fragment::new([
+                                        printer.numeric_literal_style().apply(count.to_string()),
+                                        " × ".into(),
+                                    ])
+                                })
+                                .unwrap_or_default(),
+                            handle,
+                            "]".into(),
                         ])
-                    }
-                    qptr::shapes::GlobalVarShape::TypedInterface(ty) => {
-                        printer.pretty_type_ascription_suffix(ty)
-                    }
-                },
-                TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypePointer => {
-                    match type_of_ptr_to_def.ctor_args[..] {
-                        [TypeCtorArg::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
-                        _ => unreachable!(),
-                    }
+                    };
+                    pretty::join_space(":", [handles])
                 }
-                _ => pretty::Fragment::new([
-                    ": ".into(),
-                    printer.error_style().apply("pointee_type_of").into(),
-                    "(".into(),
-                    type_of_ptr_to.print(printer),
-                    ")".into(),
+                qptr::shapes::GlobalVarShape::UntypedData(mem_layout) => pretty::Fragment::new([
+                    " ".into(),
+                    printer.declarative_keyword_style().apply("layout").into(),
+                    pretty::join_comma_sep(
+                        "(",
+                        [
+                            pretty::Fragment::new([
+                                printer.pretty_named_argument_prefix("size"),
+                                printer
+                                    .numeric_literal_style()
+                                    .apply(mem_layout.size.to_string())
+                                    .into(),
+                            ]),
+                            pretty::Fragment::new([
+                                printer.pretty_named_argument_prefix("align"),
+                                printer
+                                    .numeric_literal_style()
+                                    .apply(mem_layout.align.to_string())
+                                    .into(),
+                            ]),
+                        ],
+                        ")",
+                    ),
                 ]),
+                qptr::shapes::GlobalVarShape::TypedInterface(ty) => {
+                    printer.pretty_type_ascription_suffix(ty)
+                }
+            },
+            TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+                if spv_inst.opcode == wk.OpTypePointer =>
+            {
+                match type_and_const_inputs[..] {
+                    [TypeOrConst::Type(ty)] => printer.pretty_type_ascription_suffix(ty),
+                    _ => unreachable!(),
+                }
             }
+            _ => pretty::Fragment::new([
+                ": ".into(),
+                printer.error_style().apply("pointee_type_of").into(),
+                "(".into(),
+                type_of_ptr_to.print(printer),
+                ")".into(),
+            ]),
         };
         let addr_space_suffix = match addr_space {
             AddrSpace::Handles => pretty::Fragment::default(),
@@ -3244,8 +3246,8 @@ impl Print for FuncAt<'_, DataInst> {
                 // the default, and not meaningful *even if* the resulting
                 // value is "used" in a kind of "untyped token" way.
                 output_type_to_print = output_type_to_print.filter(|&ty| {
-                    let is_void = match &printer.cx[ty].ctor {
-                        TypeCtor::SpvInst(spv_inst) => spv_inst.opcode == wk.OpTypeVoid,
+                    let is_void = match &printer.cx[ty].kind {
+                        TypeKind::SpvInst { spv_inst, .. } => spv_inst.opcode == wk.OpTypeVoid,
                         _ => false,
                     };
                     !is_void

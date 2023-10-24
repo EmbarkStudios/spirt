@@ -8,7 +8,7 @@ use crate::{
     ControlRegionInputDecl, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef,
     DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
     GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -311,16 +311,19 @@ impl InnerVisit for QPtrMemUsageKind {
 
 impl InnerVisit for TypeDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs, ctor, ctor_args } = self;
+        let Self { attrs, kind } = self;
 
         visitor.visit_attr_set_use(*attrs);
-        match ctor {
-            TypeCtor::QPtr | TypeCtor::SpvInst(_) | TypeCtor::SpvStringLiteralForExtInst => {}
-        }
-        for &arg in ctor_args {
-            match arg {
-                TypeCtorArg::Type(ty) => visitor.visit_type_use(ty),
-                TypeCtorArg::Const(ct) => visitor.visit_const_use(ct),
+        match kind {
+            TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => {}
+
+            TypeKind::SpvInst { spv_inst: _, type_and_const_inputs } => {
+                for &ty_or_ct in type_and_const_inputs {
+                    match ty_or_ct {
+                        TypeOrConst::Type(ty) => visitor.visit_type_use(ty),
+                        TypeOrConst::Const(ct) => visitor.visit_const_use(ct),
+                    }
+                }
             }
         }
     }

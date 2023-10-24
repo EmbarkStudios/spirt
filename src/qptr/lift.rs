@@ -1,4 +1,4 @@
-//! [`QPtr`](crate::TypeCtor::QPtr) lifting (e.g. to SPIR-V).
+//! [`QPtr`](crate::TypeKind::QPtr) lifting (e.g. to SPIR-V).
 
 // HACK(eddyb) sharing layout code with other modules.
 use super::layout::*;
@@ -10,7 +10,7 @@ use crate::{
     spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, Context, ControlNode,
     ControlNodeKind, DataInst, DataInstDef, DataInstFormDef, DataInstKind, DeclDef, Diag,
     DiagLevel, EntityDefs, EntityOrientedDenseMap, Func, FuncDecl, FxIndexMap, GlobalVar,
-    GlobalVarDecl, Module, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    GlobalVarDecl, Module, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use smallvec::SmallVec;
 use std::cell::Cell;
@@ -163,15 +163,16 @@ impl<'a> LiftToSpvPtrs<'a> {
     //
     // FIXME(eddyb) deduplicate with `qptr::lower`.
     fn as_spv_ptr_type(&self, ty: Type) -> Option<(AddrSpace, Type)> {
-        let ty_def = &self.cx[ty];
-        match &ty_def.ctor {
-            TypeCtor::SpvInst(spv_inst) if spv_inst.opcode == self.wk.OpTypePointer => {
+        match &self.cx[ty].kind {
+            TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+                if spv_inst.opcode == self.wk.OpTypePointer =>
+            {
                 let sc = match spv_inst.imms[..] {
                     [spv::Imm::Short(_, sc)] => sc,
                     _ => unreachable!(),
                 };
-                let pointee = match ty_def.ctor_args[..] {
-                    [TypeCtorArg::Type(elem_type)] => elem_type,
+                let pointee = match type_and_const_inputs[..] {
+                    [TypeOrConst::Type(elem_type)] => elem_type,
                     _ => unreachable!(),
                 };
                 Some((AddrSpace::SpvStorageClass(sc), pointee))
@@ -187,13 +188,12 @@ impl<'a> LiftToSpvPtrs<'a> {
             AddrSpace::Handles => unreachable!(),
             AddrSpace::SpvStorageClass(storage_class) => storage_class,
         };
-        self.cx.intern(TypeDef {
-            attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst(spv::Inst {
+        self.cx.intern(TypeKind::SpvInst {
+            spv_inst: spv::Inst {
                 opcode: wk.OpTypePointer,
                 imms: [spv::Imm::Short(wk.StorageClass, storage_class)].into_iter().collect(),
-            }),
-            ctor_args: [TypeCtorArg::Type(pointee_type)].into_iter().collect(),
+            },
+            type_and_const_inputs: [TypeOrConst::Type(pointee_type)].into_iter().collect(),
         })
     }
 
@@ -287,11 +287,13 @@ impl<'a> LiftToSpvPtrs<'a> {
 
         Ok(self.cx.intern(TypeDef {
             attrs: stride_attrs.unwrap_or_default(),
-            ctor: TypeCtor::SpvInst(spv_opcode.into()),
-            ctor_args: [TypeCtorArg::Type(element_type)]
-                .into_iter()
-                .chain(fixed_len.map(|len| TypeCtorArg::Const(self.const_u32(len))))
-                .collect(),
+            kind: TypeKind::SpvInst {
+                spv_inst: spv_opcode.into(),
+                type_and_const_inputs: [TypeOrConst::Type(element_type)]
+                    .into_iter()
+                    .chain(fixed_len.map(|len| TypeOrConst::Const(self.const_u32(len))))
+                    .collect(),
+            },
         }))
     }
 
@@ -304,7 +306,8 @@ impl<'a> LiftToSpvPtrs<'a> {
 
         let field_offsets_and_types = field_offsets_and_types.into_iter();
         let mut attrs = AttrSetDef::default();
-        let mut type_ctor_args = SmallVec::with_capacity(field_offsets_and_types.size_hint().0);
+        let mut type_and_const_inputs =
+            SmallVec::with_capacity(field_offsets_and_types.size_hint().0);
         for (i, field_offset_and_type) in field_offsets_and_types.enumerate() {
             let (offset, field_type) = field_offset_and_type?;
             attrs.attrs.insert(Attr::SpvAnnotation(spv::Inst {
@@ -317,13 +320,12 @@ impl<'a> LiftToSpvPtrs<'a> {
                 .into_iter()
                 .collect(),
             }));
-            type_ctor_args.push(TypeCtorArg::Type(field_type));
+            type_and_const_inputs.push(TypeOrConst::Type(field_type));
         }
         attrs.attrs.extend(extra_attrs);
         Ok(self.cx.intern(TypeDef {
             attrs: self.cx.intern(attrs),
-            ctor: TypeCtor::SpvInst(wk.OpTypeStruct.into()),
-            ctor_args: type_ctor_args,
+            kind: TypeKind::SpvInst { spv_inst: wk.OpTypeStruct.into(), type_and_const_inputs },
         }))
     }
 
@@ -333,9 +335,8 @@ impl<'a> LiftToSpvPtrs<'a> {
             return cached;
         }
         let wk = self.wk;
-        let ty = self.cx.intern(TypeDef {
-            attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst(spv::Inst {
+        let ty = self.cx.intern(TypeKind::SpvInst {
+            spv_inst: spv::Inst {
                 opcode: wk.OpTypeInt,
                 imms: [
                     spv::Imm::Short(wk.LiteralInteger, 32),
@@ -343,8 +344,8 @@ impl<'a> LiftToSpvPtrs<'a> {
                 ]
                 .into_iter()
                 .collect(),
-            }),
-            ctor_args: [].into_iter().collect(),
+            },
+            type_and_const_inputs: [].into_iter().collect(),
         });
         self.cached_u32_type.set(Some(ty));
         ty
@@ -1130,7 +1131,7 @@ impl Transformer for LiftToSpvPtrInstsInFunc<'_> {
                         lifted =
                             Err(LiftError(Diag::bug(["unimplemented qptr instruction".into()])));
                     } else if let Some(ty) = data_inst_form_def.output_type {
-                        if matches!(self.lifter.cx[ty].ctor, TypeCtor::QPtr) {
+                        if matches!(self.lifter.cx[ty].kind, TypeKind::QPtr) {
                             lifted = Err(LiftError(Diag::bug([
                                 "unimplemented qptr-producing instruction".into(),
                             ])));

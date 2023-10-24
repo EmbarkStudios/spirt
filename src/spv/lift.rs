@@ -8,8 +8,8 @@ use crate::{
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionInputDecl, DataInst,
     DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef, EntityList, ExportKey,
     Exportee, Func, FuncDecl, FuncParam, FxIndexMap, FxIndexSet, GlobalVar, GlobalVarDefBody,
-    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeCtor, TypeCtorArg,
-    TypeDef, Value,
+    Import, Module, ModuleDebugInfo, ModuleDialect, SelectionKind, Type, TypeDef, TypeKind,
+    TypeOrConst, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -81,11 +81,13 @@ impl FuncDecl {
 
         cx.intern(TypeDef {
             attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst(wk.OpTypeFunction.into()),
-            ctor_args: iter::once(self.ret_type)
-                .chain(self.params.iter().map(|param| param.ty))
-                .map(TypeCtorArg::Type)
-                .collect(),
+            kind: TypeKind::SpvInst {
+                spv_inst: wk.OpTypeFunction.into(),
+                type_and_const_inputs: iter::once(self.ret_type)
+                    .chain(self.params.iter().map(|param| param.ty))
+                    .map(TypeOrConst::Type)
+                    .collect(),
+            },
         })
     }
 }
@@ -119,17 +121,17 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
             return;
         }
         let ty_def = &self.cx[ty];
-        match ty_def.ctor {
+        match ty_def.kind {
             // FIXME(eddyb) this should be a proper `Result`-based error instead,
             // and/or `spv::lift` should mutate the module for legalization.
-            TypeCtor::QPtr => {
-                unreachable!("`TypeCtor::QPtr` should be legalized away before lifting");
+            TypeKind::QPtr => {
+                unreachable!("`TypeKind::QPtr` should be legalized away before lifting");
             }
 
-            TypeCtor::SpvInst(_) => {}
-            TypeCtor::SpvStringLiteralForExtInst => {
+            TypeKind::SpvInst { .. } => {}
+            TypeKind::SpvStringLiteralForExtInst => {
                 unreachable!(
-                    "`TypeCtor::SpvStringLiteralForExtInst` should not be used \
+                    "`TypeKind::SpvStringLiteralForExtInst` should not be used \
                      as a type outside of `ConstKind::SpvStringLiteralForExtInst`"
                 );
             }
@@ -160,8 +162,7 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                     self.cx[*ty]
                         == TypeDef {
                             attrs: AttrSet::default(),
-                            ctor: TypeCtor::SpvStringLiteralForExtInst,
-                            ctor_args: SmallVec::new(),
+                            kind: TypeKind::SpvStringLiteralForExtInst,
                         }
                 );
 
@@ -1101,29 +1102,25 @@ impl LazyInst<'_, '_> {
         let (result_id, attrs, _) = self.result_id_attrs_and_import(module, ids);
         let inst = match self {
             Self::Global(global) => match global {
-                Global::Type(ty) => {
-                    let ty_def = &cx[ty];
-                    match &ty_def.ctor {
-                        TypeCtor::SpvInst(inst) => spv::InstWithIds {
-                            without_ids: inst.clone(),
-                            result_type_id: None,
-                            result_id,
-                            ids: ty_def
-                                .ctor_args
-                                .iter()
-                                .map(|&arg| {
-                                    ids.globals[&match arg {
-                                        TypeCtorArg::Type(ty) => Global::Type(ty),
-                                        TypeCtorArg::Const(ct) => Global::Const(ct),
-                                    }]
-                                })
-                                .collect(),
-                        },
+                Global::Type(ty) => match &cx[ty].kind {
+                    TypeKind::SpvInst { spv_inst, type_and_const_inputs } => spv::InstWithIds {
+                        without_ids: spv_inst.clone(),
+                        result_type_id: None,
+                        result_id,
+                        ids: type_and_const_inputs
+                            .iter()
+                            .map(|&ty_or_ct| {
+                                ids.globals[&match ty_or_ct {
+                                    TypeOrConst::Type(ty) => Global::Type(ty),
+                                    TypeOrConst::Const(ct) => Global::Const(ct),
+                                }]
+                            })
+                            .collect(),
+                    },
 
-                        // Not inserted into `globals` while visiting.
-                        TypeCtor::QPtr | TypeCtor::SpvStringLiteralForExtInst => unreachable!(),
-                    }
-                }
+                    // Not inserted into `globals` while visiting.
+                    TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => unreachable!(),
+                },
                 Global::Const(ct) => {
                     let ct_def = &cx[ct];
                     match &ct_def.kind {

@@ -1,4 +1,4 @@
-//! [`QPtr`](crate::TypeCtor::QPtr) usage analysis (for legalizing/lifting).
+//! [`QPtr`](crate::TypeKind::QPtr) usage analysis (for legalizing/lifting).
 
 // HACK(eddyb) sharing layout code with other modules.
 use super::{layout::*, QPtrMemUsageKind};
@@ -9,7 +9,7 @@ use crate::visit::{InnerVisit, Visitor};
 use crate::{
     AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstKind, Context, ControlNode, ControlNodeKind,
     DataInst, DataInstForm, DataInstKind, DeclDef, Diag, EntityList, ExportKey, Exportee, Func,
-    FxIndexMap, GlobalVar, Module, OrdAssertEq, Type, TypeCtor, Value,
+    FxIndexMap, GlobalVar, Module, OrdAssertEq, Type, TypeKind, Value,
 };
 use itertools::Either;
 use rustc_hash::FxHashMap;
@@ -838,7 +838,7 @@ impl<'a> InferUsage<'a> {
         func: Func,
     ) -> FuncInferUsageResults {
         let cx = self.cx.clone();
-        let is_qptr = |ty: Type| matches!(cx[ty].ctor, TypeCtor::QPtr);
+        let is_qptr = |ty: Type| matches!(cx[ty].kind, TypeKind::QPtr);
 
         let func_decl = &module.funcs[func];
         let mut param_usages: SmallVec<[_; 2]> =
