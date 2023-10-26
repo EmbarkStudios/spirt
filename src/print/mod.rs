@@ -728,7 +728,7 @@ impl<'a> Printer<'a> {
                     .collect::<Option<SmallVec<[_; 4]>>>()
                     .filter(|all_names| all_names.iter().map(|(_, spv_name)| spv_name).all_equal())
                     .and_then(|all_names| {
-                        let &(_, spv_name) = all_names.get(0)?;
+                        let &(_, spv_name) = all_names.first()?;
                         let name = spv::extract_literal_string(&spv_name.imms).ok()?;
 
                         // This is the point of no return: these `insert`s will
@@ -3118,7 +3118,7 @@ impl Print for FuncAt<'_, DataInst> {
                                 ]),
                             ]
                             .into_iter()
-                            .chain(extra_inputs.get(0).map(|&init| {
+                            .chain(extra_inputs.first().map(|&init| {
                                 pretty::Fragment::new([
                                     printer.pretty_named_argument_prefix("initializer"),
                                     init.print(printer),

@@ -168,7 +168,7 @@ impl InstParser<'_> {
                     .result_type_id
                     .or_else(|| {
                         // `OpSwitch` takes its literal type from the first operand.
-                        let &id = self.inst.ids.get(0)?;
+                        let &id = self.inst.ids.first()?;
                         self.known_ids.get(&id)?.result_type_id()
                     })
                     .and_then(|id| self.known_ids.get(&id))
