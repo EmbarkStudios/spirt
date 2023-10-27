@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#51](https://github.com/EmbarkStudios/spirt/pull/51) combined `TypeCtor`/`ConstCtor`
+  and their respective "ctor args", into a single unified `TypeKind`/`ConstKind`
 - [PR#48](https://github.com/EmbarkStudios/spirt/pull/48) changed CFG structurization
   from "maximal loops" to "minimal loops" (computed using Tarjan's SCC algorithm),
   and added `OpLoopMerge` support on top (by extending a "minimal loop" as needed)
