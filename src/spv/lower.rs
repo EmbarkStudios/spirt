@@ -3,11 +3,11 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNodeDef,
+    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, ControlNodeDef,
     ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
     DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList, ExportKey, Exportee,
     Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
-    InternedStr, Module, SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    InternedStr, Module, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -546,8 +546,10 @@ impl Module {
                 // serves as a first approximation for a "deferred error".
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst(spv::Inst { opcode, imms: [sc].into_iter().collect() }),
-                    ctor_args: [].into_iter().collect(),
+                    kind: TypeKind::SpvInst {
+                        spv_inst: spv::Inst { opcode, imms: [sc].into_iter().collect() },
+                        type_and_const_inputs: [].into_iter().collect(),
+                    },
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
@@ -555,12 +557,12 @@ impl Module {
             } else if inst_category == spec::InstructionCategory::Type {
                 assert!(inst.result_type_id.is_none());
                 let id = inst.result_id.unwrap();
-                let type_ctor_args = inst
+                let type_and_const_inputs = inst
                     .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
-                        Some(&IdDef::Type(ty)) => Ok(TypeCtorArg::Type(ty)),
-                        Some(&IdDef::Const(ct)) => Ok(TypeCtorArg::Const(ct)),
+                        Some(&IdDef::Type(ty)) => Ok(TypeOrConst::Type(ty)),
+                        Some(&IdDef::Const(ct)) => Ok(TypeOrConst::Const(ct)),
                         Some(id_def) => Err(id_def.descr(&cx)),
                         None => Err(format!("a forward reference to %{id}")),
                     })
@@ -573,15 +575,14 @@ impl Module {
 
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    ctor: TypeCtor::SpvInst(inst.without_ids),
-                    ctor_args: type_ctor_args,
+                    kind: TypeKind::SpvInst { spv_inst: inst.without_ids, type_and_const_inputs },
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
                 Seq::TypeConstOrGlobalVar
             } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
                 let id = inst.result_id.unwrap();
-                let const_ctor_args = inst
+                let const_inputs = inst
                     .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
@@ -599,8 +600,9 @@ impl Module {
                 let ct = cx.intern(ConstDef {
                     attrs: mem::take(&mut attrs),
                     ty: result_type.unwrap(),
-                    ctor: ConstCtor::SpvInst(inst.without_ids),
-                    ctor_args: const_ctor_args,
+                    kind: ConstKind::SpvInst {
+                        spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
+                    },
                 });
                 id_defs.insert(id, IdDef::Const(ct));
 
@@ -671,8 +673,7 @@ impl Module {
                 let ptr_to_global_var = cx.intern(ConstDef {
                     attrs: AttrSet::default(),
                     ty: type_of_ptr_to_global_var,
-                    ctor: ConstCtor::PtrToGlobalVar(global_var),
-                    ctor_args: [].into_iter().collect(),
+                    kind: ConstKind::PtrToGlobalVar(global_var),
                 });
                 id_defs.insert(global_var_id, IdDef::Const(ptr_to_global_var));
 
@@ -696,19 +697,19 @@ impl Module {
 
                 let (func_type_ret_type, func_type_param_types) =
                     match id_defs.get(&func_type_id) {
-                        Some(&IdDef::Type(ty)) => {
-                            let ty_def = &cx[ty];
-                            match &ty_def.ctor {
-                                TypeCtor::SpvInst(inst) if inst.opcode == wk.OpTypeFunction => {
-                                    let mut types = ty_def.ctor_args.iter().map(|&arg| match arg {
-                                        TypeCtorArg::Type(ty) => ty,
-                                        TypeCtorArg::Const(_) => unreachable!(),
+                        Some(&IdDef::Type(ty)) => match &cx[ty].kind {
+                            TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+                                if spv_inst.opcode == wk.OpTypeFunction =>
+                            {
+                                let mut types =
+                                    type_and_const_inputs.iter().map(|&ty_or_ct| match ty_or_ct {
+                                        TypeOrConst::Type(ty) => ty,
+                                        TypeOrConst::Const(_) => unreachable!(),
                                     });
-                                    Some((types.next().unwrap(), types))
-                                }
-                                _ => None,
+                                Some((types.next().unwrap(), types))
                             }
-                        }
+                            _ => None,
+                        },
                         _ => None,
                     }
                     .ok_or_else(|| {
@@ -1037,16 +1038,10 @@ impl Module {
                                 // HACK(eddyb) intern `OpString`s as `Const`s on
                                 // the fly, as it's a less likely usage than the
                                 // `OpLine` one.
-                                let ty = cx.intern(TypeDef {
-                                    attrs: AttrSet::default(),
-                                    ctor: TypeCtor::SpvStringLiteralForExtInst,
-                                    ctor_args: [].into_iter().collect(),
-                                });
                                 let ct = cx.intern(ConstDef {
                                     attrs: AttrSet::default(),
-                                    ty,
-                                    ctor: ConstCtor::SpvStringLiteralForExtInst(*s),
-                                    ctor_args: [].into_iter().collect(),
+                                    ty: cx.intern(TypeKind::SpvStringLiteralForExtInst),
+                                    kind: ConstKind::SpvStringLiteralForExtInst(*s),
                                 });
                                 Ok(LocalIdDef::Value(Value::Const(ct)))
                             } else {
@@ -1497,8 +1492,8 @@ impl Module {
             .map(|export| match export {
                 Export::Linkage { name, target_id } => {
                     let exportee = match id_defs.get(&target_id) {
-                        Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
-                            ConstCtor::PtrToGlobalVar(gv) => Ok(Exportee::GlobalVar(gv)),
+                        Some(id_def @ &IdDef::Const(ct)) => match cx[ct].kind {
+                            ConstKind::PtrToGlobalVar(gv) => Ok(Exportee::GlobalVar(gv)),
                             _ => Err(id_def.descr(&cx)),
                         },
                         Some(&IdDef::Func(func)) => Ok(Exportee::Func(func)),
@@ -1532,8 +1527,8 @@ impl Module {
                     let interface_global_vars = interface_ids
                         .into_iter()
                         .map(|id| match id_defs.get(&id) {
-                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].ctor {
-                                ConstCtor::PtrToGlobalVar(gv) => Ok(gv),
+                            Some(id_def @ &IdDef::Const(ct)) => match cx[ct].kind {
+                                ConstKind::PtrToGlobalVar(gv) => Ok(gv),
                                 _ => Err(id_def.descr(&cx)),
                             },
                             Some(id_def) => Err(id_def.descr(&cx)),

@@ -1,4 +1,4 @@
-//! [`QPtr`](crate::TypeCtor::QPtr) usage analysis (for legalizing/lifting).
+//! [`QPtr`](crate::TypeKind::QPtr) usage analysis (for legalizing/lifting).
 
 // HACK(eddyb) sharing layout code with other modules.
 use super::{layout::*, QPtrMemUsageKind};
@@ -7,9 +7,9 @@ use super::{shapes, QPtrAttr, QPtrMemUsage, QPtrOp, QPtrUsage};
 use crate::func_at::FuncAt;
 use crate::visit::{InnerVisit, Visitor};
 use crate::{
-    AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, Context, ControlNode, ControlNodeKind,
+    AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstKind, Context, ControlNode, ControlNodeKind,
     DataInst, DataInstForm, DataInstKind, DeclDef, Diag, EntityList, ExportKey, Exportee, Func,
-    FxIndexMap, GlobalVar, Module, OrdAssertEq, Type, TypeCtor, Value,
+    FxIndexMap, GlobalVar, Module, OrdAssertEq, Type, TypeKind, Value,
 };
 use itertools::Either;
 use rustc_hash::FxHashMap;
@@ -838,7 +838,7 @@ impl<'a> InferUsage<'a> {
         func: Func,
     ) -> FuncInferUsageResults {
         let cx = self.cx.clone();
-        let is_qptr = |ty: Type| matches!(cx[ty].ctor, TypeCtor::QPtr);
+        let is_qptr = |ty: Type| matches!(cx[ty].kind, TypeKind::QPtr);
 
         let func_decl = &module.funcs[func];
         let mut param_usages: SmallVec<[_; 2]> =
@@ -872,8 +872,8 @@ impl<'a> InferUsage<'a> {
 
                 let mut generate_usage = |this: &mut Self, ptr: Value, new_usage| {
                     let slot = match ptr {
-                        Value::Const(ct) => match cx[ct].ctor {
-                            ConstCtor::PtrToGlobalVar(gv) => {
+                        Value::Const(ct) => match cx[ct].kind {
+                            ConstKind::PtrToGlobalVar(gv) => {
                                 this.global_var_usages.entry(gv).or_default()
                             }
                             // FIXME(eddyb) may be relevant?

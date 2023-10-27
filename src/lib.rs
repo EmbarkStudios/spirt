@@ -173,6 +173,7 @@ pub mod spv;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 // HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
 #[doc(hidden)]
@@ -457,13 +458,11 @@ pub use context::Type;
 #[derive(PartialEq, Eq, Hash)]
 pub struct TypeDef {
     pub attrs: AttrSet,
-    pub ctor: TypeCtor,
-    pub ctor_args: SmallVec<[TypeCtorArg; 2]>,
+    pub kind: TypeKind,
 }
 
-/// [`Type`] "constructor": a [`TypeDef`] wiithout any [`TypeCtorArg`]s ([`Type`]s/[`Const`]s).
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub enum TypeCtor {
+pub enum TypeKind {
     /// "Quasi-pointer", an untyped pointer-like abstract scalar that can represent
     /// both memory locations (in any address space) and other kinds of locations
     /// (e.g. SPIR-V `OpVariable`s in non-memory "storage classes").
@@ -480,15 +479,28 @@ pub enum TypeCtor {
     // separately in e.g. `ControlRegionInputDecl`, might be a better approach?
     QPtr,
 
-    SpvInst(spv::Inst),
+    SpvInst {
+        spv_inst: spv::Inst,
+        // FIXME(eddyb) find a better name.
+        type_and_const_inputs: SmallVec<[TypeOrConst; 2]>,
+    },
 
-    /// The type of a [`ConstCtor::SpvStringLiteralForExtInst`] constant, i.e.
+    /// The type of a [`ConstKind::SpvStringLiteralForExtInst`] constant, i.e.
     /// a SPIR-V `OpString` with no actual type in SPIR-V.
     SpvStringLiteralForExtInst,
 }
 
+// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`.
+impl context::InternInCx<Type> for TypeKind {
+    fn intern_in_cx(self, cx: &Context) -> Type {
+        cx.intern(TypeDef { attrs: Default::default(), kind: self })
+    }
+}
+
+// HACK(eddyb) this is like `Either<Type, Const>`, only used in `TypeKind::SpvInst`,
+// and only because SPIR-V type definitions can references both types and consts.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum TypeCtorArg {
+pub enum TypeOrConst {
     Type(Type),
     Const(Const),
 }
@@ -503,16 +515,18 @@ pub use context::Const;
 pub struct ConstDef {
     pub attrs: AttrSet,
     pub ty: Type,
-    pub ctor: ConstCtor,
-    pub ctor_args: SmallVec<[Const; 2]>,
+    pub kind: ConstKind,
 }
 
-/// [`Const`] "constructor": a [`ConstDef`] wiithout any nested [`Const`]s.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub enum ConstCtor {
+pub enum ConstKind {
     PtrToGlobalVar(GlobalVar),
 
-    SpvInst(spv::Inst),
+    // HACK(eddyb) this is a fallback case that should become increasingly rare
+    // (especially wrt recursive consts), `Rc` means it can't bloat `ConstDef`.
+    SpvInst {
+        spv_inst_and_const_inputs: Rc<(spv::Inst, SmallVec<[Const; 4]>)>,
+    },
 
     /// SPIR-V `OpString`, but only when used as an operand for an `OpExtInst`,
     /// which can't have literals itself - for non-string literals `OpConstant*`

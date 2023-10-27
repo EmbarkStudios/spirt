@@ -3,12 +3,12 @@
 use crate::func_at::FuncAt;
 use crate::qptr::{self, QPtrAttr, QPtrMemUsage, QPtrMemUsageKind, QPtrOp, QPtrUsage};
 use crate::{
-    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstCtor, ConstDef, ControlNode,
+    cfg, spv, AddrSpace, Attr, AttrSet, AttrSetDef, Const, ConstDef, ConstKind, ControlNode,
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     ControlRegionInputDecl, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef,
     DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
     GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    SelectionKind, Type, TypeCtor, TypeCtorArg, TypeDef, Value,
+    SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -311,16 +311,19 @@ impl InnerVisit for QPtrMemUsageKind {
 
 impl InnerVisit for TypeDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs, ctor, ctor_args } = self;
+        let Self { attrs, kind } = self;
 
         visitor.visit_attr_set_use(*attrs);
-        match ctor {
-            TypeCtor::QPtr | TypeCtor::SpvInst(_) | TypeCtor::SpvStringLiteralForExtInst => {}
-        }
-        for &arg in ctor_args {
-            match arg {
-                TypeCtorArg::Type(ty) => visitor.visit_type_use(ty),
-                TypeCtorArg::Const(ct) => visitor.visit_const_use(ct),
+        match kind {
+            TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => {}
+
+            TypeKind::SpvInst { spv_inst: _, type_and_const_inputs } => {
+                for &ty_or_ct in type_and_const_inputs {
+                    match ty_or_ct {
+                        TypeOrConst::Type(ty) => visitor.visit_type_use(ty),
+                        TypeOrConst::Const(ct) => visitor.visit_const_use(ct),
+                    }
+                }
             }
         }
     }
@@ -328,16 +331,19 @@ impl InnerVisit for TypeDef {
 
 impl InnerVisit for ConstDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs, ty, ctor, ctor_args } = self;
+        let Self { attrs, ty, kind } = self;
 
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ty);
-        match *ctor {
-            ConstCtor::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
-            ConstCtor::SpvInst(_) | ConstCtor::SpvStringLiteralForExtInst(_) => {}
-        }
-        for &ct in ctor_args {
-            visitor.visit_const_use(ct);
+        match kind {
+            &ConstKind::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
+            ConstKind::SpvInst { spv_inst_and_const_inputs } => {
+                let (_spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
+                for &ct in const_inputs {
+                    visitor.visit_const_use(ct);
+                }
+            }
+            ConstKind::SpvStringLiteralForExtInst(_) => {}
         }
     }
 }

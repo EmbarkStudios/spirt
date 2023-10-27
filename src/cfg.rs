@@ -1,13 +1,15 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, Const, ConstCtor, ConstDef, Context, ControlNode, ControlNodeDef,
+    spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef, EntityList,
-    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeCtor,
-    TypeDef, Value,
+    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeKind,
+    Value,
 };
+use itertools::Either;
 use smallvec::SmallVec;
 use std::mem;
+use std::rc::Rc;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
 /// ([`ControlInst`]s) attached to [`ControlRegion`]s, as an "action on exit", i.e.
@@ -128,7 +130,6 @@ mod sealed {
         }
     }
 }
-use itertools::Either;
 use sealed::IncomingEdgeCount;
 
 struct TraversalState<PreVisit: FnMut(ControlRegion), PostVisit: FnMut(ControlRegion)> {
@@ -544,22 +545,29 @@ impl<'a> Structurizer<'a> {
     pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
         // FIXME(eddyb) SPIR-T should have native booleans itself.
         let wk = &spv::spec::Spec::get().well_known;
-        let type_bool = cx.intern(TypeDef {
-            attrs: AttrSet::default(),
-            ctor: TypeCtor::SpvInst(wk.OpTypeBool.into()),
-            ctor_args: [].into_iter().collect(),
+        let type_bool = cx.intern(TypeKind::SpvInst {
+            spv_inst: wk.OpTypeBool.into(),
+            type_and_const_inputs: [].into_iter().collect(),
         });
         let const_true = cx.intern(ConstDef {
             attrs: AttrSet::default(),
             ty: type_bool,
-            ctor: ConstCtor::SpvInst(wk.OpConstantTrue.into()),
-            ctor_args: [].into_iter().collect(),
+            kind: ConstKind::SpvInst {
+                spv_inst_and_const_inputs: Rc::new((
+                    wk.OpConstantTrue.into(),
+                    [].into_iter().collect(),
+                )),
+            },
         });
         let const_false = cx.intern(ConstDef {
             attrs: AttrSet::default(),
             ty: type_bool,
-            ctor: ConstCtor::SpvInst(wk.OpConstantFalse.into()),
-            ctor_args: [].into_iter().collect(),
+            kind: ConstKind::SpvInst {
+                spv_inst_and_const_inputs: Rc::new((
+                    wk.OpConstantFalse.into(),
+                    [].into_iter().collect(),
+                )),
+            },
         });
 
         let (loop_header_to_exit_targets, incoming_edge_counts_including_loop_exits) =
@@ -1435,8 +1443,9 @@ impl<'a> Structurizer<'a> {
         self.cx.intern(ConstDef {
             attrs: AttrSet::default(),
             ty,
-            ctor: ConstCtor::SpvInst(wk.OpUndef.into()),
-            ctor_args: [].into_iter().collect(),
+            kind: ConstKind::SpvInst {
+                spv_inst_and_const_inputs: Rc::new((wk.OpUndef.into(), [].into_iter().collect())),
+            },
         })
     }
 }
