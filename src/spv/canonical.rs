@@ -8,8 +8,9 @@
 // FIXME(eddyb) should interning attempts check/apply these canonicalizations?
 
 use crate::spv::{self, spec};
-use crate::{scalar, ConstKind, Context, DataInstKind, Type, TypeKind};
+use crate::{scalar, vector, Const, ConstKind, Context, DataInstKind, Type, TypeKind, TypeOrConst};
 use lazy_static::lazy_static;
+use smallvec::SmallVec;
 
 // FIXME(eddyb) these ones could maybe make use of build script generation.
 macro_rules! def_mappable_ops {
@@ -65,6 +66,7 @@ def_mappable_ops! {
         OpTypeBool,
         OpTypeInt,
         OpTypeFloat,
+        OpTypeVector,
     }
     const {
         OpUndef,
@@ -249,55 +251,86 @@ impl spv::Inst {
 
     // FIXME(eddyb) automate bidirectional mappings more (although the need
     // for conditional, i.e. "partial", mappings, adds a lot of complexity).
-    pub(super) fn as_canonical_type(&self) -> Option<TypeKind> {
+    pub(super) fn as_canonical_type(
+        &self,
+        cx: &Context,
+        type_and_const_inputs: &[TypeOrConst],
+    ) -> Option<TypeKind> {
         let Self { opcode, imms } = self;
         let (&opcode, imms) = (opcode, &imms[..]);
 
         let mo = MappableOps::get();
 
         let int_width = || scalar::IntWidth::try_from_bits(self.int_or_float_type_bit_width()?);
-        match imms {
-            [] if opcode == mo.OpTypeBool => Some(scalar::Type::Bool.into()),
-            &[_, spv::Imm::Short(_, 0)] if opcode == mo.OpTypeInt => {
+        match (imms, type_and_const_inputs) {
+            ([], []) if opcode == mo.OpTypeBool => Some(scalar::Type::Bool.into()),
+            (&[_, spv::Imm::Short(_, 0)], []) if opcode == mo.OpTypeInt => {
                 Some(scalar::Type::UInt(int_width()?).into())
             }
-            &[_, spv::Imm::Short(_, 1)] if opcode == mo.OpTypeInt => {
+            (&[_, spv::Imm::Short(_, 1)], []) if opcode == mo.OpTypeInt => {
                 Some(scalar::Type::SInt(int_width()?).into())
             }
-            [_] if opcode == mo.OpTypeFloat => Some(
+            ([_], []) if opcode == mo.OpTypeFloat => Some(
                 scalar::Type::Float(scalar::FloatWidth::try_from_bits(
                     self.int_or_float_type_bit_width()?,
                 )?)
                 .into(),
             ),
+            (&[spv::Imm::Short(_, elem_count)], &[TypeOrConst::Type(elem_type)])
+                if opcode == mo.OpTypeVector =>
+            {
+                Some(
+                    vector::Type {
+                        elem: elem_type.as_scalar(cx)?,
+                        elem_count: u8::try_from(elem_count).ok()?.try_into().ok()?,
+                    }
+                    .into(),
+                )
+            }
             _ => None,
         }
     }
 
-    pub(super) fn from_canonical_type(type_kind: &TypeKind) -> Option<Self> {
+    pub(super) fn from_canonical_type(
+        cx: &Context,
+        type_kind: &TypeKind,
+    ) -> Option<(Self, SmallVec<[TypeOrConst; 2]>)> {
         let wk = &spec::Spec::get().well_known;
         let mo = MappableOps::get();
 
         match type_kind {
-            &TypeKind::Scalar(ty) => match ty {
-                scalar::Type::Bool => Some(mo.OpTypeBool.into()),
-                scalar::Type::SInt(w) | scalar::Type::UInt(w) => Some(spv::Inst {
-                    opcode: mo.OpTypeInt,
-                    imms: [
-                        spv::Imm::Short(wk.LiteralInteger, w.bits()),
-                        spv::Imm::Short(
-                            wk.LiteralInteger,
-                            matches!(ty, scalar::Type::SInt(_)) as u32,
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                }),
-                scalar::Type::Float(w) => Some(spv::Inst {
-                    opcode: mo.OpTypeFloat,
-                    imms: [spv::Imm::Short(wk.LiteralInteger, w.bits())].into_iter().collect(),
-                }),
-            },
+            &TypeKind::Scalar(ty) => Some((
+                match ty {
+                    scalar::Type::Bool => mo.OpTypeBool.into(),
+                    scalar::Type::SInt(w) | scalar::Type::UInt(w) => spv::Inst {
+                        opcode: mo.OpTypeInt,
+                        imms: [
+                            spv::Imm::Short(wk.LiteralInteger, w.bits()),
+                            spv::Imm::Short(
+                                wk.LiteralInteger,
+                                matches!(ty, scalar::Type::SInt(_)) as u32,
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                    scalar::Type::Float(w) => spv::Inst {
+                        opcode: mo.OpTypeFloat,
+                        imms: [spv::Imm::Short(wk.LiteralInteger, w.bits())].into_iter().collect(),
+                    },
+                },
+                [].into_iter().collect(),
+            )),
+
+            TypeKind::Vector(ty) => Some((
+                spv::Inst {
+                    opcode: mo.OpTypeVector,
+                    imms: [spv::Imm::Short(wk.LiteralInteger, ty.elem_count.get().into())]
+                        .into_iter()
+                        .collect(),
+                },
+                [TypeOrConst::Type(cx.intern(ty.elem))].into_iter().collect(),
+            )),
 
             TypeKind::QPtr | TypeKind::SpvInst { .. } | TypeKind::SpvStringLiteralForExtInst => {
                 None
@@ -313,33 +346,60 @@ impl spv::Inst {
 
     // FIXME(eddyb) automate bidirectional mappings more (although the need
     // for conditional, i.e. "partial", mappings, adds a lot of complexity).
-    pub(super) fn as_canonical_const(&self, cx: &Context, ty: Type) -> Option<ConstKind> {
+    pub(super) fn as_canonical_const(
+        &self,
+        cx: &Context,
+        ty: Type,
+        const_inputs: &[Const],
+    ) -> Option<ConstKind> {
         let Self { opcode, imms } = self;
         let (&opcode, imms) = (opcode, &imms[..]);
 
+        let wk = &spec::Spec::get().well_known;
         let mo = MappableOps::get();
 
-        match imms {
-            [] if opcode == mo.OpUndef => Some(ConstKind::Undef),
-            [] if opcode == mo.OpConstantFalse => Some(scalar::Const::FALSE.into()),
-            [] if opcode == mo.OpConstantTrue => Some(scalar::Const::TRUE.into()),
-            _ if opcode == mo.OpConstant => {
+        match (imms, const_inputs) {
+            ([], []) if opcode == mo.OpUndef => Some(ConstKind::Undef),
+            ([], []) if opcode == mo.OpConstantFalse => Some(scalar::Const::FALSE.into()),
+            ([], []) if opcode == mo.OpConstantTrue => Some(scalar::Const::TRUE.into()),
+            (_, []) if opcode == mo.OpConstant => {
                 Some(scalar::Const::try_decode_from_spv_imms(ty.as_scalar(cx)?, imms)?.into())
+            }
+            _ if opcode == wk.OpConstantComposite => {
+                let ty = ty.as_vector(cx)?;
+                let elems = (const_inputs.len() == usize::from(ty.elem_count.get())
+                    && const_inputs.iter().all(|ct| ct.as_scalar(cx).is_some()))
+                .then(|| const_inputs.iter().map(|ct| *ct.as_scalar(cx).unwrap()))?;
+                Some(vector::Const::from_elems(ty, elems).into())
             }
             _ => None,
         }
     }
 
-    pub(super) fn from_canonical_const(const_kind: &ConstKind) -> Option<Self> {
+    pub(super) fn from_canonical_const(
+        cx: &Context,
+        const_kind: &ConstKind,
+    ) -> Option<(Self, SmallVec<[Const; 4]>)> {
+        let wk = &spec::Spec::get().well_known;
         let mo = MappableOps::get();
 
         match const_kind {
-            ConstKind::Undef => Some(mo.OpUndef.into()),
-            ConstKind::Scalar(scalar::Const::FALSE) => Some(mo.OpConstantFalse.into()),
-            ConstKind::Scalar(scalar::Const::TRUE) => Some(mo.OpConstantTrue.into()),
-            ConstKind::Scalar(ct) => {
-                Some(spv::Inst { opcode: mo.OpConstant, imms: ct.encode_as_spv_imms().collect() })
-            }
+            ConstKind::Undef => Some((mo.OpUndef.into(), [].into_iter().collect())),
+            &ConstKind::Scalar(ct) => Some((
+                match ct {
+                    scalar::Const::FALSE => mo.OpConstantFalse.into(),
+                    scalar::Const::TRUE => mo.OpConstantTrue.into(),
+                    _ => {
+                        spv::Inst { opcode: mo.OpConstant, imms: ct.encode_as_spv_imms().collect() }
+                    }
+                },
+                [].into_iter().collect(),
+            )),
+
+            ConstKind::Vector(ct) => Some((
+                wk.OpConstantComposite.into(),
+                ct.elems().map(|elem| cx.intern(elem)).collect(),
+            )),
 
             ConstKind::PtrToGlobalVar(_)
             | ConstKind::SpvInst { .. }

@@ -117,7 +117,6 @@ def_well_known! {
         OpNoLine,
 
         OpTypeVoid,
-        OpTypeVector,
         OpTypeMatrix,
         OpTypeArray,
         OpTypeRuntimeArray,
@@ -129,6 +128,8 @@ def_well_known! {
         OpTypeSampler,
         OpTypeSampledImage,
         OpTypeAccelerationStructureKHR,
+
+        OpConstantComposite,
 
         OpVariable,
 

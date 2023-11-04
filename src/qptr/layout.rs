@@ -335,6 +335,21 @@ impl<'a> LayoutCache<'a> {
             }
             TypeKind::Scalar(ty) => return Ok(scalar(ty.bit_width())),
 
+            TypeKind::Vector(ty) => {
+                let len = u32::from(ty.elem_count.get());
+                return array(
+                    cx.intern(ty.elem),
+                    ArrayParams {
+                        fixed_len: Some(len),
+                        known_stride: None,
+
+                        // NOTE(eddyb) this is specifically Vulkan "base alignment".
+                        min_legacy_align: 1,
+                        legacy_align_multiplier: if len <= 2 { 2 } else { 4 },
+                    },
+                );
+            }
+
             // FIXME(eddyb) treat `QPtr`s as scalars.
             TypeKind::QPtr => {
                 return Err(LayoutError(Diag::bug(
@@ -359,15 +374,7 @@ impl<'a> LayoutCache<'a> {
             // FIXME(eddyb) categorize `OpTypePointer` by storage class and split on
             // logical vs physical here.
             scalar_with_size_and_align(self.config.logical_ptr_size_align)
-        } else if [wk.OpTypeVector, wk.OpTypeMatrix].contains(&spv_inst.opcode) {
-            let len = short_imm_at(0);
-            let (min_legacy_align, legacy_align_multiplier) = if spv_inst.opcode == wk.OpTypeVector
-            {
-                // NOTE(eddyb) this is specifically Vulkan "base alignment".
-                (1, if len <= 2 { 2 } else { 4 })
-            } else {
-                (self.config.min_aggregate_legacy_align, 1)
-            };
+        } else if spv_inst.opcode == wk.OpTypeMatrix {
             // NOTE(eddyb) `RowMajor` is disallowed on `OpTypeStruct` members below.
             array(
                 match type_and_const_inputs[..] {
@@ -375,10 +382,10 @@ impl<'a> LayoutCache<'a> {
                     _ => unreachable!(),
                 },
                 ArrayParams {
-                    fixed_len: Some(len),
+                    fixed_len: Some(short_imm_at(0)),
                     known_stride: None,
-                    min_legacy_align,
-                    legacy_align_multiplier,
+                    min_legacy_align: self.config.min_aggregate_legacy_align,
+                    legacy_align_multiplier: 1,
                 },
             )?
         } else if [wk.OpTypeArray, wk.OpTypeRuntimeArray].contains(&spv_inst.opcode) {

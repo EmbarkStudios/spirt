@@ -589,15 +589,9 @@ impl Module {
 
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    kind: match inst.as_canonical_type() {
-                        Some(type_kind) => {
-                            assert_eq!(type_and_const_inputs.len(), 0);
-                            type_kind
-                        }
-                        None => {
-                            TypeKind::SpvInst { spv_inst: inst.without_ids, type_and_const_inputs }
-                        }
-                    },
+                    kind: inst.as_canonical_type(&cx, &type_and_const_inputs).unwrap_or(
+                        TypeKind::SpvInst { spv_inst: inst.without_ids, type_and_const_inputs },
+                    ),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
@@ -626,15 +620,11 @@ impl Module {
                 let ct = cx.intern(ConstDef {
                     attrs: mem::take(&mut attrs),
                     ty,
-                    kind: match inst.as_canonical_const(&cx, ty) {
-                        Some(const_kind) => {
-                            assert_eq!(const_inputs.len(), 0);
-                            const_kind
-                        }
-                        None => ConstKind::SpvInst {
+                    kind: inst.as_canonical_const(&cx, ty, &const_inputs).unwrap_or_else(|| {
+                        ConstKind::SpvInst {
                             spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
-                        },
-                    },
+                        }
+                    }),
                 });
                 id_defs.insert(id, IdDef::Const(ct));
 
