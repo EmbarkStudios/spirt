@@ -404,7 +404,7 @@ impl LiftToSpvPtrInstsInFunc<'_> {
             Ok((addr_space, self.lifter.layout_of(pointee_type)?))
         };
         let replacement_data_inst_def = match &data_inst_form_def.kind {
-            DataInstKind::Scalar(_) => return Ok(Transformed::Unchanged),
+            DataInstKind::Scalar(_) | DataInstKind::Vector(_) => return Ok(Transformed::Unchanged),
 
             &DataInstKind::FuncCall(_callee) => {
                 for &v in &data_inst_def.inputs {

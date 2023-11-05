@@ -987,6 +987,12 @@ pub enum DataInstKind {
     #[from]
     Scalar(scalar::Op),
 
+    /// Vector (small array of [`scalar`]s) pure operations.
+    ///
+    /// See also the [`vector`] module for more documentation and definitions.
+    #[from]
+    Vector(vector::Op),
+
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),

@@ -17,12 +17,14 @@ macro_rules! def_mappable_ops {
     (
         type { $($ty_op:ident),+ $(,)? }
         const { $($ct_op:ident),+ $(,)? }
+        data_inst { $($di_op:ident),+ $(,)? }
         $($enum_path:path { $($variant_op:ident <=> $variant:ident$(($($variant_args:tt)*))?),+ $(,)? })*
     ) => {
         #[allow(non_snake_case)]
         struct MappableOps {
             $($ty_op: spec::Opcode,)+
             $($ct_op: spec::Opcode,)+
+            $($di_op: spec::Opcode,)+
             $($($variant_op: spec::Opcode,)+)*
         }
         impl MappableOps {
@@ -35,6 +37,7 @@ macro_rules! def_mappable_ops {
                         MappableOps {
                             $($ty_op: spv_spec.instructions.lookup(stringify!($ty_op)).unwrap(),)+
                             $($ct_op: spv_spec.instructions.lookup(stringify!($ct_op)).unwrap(),)+
+                            $($di_op: spv_spec.instructions.lookup(stringify!($di_op)).unwrap(),)+
                             $($($variant_op: spv_spec.instructions.lookup(stringify!($variant_op)).unwrap(),)+)*
                         }
                     };
@@ -73,6 +76,11 @@ def_mappable_ops! {
         OpConstantFalse,
         OpConstantTrue,
         OpConstant,
+    }
+    data_inst {
+        OpVectorExtractDynamic,
+        OpVectorInsertDynamic,
+        OpVectorTimesScalar,
     }
     scalar::BoolUnOp {
         OpLogicalNot <=> Not,
@@ -163,6 +171,11 @@ def_mappable_ops! {
         OpFUnordGreaterThan <=> CmpOrUnord(scalar::FloatCmp::Gt),
         OpFUnordLessThanEqual <=> CmpOrUnord(scalar::FloatCmp::Le),
         OpFUnordGreaterThanEqual <=> CmpOrUnord(scalar::FloatCmp::Ge),
+    }
+    vector::ReduceOp {
+        OpDot <=> Dot,
+        OpAny <=> Any,
+        OpAll <=> All,
     }
 }
 
@@ -424,16 +437,46 @@ impl spv::Inst {
         if let Some(op) = scalar_op {
             assert_eq!(imms.len(), 0);
 
-            // FIXME(eddyb) support vector versions of these ops as well.
-            if output_types.len() == op.output_count()
-                && output_types.iter().all(|ty| ty.as_scalar(cx).is_some())
-            {
-                Some(op.into())
+            let (_scalar_type, vec_elem_count) = (output_types.len() == op.output_count())
+                .then(|| {
+                    output_types.iter().map(|&ty| match cx[ty].kind {
+                        TypeKind::Scalar(ty) => Some((ty, None)),
+                        TypeKind::Vector(ty) => Some((ty.elem, Some(ty.elem_count))),
+                        _ => None,
+                    })
+                })
+                .and_then(|mut outputs| {
+                    let first = outputs.next().unwrap()?;
+                    outputs.all(|x| x == Some(first)).then_some(first)
+                })?;
+
+            Some(if vec_elem_count.is_some() {
+                vector::Op::Distribute(op).into()
             } else {
-                None
-            }
+                op.into()
+            })
+        } else if let Some(op) = vector::ReduceOp::try_from_opcode(opcode).map(vector::Op::from) {
+            assert_eq!(imms.len(), 0);
+            Some(op.into())
         } else {
-            None
+            let wk = &spec::Spec::get().well_known;
+            let mo = MappableOps::get();
+
+            // FIXME(eddyb) automate this by supporting immediates in the macro.
+            let v_whole = |op| Some(vector::Op::Whole(op).into());
+            match imms {
+                [] if opcode == wk.OpCompositeConstruct => v_whole(vector::WholeOp::New),
+                &[spv::Imm::Short(_, elem_idx)] if opcode == wk.OpCompositeExtract => {
+                    v_whole(vector::WholeOp::Extract { elem_idx: elem_idx.try_into().ok()? })
+                }
+                &[spv::Imm::Short(_, elem_idx)] if opcode == wk.OpCompositeInsert => {
+                    v_whole(vector::WholeOp::Insert { elem_idx: elem_idx.try_into().ok()? })
+                }
+                [] if opcode == mo.OpVectorExtractDynamic => v_whole(vector::WholeOp::DynExtract),
+                [] if opcode == mo.OpVectorInsertDynamic => v_whole(vector::WholeOp::DynInsert),
+                [] if opcode == mo.OpVectorTimesScalar => v_whole(vector::WholeOp::Mul),
+                _ => None,
+            }
         }
     }
 
@@ -447,7 +490,40 @@ impl spv::Inst {
                 scalar::Op::FloatUnary(op) => op.to_opcode().into(),
                 scalar::Op::FloatBinary(op) => op.to_opcode().into(),
             }),
-            _ => None,
+            &DataInstKind::Vector(op) => Some(match op {
+                vector::Op::Distribute(op) => {
+                    Self::from_canonical_data_inst_kind(&DataInstKind::Scalar(op)).unwrap()
+                }
+                vector::Op::Reduce(op) => op.to_opcode().into(),
+                vector::Op::Whole(op) => {
+                    let wk = &spec::Spec::get().well_known;
+                    let mo = MappableOps::get();
+
+                    // FIXME(eddyb) automate this by supporting immediates in the macro.
+                    match op {
+                        vector::WholeOp::New => wk.OpCompositeConstruct.into(),
+                        vector::WholeOp::Extract { elem_idx } => spv::Inst {
+                            opcode: wk.OpCompositeExtract,
+                            imms: [spv::Imm::Short(wk.LiteralInteger, elem_idx.into())]
+                                .into_iter()
+                                .collect(),
+                        },
+                        vector::WholeOp::Insert { elem_idx } => spv::Inst {
+                            opcode: wk.OpCompositeInsert,
+                            imms: [spv::Imm::Short(wk.LiteralInteger, elem_idx.into())]
+                                .into_iter()
+                                .collect(),
+                        },
+                        vector::WholeOp::DynExtract => mo.OpVectorExtractDynamic.into(),
+                        vector::WholeOp::DynInsert => mo.OpVectorInsertDynamic.into(),
+                        vector::WholeOp::Mul => mo.OpVectorTimesScalar.into(),
+                    }
+                }
+            }),
+            DataInstKind::FuncCall(_)
+            | DataInstKind::QPtr(_)
+            | DataInstKind::SpvInst(..)
+            | DataInstKind::SpvExtInst { .. } => None,
         }
     }
 }

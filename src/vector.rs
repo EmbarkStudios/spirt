@@ -121,3 +121,60 @@ impl Const {
         (0..usize::from(ty.elem_count.get())).map(|i| self.get_elem(i).unwrap())
     }
 }
+
+/// Pure operations with vector inputs and/or outputs.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, derive_more::From)]
+pub enum Op {
+    Distribute(scalar::Op),
+    Reduce(ReduceOp),
+
+    // FIXME(eddyb) find a better name for this category of ops.
+    Whole(WholeOp),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum ReduceOp {
+    // FIXME(eddyb) also support all the new integer dot product instructions.
+    Dot,
+    // FIXME(eddyb) model these using their respective `BoolBinOp`s?
+    Any,
+    All,
+}
+
+impl ReduceOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReduceOp::Dot => "vec.dot",
+            ReduceOp::Any => "vec.any",
+            ReduceOp::All => "vec.all",
+        }
+    }
+}
+
+// FIXME(eddyb) find a better name for this category of ops.
+// FIXME(eddyb) also support `OpVectorShuffle`.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub enum WholeOp {
+    // FIXME(eddyb) better name for this (pack? make? "construct" is too long).
+    New,
+    Extract { elem_idx: u8 },
+    Insert { elem_idx: u8 },
+    DynExtract,
+    DynInsert,
+
+    // FIXME(eddyb) may need a better name to indicate "scalar product".
+    Mul,
+}
+
+impl WholeOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            WholeOp::New => "vec.new",
+            WholeOp::Extract { .. } => "vec.extract",
+            WholeOp::Insert { .. } => "vec.insert",
+            WholeOp::DynExtract => "vec.dyn_extract",
+            WholeOp::DynInsert => "vec.dyn_insert",
+            WholeOp::Mul => "vec.mul",
+        }
+    }
+}

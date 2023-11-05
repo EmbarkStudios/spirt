@@ -254,7 +254,11 @@ impl Visitor<'_> for NeedsIdsCollector<'_> {
                 unreachable!("`DataInstKind::QPtr` should be legalized away before lifting");
             }
 
-            DataInstKind::Scalar(_) | DataInstKind::FuncCall(_) | DataInstKind::SpvInst(_) => {}
+            DataInstKind::Scalar(_)
+            | DataInstKind::Vector(_)
+            | DataInstKind::FuncCall(_)
+            | DataInstKind::SpvInst(_) => {}
+
             DataInstKind::SpvExtInst { ext_set, .. } => {
                 self.ext_inst_imports.insert(&self.cx[ext_set]);
             }
@@ -1286,7 +1290,7 @@ impl LazyInst<'_, '_> {
                     match spv::Inst::from_canonical_data_inst_kind(kind).ok_or(kind) {
                         Ok(spv_inst) => (spv_inst, None),
 
-                        Err(DataInstKind::Scalar(_)) => {
+                        Err(DataInstKind::Scalar(_) | DataInstKind::Vector(_)) => {
                             unreachable!("should've been handled as canonical")
                         }
 

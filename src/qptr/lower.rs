@@ -616,7 +616,10 @@ impl LowerFromSpvPtrInstsInFunc<'_> {
 
         match data_inst_form_def.kind {
             // Known semantics, no need to preserve SPIR-V pointer information.
-            DataInstKind::Scalar(_) | DataInstKind::FuncCall(_) | DataInstKind::QPtr(_) => return,
+            DataInstKind::Scalar(_)
+            | DataInstKind::Vector(_)
+            | DataInstKind::FuncCall(_)
+            | DataInstKind::QPtr(_) => return,
 
             DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
         }
