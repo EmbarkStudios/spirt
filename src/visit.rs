@@ -475,7 +475,7 @@ impl<'a> FuncAt<'a, ControlNode> {
                 }
             }
             ControlNodeKind::Select {
-                kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                kind: SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
                 scrutinee,
                 cases,
             } => {
@@ -556,7 +556,7 @@ impl InnerVisit for cfg::ControlInst {
             | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
             | cfg::ControlInstKind::Branch
             | cfg::ControlInstKind::SelectBranch(
-                SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
             ) => {}
         }
         for v in inputs {

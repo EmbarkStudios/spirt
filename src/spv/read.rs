@@ -173,11 +173,8 @@ impl InstParser<'_> {
                     .and_then(|id| self.known_ids.get(&id))
                     .ok_or(Error::MissingContextSensitiveLiteralType)?;
 
-                let extra_word_count = match *contextual_type {
-                    KnownIdDef::TypeIntOrFloat(width) => {
-                        // HACK(eddyb) `(width + 31) / 32 - 1` but without overflow.
-                        (width.get() - 1) / 32
-                    }
+                let word_count = match *contextual_type {
+                    KnownIdDef::TypeIntOrFloat(width) => width.get().div_ceil(32),
                     KnownIdDef::Uncategorized { opcode, .. } => {
                         return Err(Error::UnsupportedContextSensitiveLiteralType {
                             type_opcode: opcode,
@@ -185,11 +182,11 @@ impl InstParser<'_> {
                     }
                 };
 
-                if extra_word_count == 0 {
+                if word_count == 1 {
                     self.inst.imms.push(spv::Imm::Short(kind, word));
                 } else {
                     self.inst.imms.push(spv::Imm::LongStart(kind, word));
-                    for _ in 0..extra_word_count {
+                    for _ in 1..word_count {
                         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
                         self.inst.imms.push(spv::Imm::LongCont(kind, word));
                     }
