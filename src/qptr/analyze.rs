@@ -901,8 +901,21 @@ impl<'a> InferUsage<'a> {
                             ConstKind::PtrToGlobalVar(gv) => {
                                 this.global_var_usages.entry(gv).or_default()
                             }
-                            // FIXME(eddyb) may be relevant?
-                            _ => unreachable!(),
+                            // FIXME(eddyb) attach on the `Const` by replacing
+                            // it with a copy that also has an extra attribute,
+                            // or actually support by adding the usage attribute
+                            // in the same manner (if it makes sense to do so).
+                            _ => {
+                                usage_or_err_attrs_to_attach.push((
+                                    Value::DataInstOutput(data_inst),
+                                    Err(AnalysisError(Diag::bug([
+                                        "unsupported pointer constant `".into(),
+                                        ct.into(),
+                                        "`".into(),
+                                    ]))),
+                                ));
+                                return;
+                            }
                         },
                         Value::ControlRegionInput { region, input_idx }
                             if region == func_def_body.body =>
