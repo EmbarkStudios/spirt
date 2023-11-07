@@ -640,7 +640,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
                 }
             }
             ControlNodeKind::Select {
-                kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                kind: SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
                 scrutinee,
                 cases: _,
             } => {
@@ -747,7 +747,7 @@ impl InnerInPlaceTransform for cfg::ControlInst {
             | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
             | cfg::ControlInstKind::Branch
             | cfg::ControlInstKind::SelectBranch(
-                SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
             ) => {}
         }
         for v in inputs {

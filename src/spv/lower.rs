@@ -3,11 +3,11 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, ControlNodeDef,
-    ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
-    DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList, ExportKey, Exportee,
-    Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
-    InternedStr, Module, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
+    cfg, print, scalar, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context,
+    ControlNodeDef, ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl,
+    DataInstDef, DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList, ExportKey,
+    Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody,
+    Import, InternedStr, Module, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -83,6 +83,20 @@ struct IntraFuncInst {
 // FIXME(eddyb) stop abusing `io::Error` for error reporting.
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("malformed SPIR-V ({reason})"))
+}
+
+fn invalid_factory_for_spv_inst(
+    inst: &spv::Inst,
+    result_id: Option<spv::Id>,
+    ids: &[spv::Id],
+) -> impl Fn(&str) -> io::Error {
+    let opcode = inst.opcode;
+    let first_id_operand = ids.first().copied();
+    move |msg: &str| {
+        let result_prefix = result_id.map(|id| format!("%{id} = ")).unwrap_or_default();
+        let operand_suffix = first_id_operand.map(|id| format!(" %{id} ...")).unwrap_or_default();
+        invalid(&format!("in {result_prefix}{}{operand_suffix}: {msg}", opcode.name()))
+    }
 }
 
 // FIXME(eddyb) provide more information about any normalization that happened:
@@ -195,7 +209,7 @@ impl Module {
         while let Some(mut inst) = spv_insts.next().transpose()? {
             let opcode = inst.opcode;
 
-            let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+            let invalid = invalid_factory_for_spv_inst(&inst, inst.result_id, &inst.ids);
 
             // Handle line debuginfo early, as it doesn't have its own section,
             // but rather can go almost anywhere among globals and functions.
@@ -861,7 +875,7 @@ impl Module {
 
             #[derive(Copy, Clone)]
             enum LocalIdDef {
-                Value(Value),
+                Value(Type, Value),
                 BlockLabel(ControlRegion),
             }
 
@@ -889,6 +903,7 @@ impl Module {
                     let IntraFuncInst {
                         without_ids: spv::Inst { opcode, ref imms },
                         result_id,
+                        result_type,
                         ..
                     } = *raw_inst;
 
@@ -903,10 +918,10 @@ impl Module {
 
                                 DeclDef::Present(def) => def.body,
                             };
-                            LocalIdDef::Value(Value::ControlRegionInput {
-                                region: body,
-                                input_idx: idx,
-                            })
+                            LocalIdDef::Value(
+                                result_type.unwrap(),
+                                Value::ControlRegionInput { region: body, input_idx: idx },
+                            )
                         } else {
                             let is_entry_block = !has_blocks;
                             has_blocks = true;
@@ -957,10 +972,13 @@ impl Module {
                                         .push(value_id);
                                 }
 
-                                LocalIdDef::Value(Value::ControlRegionInput {
-                                    region: current_block,
-                                    input_idx: phi_idx,
-                                })
+                                LocalIdDef::Value(
+                                    result_type.unwrap(),
+                                    Value::ControlRegionInput {
+                                        region: current_block,
+                                        input_idx: phi_idx,
+                                    },
+                                )
                             } else {
                                 // HACK(eddyb) can't get a `DataInst` without
                                 // defining it (as a dummy) first.
@@ -974,7 +992,7 @@ impl Module {
                                     }
                                     .into(),
                                 );
-                                LocalIdDef::Value(Value::DataInstOutput(inst))
+                                LocalIdDef::Value(result_type.unwrap(), Value::DataInstOutput(inst))
                             }
                         };
                         local_id_defs.insert(id, local_id_def);
@@ -1023,50 +1041,52 @@ impl Module {
                     ref ids,
                 } = *raw_inst;
 
-                let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+                let invalid = invalid_factory_for_spv_inst(&raw_inst.without_ids, result_id, ids);
 
                 // FIXME(eddyb) find a more compact name and/or make this a method.
                 // FIXME(eddyb) this returns `LocalIdDef` even for global values.
-                let lookup_global_or_local_id_for_data_or_control_inst_input =
-                    |id| match id_defs.get(&id) {
-                        Some(&IdDef::Const(ct)) => Ok(LocalIdDef::Value(Value::Const(ct))),
-                        Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
-                            "unsupported use of {} as an operand for \
+                let lookup_global_or_local_id_for_data_or_control_inst_input = |id| match id_defs
+                    .get(&id)
+                {
+                    Some(&IdDef::Const(ct)) => Ok(LocalIdDef::Value(cx[ct].ty, Value::Const(ct))),
+                    Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
+                        "unsupported use of {} as an operand for \
                              an instruction in a function",
-                            id_def.descr(&cx),
-                        ))),
-                        Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
-                            "unsupported use of {} outside `OpFunctionCall`",
-                            id_def.descr(&cx),
-                        ))),
-                        Some(id_def @ IdDef::SpvDebugString(s)) => {
-                            if opcode == wk.OpExtInst {
-                                // HACK(eddyb) intern `OpString`s as `Const`s on
-                                // the fly, as it's a less likely usage than the
-                                // `OpLine` one.
-                                let ct = cx.intern(ConstDef {
-                                    attrs: AttrSet::default(),
-                                    ty: cx.intern(TypeKind::SpvStringLiteralForExtInst),
-                                    kind: ConstKind::SpvStringLiteralForExtInst(*s),
-                                });
-                                Ok(LocalIdDef::Value(Value::Const(ct)))
-                            } else {
-                                Err(invalid(&format!(
-                                    "unsupported use of {} outside `OpSource`, \
+                        id_def.descr(&cx),
+                    ))),
+                    Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
+                        "unsupported use of {} outside `OpFunctionCall`",
+                        id_def.descr(&cx),
+                    ))),
+                    Some(id_def @ IdDef::SpvDebugString(s)) => {
+                        if opcode == wk.OpExtInst {
+                            // HACK(eddyb) intern `OpString`s as `Const`s on
+                            // the fly, as it's a less likely usage than the
+                            // `OpLine` one.
+                            let ty = cx.intern(TypeKind::SpvStringLiteralForExtInst);
+                            let ct = cx.intern(ConstDef {
+                                attrs: AttrSet::default(),
+                                ty,
+                                kind: ConstKind::SpvStringLiteralForExtInst(*s),
+                            });
+                            Ok(LocalIdDef::Value(ty, Value::Const(ct)))
+                        } else {
+                            Err(invalid(&format!(
+                                "unsupported use of {} outside `OpSource`, \
                                      `OpLine`, or `OpExtInst`",
-                                    id_def.descr(&cx),
-                                )))
-                            }
+                                id_def.descr(&cx),
+                            )))
                         }
-                        Some(id_def @ IdDef::SpvExtInstImport(_)) => Err(invalid(&format!(
-                            "unsupported use of {} outside `OpExtInst`",
-                            id_def.descr(&cx),
-                        ))),
-                        None => local_id_defs
-                            .get(&id)
-                            .copied()
-                            .ok_or_else(|| invalid(&format!("undefined ID %{id}",))),
-                    };
+                    }
+                    Some(id_def @ IdDef::SpvExtInstImport(_)) => Err(invalid(&format!(
+                        "unsupported use of {} outside `OpExtInst`",
+                        id_def.descr(&cx),
+                    ))),
+                    None => local_id_defs
+                        .get(&id)
+                        .copied()
+                        .ok_or_else(|| invalid(&format!("undefined ID %{id}",))),
+                };
 
                 if opcode == wk.OpFunctionParameter {
                     if current_block_control_region_and_details.is_some() {
@@ -1104,7 +1124,7 @@ impl Module {
                     // to be able to have an entry in `local_id_defs`.
                     let control_region = match local_id_defs[&result_id.unwrap()] {
                         LocalIdDef::BlockLabel(control_region) => control_region,
-                        LocalIdDef::Value(_) => unreachable!(),
+                        LocalIdDef::Value(..) => unreachable!(),
                     };
                     let current_block_details = &block_details[&control_region];
                     assert_eq!(current_block_details.label_id, result_id.unwrap());
@@ -1140,7 +1160,7 @@ impl Module {
                     };
                     let phi_value_id_to_value = |phi_key: &PhiKey, id| {
                         match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
-                            LocalIdDef::Value(v) => Ok(v),
+                            LocalIdDef::Value(_, v) => Ok(v),
                             LocalIdDef::BlockLabel { .. } => Err(invalid(&format!(
                                 "unsupported use of block label as the value for {}",
                                 descr_phi_case(phi_key)
@@ -1191,10 +1211,11 @@ impl Module {
                     // Split the operands into value inputs (e.g. a branch's
                     // condition or an `OpSwitch`'s selector) and target blocks.
                     let mut inputs = SmallVec::new();
+                    let mut input_types = SmallVec::<[_; 2]>::new();
                     let mut targets = SmallVec::new();
                     for &id in ids {
                         match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
-                            LocalIdDef::Value(v) => {
+                            LocalIdDef::Value(ty, v) => {
                                 if !targets.is_empty() {
                                     return Err(invalid(
                                         "out of order: value operand \
@@ -1202,6 +1223,7 @@ impl Module {
                                     ));
                                 }
                                 inputs.push(v);
+                                input_types.push(ty);
                             }
                             LocalIdDef::BlockLabel(target) => {
                                 record_cfg_edge(target)?;
@@ -1210,6 +1232,7 @@ impl Module {
                         }
                     }
 
+                    // FIXME(eddyb) move some of this to `spv::canonical`.
                     let kind = if opcode == wk.OpUnreachable {
                         assert!(targets.is_empty() && inputs.is_empty());
                         cfg::ControlInstKind::Unreachable
@@ -1227,9 +1250,62 @@ impl Module {
                         assert_eq!((targets.len(), inputs.len()), (2, 1));
                         cfg::ControlInstKind::SelectBranch(SelectionKind::BoolCond)
                     } else if opcode == wk.OpSwitch {
-                        cfg::ControlInstKind::SelectBranch(SelectionKind::SpvInst(
-                            raw_inst.without_ids.clone(),
-                        ))
+                        assert_eq!(inputs.len(), 1);
+
+                        // HACK(eddyb) `spv::read` has to "redundantly" validate
+                        // that such a type is `OpTypeInt`/`OpTypeFloat`, but
+                        // there is still a limitation when it comes to `scalar::Const`.
+                        // FIXME(eddyb) don't hardcode the 128-bit limitation,
+                        // but query `scalar::Const` somehow instead.
+                        let scrutinee_type = input_types[0];
+                        let scrutinee_type = scrutinee_type
+                            .as_scalar(&cx)
+                            .filter(|ty| {
+                                matches!(ty, scalar::Type::UInt(_) | scalar::Type::SInt(_))
+                                    && ty.bit_width() <= 128
+                            })
+                            .ok_or_else(|| {
+                                invalid(
+                                    &print::Plan::for_root(
+                                        &cx,
+                                        &Diag::err([
+                                            "unsupported `OpSwitch` scrutinee type `".into(),
+                                            scrutinee_type.into(),
+                                            "`".into(),
+                                        ])
+                                        .message,
+                                    )
+                                    .pretty_print()
+                                    .to_string(),
+                                )
+                            })?;
+
+                        // FIXME(eddyb) move some of this to `spv::canonical`.
+                        let imm_words_per_case =
+                            usize::try_from(scrutinee_type.bit_width().div_ceil(32)).unwrap();
+
+                        // NOTE(eddyb) these sanity-checks are redundant with `spv::read`.
+                        assert_eq!(imms.len() % imm_words_per_case, 0);
+                        assert_eq!(targets.len(), 1 + imms.len() / imm_words_per_case);
+
+                        let case_consts = imms
+                            .chunks(imm_words_per_case)
+                            .map(|case_imms| {
+                                scalar::Const::try_decode_from_spv_imms(scrutinee_type, case_imms)
+                                    .ok_or_else(|| {
+                                        invalid(&format!(
+                                            "invalid {}-bit `OpSwitch` case constant",
+                                            scrutinee_type.bit_width()
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?;
+
+                        // HACK(eddyb) move the default case from first to last.
+                        let default_target = targets.remove(0);
+                        targets.push(default_target);
+
+                        cfg::ControlInstKind::SelectBranch(SelectionKind::Switch { case_consts })
                     } else {
                         return Err(invalid("unsupported control-flow instruction"));
                     };
@@ -1274,7 +1350,7 @@ impl Module {
                         let loop_merge_target =
                             match lookup_global_or_local_id_for_data_or_control_inst_input(ids[0])?
                             {
-                                LocalIdDef::Value(_) => return Err(invalid("expected label ID")),
+                                LocalIdDef::Value(..) => return Err(invalid("expected label ID")),
                                 LocalIdDef::BlockLabel(target) => target,
                             };
 
@@ -1373,7 +1449,7 @@ impl Module {
                             .map(|&id| {
                                 match lookup_global_or_local_id_for_data_or_control_inst_input(id)?
                                 {
-                                    LocalIdDef::Value(v) => Ok(v),
+                                    LocalIdDef::Value(_, v) => Ok(v),
                                     LocalIdDef::BlockLabel { .. } => Err(invalid(
                                         "unsupported use of block label as a value, \
                                          in non-terminator instruction",
@@ -1384,7 +1460,7 @@ impl Module {
                     };
                     let inst = match result_id {
                         Some(id) => match local_id_defs[&id] {
-                            LocalIdDef::Value(Value::DataInstOutput(inst)) => {
+                            LocalIdDef::Value(_, Value::DataInstOutput(inst)) => {
                                 // A dummy was defined earlier, to be able to
                                 // have an entry in `local_id_defs`.
                                 func_def_body.data_insts[inst] = data_inst_def.into();

@@ -165,7 +165,11 @@ def_mappable_ops! {
 }
 
 impl scalar::Const {
-    fn try_decode_from_spv_imms(ty: scalar::Type, imms: &[spv::Imm]) -> Option<scalar::Const> {
+    // HACK(eddyb) this is not private so `spv::lower` can use it for `OpSwitch`.
+    pub(super) fn try_decode_from_spv_imms(
+        ty: scalar::Type,
+        imms: &[spv::Imm],
+    ) -> Option<scalar::Const> {
         // FIXME(eddyb) don't hardcode the 128-bit limitation,
         // but query `scalar::Const` somehow instead.
         if ty.bit_width() > 128 {
@@ -198,7 +202,8 @@ impl scalar::Const {
         }
     }
 
-    fn encode_as_spv_imms(&self) -> impl Iterator<Item = spv::Imm> {
+    // HACK(eddyb) this is not private so `spv::lift` can use it for `OpSwitch`.
+    pub(super) fn encode_as_spv_imms(&self) -> impl Iterator<Item = spv::Imm> {
         let wk = &spec::Spec::get().well_known;
 
         let ty = self.ty();
