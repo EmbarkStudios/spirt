@@ -544,6 +544,11 @@ pub struct ConstDef {
 
 #[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum ConstKind {
+    /// UB has occured
+    Poison {
+        cause: String, // ???
+    },
+
     /// Undeterminate value (i.e. SPIR-V `OpUndef`, LLVM `undef`).
     //
     // FIXME(eddyb) could it be possible to adopt LLVM's newer `poison`+`freeze`
