@@ -911,7 +911,10 @@ pub enum SelectionKind {
         // than the actual width of the integer type.
         // FIXME(eddyb) consider storing this more like sorted compressed keyset,
         // as there can be no duplicates, and in many cases it may be contiguous.
-        case_consts: Vec<scalar::Const>,
+        case_consts: Vec<
+            // FIXME(eddyb) allow the same child region to be reused between cases.
+            SmallVec<[Range<scalar::Const>; 1]>,
+        >,
     },
 }
 
