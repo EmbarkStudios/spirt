@@ -7,6 +7,9 @@ use std::{fs, io, iter, slice};
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 struct OperandEmitter<'a> {
+    // FIXME(eddyb) use a field like this to interpret `Opcode`/`OperandKind`, too.
+    wk: &'static spv::spec::WellKnown,
+
     /// Input immediate operands of an instruction.
     imms: iter::Copied<slice::Iter<'a, spv::Imm>>,
 
@@ -32,6 +35,9 @@ enum OperandEmitError {
 
     /// Unsupported enumerand value.
     UnsupportedEnumerand(spec::OperandKind, u32),
+
+    /// Unsupported `OpSpecConstantOp` (`LiteralSpecConstantOpInteger`) opcode.
+    UnsupportedSpecConstantOpOpcode(u32),
 }
 
 impl OperandEmitError {
@@ -59,6 +65,9 @@ impl OperandEmitError {
 
                     _ => unreachable!(),
                 }
+            }
+            Self::UnsupportedSpecConstantOpOpcode(opcode) => {
+                format!("{opcode} is not a supported opcode (for `OpSpecConstantOp`)").into()
             }
         }
     }
@@ -137,6 +146,23 @@ impl OperandEmitter<'_> {
                     }
                     spv::Imm::LongCont(..) => unreachable!(),
                 }
+            }
+        }
+
+        // HACK(eddyb) this isn't cleanly uniform because it's an odd special case.
+        if kind == self.wk.LiteralSpecConstantOpInteger {
+            // FIXME(eddyb) this partially duplicates the main instruction emission.
+            let &word = self.out.last().unwrap();
+            let (_, _, inner_def) = u16::try_from(word)
+                .ok()
+                .and_then(spec::Opcode::try_from_u16_with_name_and_def)
+                .ok_or(Error::UnsupportedSpecConstantOpOpcode(word))?;
+
+            for (inner_mode, inner_kind) in inner_def.all_operands() {
+                if inner_mode == spec::OperandMode::Optional && self.is_exhausted() {
+                    break;
+                }
+                self.operand(inner_kind)?;
             }
         }
 
@@ -221,6 +247,7 @@ impl ModuleEmitter {
         );
 
         OperandEmitter {
+            wk: &spec::Spec::get().well_known,
             imms: inst.imms.iter().copied(),
             ids: inst.ids.iter().copied(),
             out: &mut self.words,

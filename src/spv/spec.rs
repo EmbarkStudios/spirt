@@ -175,6 +175,7 @@ def_well_known! {
         LiteralExtInstInteger,
         LiteralString,
         LiteralContextDependentNumber,
+        LiteralSpecConstantOpInteger,
     ],
     // FIXME(eddyb) find a way to namespace these to avoid conflicts.
     addressing_model: u32 = [

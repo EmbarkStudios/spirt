@@ -27,6 +27,9 @@ impl KnownIdDef {
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 struct InstParser<'a> {
+    // FIXME(eddyb) use a field like this to interpret `Opcode`/`OperandKind`, too.
+    wk: &'static spv::spec::WellKnown,
+
     /// IDs defined so far in the module.
     known_ids: &'a FxHashMap<spv::Id, KnownIdDef>,
 
@@ -59,6 +62,9 @@ enum InstParseError {
     /// The type of a `LiteralContextDependentNumber` was not a supported type
     /// (one of either `OpTypeInt` or `OpTypeFloat`).
     UnsupportedContextSensitiveLiteralType { type_opcode: spec::Opcode },
+
+    /// Unsupported `OpSpecConstantOp` (`LiteralSpecConstantOpInteger`) opcode.
+    UnsupportedSpecConstantOpOpcode(u32),
 }
 
 impl InstParseError {
@@ -92,6 +98,9 @@ impl InstParseError {
             Self::MissingContextSensitiveLiteralType => "missing type for literal".into(),
             Self::UnsupportedContextSensitiveLiteralType { type_opcode } => {
                 format!("{} is not a supported literal type", type_opcode.name()).into()
+            }
+            Self::UnsupportedSpecConstantOpOpcode(opcode) => {
+                format!("{opcode} is not a supported opcode (for `OpSpecConstantOp`)").into()
             }
         }
     }
@@ -191,6 +200,22 @@ impl InstParser<'_> {
                         self.inst.imms.push(spv::Imm::LongCont(kind, word));
                     }
                 }
+            }
+        }
+
+        // HACK(eddyb) this isn't cleanly uniform because it's an odd special case.
+        if kind == self.wk.LiteralSpecConstantOpInteger {
+            // FIXME(eddyb) this partially duplicates the main instruction parsing.
+            let (_, _, inner_def) = u16::try_from(word)
+                .ok()
+                .and_then(spec::Opcode::try_from_u16_with_name_and_def)
+                .ok_or(Error::UnsupportedSpecConstantOpOpcode(word))?;
+
+            for (inner_mode, inner_kind) in inner_def.all_operands() {
+                if inner_mode == spec::OperandMode::Optional && self.is_exhausted() {
+                    break;
+                }
+                self.operand(inner_kind)?;
             }
         }
 
@@ -317,6 +342,7 @@ impl Iterator for ModuleParser {
         }
 
         let parser = InstParser {
+            wk: &spec::Spec::get().well_known,
             known_ids: &self.known_ids,
             words: words[1..inst_len].iter().copied(),
             inst: spv::InstWithIds {
