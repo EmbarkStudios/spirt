@@ -54,3 +54,7 @@ unknown-registry = "deny"
 # Lint level for what to happen when a crate from a git repository that is not
 # in the allow list is encountered
 unknown-git = "deny"
+allow-git = [
+    # rspirv does not currently push crate releases
+    "https://github.com/gfx-rs/rspirv"
+]
