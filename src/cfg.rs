@@ -442,7 +442,7 @@ enum StructurizeRegionState {
         /// edges coming into the CFG cycle from outside, and instead of failing
         /// due to the latter not being enough to claim the region on their own,
         /// actually perform loop structurization.
-        backedge: Option<DeferredEdgeBundle>,
+        backedge: Option<DeferredEdgeBundle<()>>,
 
         region: PartialControlRegion,
     },
@@ -458,8 +458,11 @@ enum StructurizeRegionState {
 /// When `accumulated_count` reaches the total [`IncomingEdgeCount`] for `target`,
 /// that [`IncomingEdgeBundle`] is said to "effectively own" its `target` (akin to
 /// the more commonly used CFG domination relation, but more "incremental").
-struct IncomingEdgeBundle {
-    target: ControlRegion,
+///
+/// **Note**: `target` has a generic type `T` to reduce redundancy when it's
+/// already implied (e.g. by the key in [`DeferredEdgeBundleSet`]'s map).
+struct IncomingEdgeBundle<T> {
+    target: T,
     accumulated_count: IncomingEdgeCount,
 
     /// The [`Value`]s that `Value::ControlRegionInput { region, .. }` will get
@@ -505,9 +508,28 @@ struct IncomingEdgeBundle {
 ///     branch => label1
 /// }
 /// ```
-struct DeferredEdgeBundle {
+///
+/// **Note**: `edge_bundle.target` has a generic type `T` to reduce redundancy
+/// when it's already implied (e.g. by the key in [`DeferredEdgeBundleSet`]'s map).
+struct DeferredEdgeBundle<T> {
     condition: LazyCond,
-    edge_bundle: IncomingEdgeBundle,
+    edge_bundle: IncomingEdgeBundle<T>,
+}
+
+impl<T> DeferredEdgeBundle<T> {
+    fn into_target_keyed_kv_pair(self) -> (T, DeferredEdgeBundle<()>) {
+        let DeferredEdgeBundle {
+            condition,
+            edge_bundle: IncomingEdgeBundle { target, accumulated_count, target_inputs },
+        } = self;
+        (
+            target,
+            DeferredEdgeBundle {
+                condition,
+                edge_bundle: IncomingEdgeBundle { target: (), accumulated_count, target_inputs },
+            },
+        )
+    }
 }
 
 /// A recipe for computing a control-flow-sensitive (boolean) condition [`Value`],
@@ -533,10 +555,7 @@ enum LazyCond {
 
 /// Set of [`DeferredEdgeBundle`]s, uniquely keyed by their `target`s.
 struct DeferredEdgeBundleSet {
-    // FIXME(eddyb) this field requires this invariant to be maintained:
-    // `target_to_deferred[target].edge_bundle.target == target` - but that's
-    // a bit wasteful and also not strongly controlled either - maybe seal this?
-    target_to_deferred: FxIndexMap<ControlRegion, DeferredEdgeBundle>,
+    target_to_deferred: FxIndexMap<ControlRegion, DeferredEdgeBundle<()>>,
 }
 
 /// Partially structurized [`ControlRegion`], the result of combining together
@@ -680,11 +699,7 @@ impl<'a> Structurizer<'a> {
                 // Undo `backedge` extraction from deferred edges, if needed.
                 if let Some(backedge) = backedge {
                     assert!(
-                        region
-                            .deferred_edges
-                            .target_to_deferred
-                            .insert(backedge.edge_bundle.target, backedge)
-                            .is_none()
+                        region.deferred_edges.target_to_deferred.insert(target, backedge).is_none()
                     );
                 }
 
@@ -728,7 +743,7 @@ impl<'a> Structurizer<'a> {
         .unwrap_or_else(|deferred| PartialControlRegion {
             children: EntityList::empty(),
             deferred_edges: DeferredEdgeBundleSet {
-                target_to_deferred: [(deferred.edge_bundle.target, deferred)].into_iter().collect(),
+                target_to_deferred: [deferred.into_target_keyed_kv_pair()].into_iter().collect(),
             },
             deferred_return: None,
         })
@@ -736,8 +751,8 @@ impl<'a> Structurizer<'a> {
 
     fn try_claim_edge_bundle(
         &mut self,
-        mut edge_bundle: IncomingEdgeBundle,
-    ) -> Result<PartialControlRegion, DeferredEdgeBundle> {
+        mut edge_bundle: IncomingEdgeBundle<ControlRegion>,
+    ) -> Result<PartialControlRegion, DeferredEdgeBundle<ControlRegion>> {
         let target = edge_bundle.target;
 
         // Always attempt structurization before checking the `IncomingEdgeCount`,
@@ -791,7 +806,6 @@ impl<'a> Structurizer<'a> {
         if let Some(backedge) = backedge {
             let DeferredEdgeBundle { condition: repeat_condition, edge_bundle: backedge } =
                 backedge;
-            assert!(backedge.target == target);
 
             // If the body starts at a region with any `inputs`, receiving values
             // from both the loop entry and the backedge, that has to become
@@ -1019,7 +1033,7 @@ impl<'a> Structurizer<'a> {
                     deferred_edges: DeferredEdgeBundleSet {
                         target_to_deferred: [deferred_proxy]
                             .into_iter()
-                            .map(|d| (d.edge_bundle.target, d))
+                            .map(|d| d.into_target_keyed_kv_pair())
                             .collect(),
                     },
                     deferred_return: None,
@@ -1048,12 +1062,14 @@ impl<'a> Structurizer<'a> {
                 // FIXME(eddyb) this should try to take as many edges as possible,
                 // and incorporate them all at once, potentially with a switch instead
                 // of N individual branches with their own booleans etc.
-                for (i, deferred) in deferred_edges.target_to_deferred.values_mut().enumerate() {
+                for (i, (&deferred_target, deferred)) in
+                    deferred_edges.target_to_deferred.iter_mut().enumerate()
+                {
                     // HACK(eddyb) "take" `deferred.edge_bundle` so it can be
                     // passed to `try_claim_edge_bundle` (and put back if `Err`).
                     let DeferredEdgeBundle { condition: _, ref mut edge_bundle } = *deferred;
                     let taken_edge_bundle = IncomingEdgeBundle {
-                        target: edge_bundle.target,
+                        target: deferred_target,
                         accumulated_count: edge_bundle.accumulated_count,
                         target_inputs: mem::take(&mut edge_bundle.target_inputs),
                     };
@@ -1067,7 +1083,12 @@ impl<'a> Structurizer<'a> {
                         }
 
                         // Put back the `IncomingEdgeBundle` and keep looking.
-                        Err(new_deferred) => *edge_bundle = new_deferred.edge_bundle,
+                        Err(new_deferred) => {
+                            let (new_deferred_target, new_deferred) =
+                                new_deferred.into_target_keyed_kv_pair();
+                            assert!(new_deferred_target == deferred_target);
+                            *edge_bundle = new_deferred.edge_bundle;
+                        }
                     }
                 }
                 None
@@ -1316,7 +1337,7 @@ impl<'a> Structurizer<'a> {
                         DeferredEdgeBundle {
                             condition,
                             edge_bundle: IncomingEdgeBundle {
-                                target,
+                                target: (),
                                 accumulated_count: total_edge_count,
                                 target_inputs,
                             },
@@ -1426,11 +1447,8 @@ impl<'a> Structurizer<'a> {
 
         // Build a chain of conditional branches to apply deferred edges.
         let mut deferred_edge_targets =
-            deferred_edges.target_to_deferred.into_iter().map(|(_, deferred)| {
-                (
-                    deferred.condition,
-                    (deferred.edge_bundle.target, deferred.edge_bundle.target_inputs),
-                )
+            deferred_edges.target_to_deferred.into_iter().map(|(deferred_target, deferred)| {
+                (deferred.condition, (deferred_target, deferred.edge_bundle.target_inputs))
             });
         let mut control_source = Some(unstructured_region);
         while let Some((condition, then_target_and_inputs)) = deferred_edge_targets.next() {
