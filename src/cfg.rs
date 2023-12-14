@@ -6,7 +6,7 @@ use crate::{
     EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeKind,
     Value,
 };
-use itertools::Either;
+use itertools::{Either, Itertools};
 use smallvec::SmallVec;
 use std::mem;
 use std::rc::Rc;
@@ -506,8 +506,29 @@ struct IncomingEdgeBundle {
 /// }
 /// ```
 struct DeferredEdgeBundle {
-    condition: Value,
+    condition: LazyCond,
     edge_bundle: IncomingEdgeBundle,
+}
+
+/// A recipe for computing a control-flow-sensitive (boolean) condition [`Value`],
+/// potentially requiring merging through an arbitrary number of `Select`s
+/// (via per-case outputs and [`Value::ControlNodeOutput`], for each `Select`).
+///
+/// This should largely be equivalent to eagerly generating all region outputs
+/// that might be needed, and then removing the unused ones, but this way we
+/// never generate unused outputs, and can potentially even optimize away some
+/// redundant dataflow (e.g. `if cond { true } else { false }` is just `cond`).
+enum LazyCond {
+    // FIXME(eddyb) remove `False` in favor of `Option<LazyCond>`?
+    False,
+    True,
+    MergeSelect {
+        control_node: ControlNode,
+        // FIXME(eddyb) the lowest level of this ends up with a `Vec` containing
+        // only `LazyCond::{False,True}`, and that could more easily be expressed
+        // as e.g. a bitset? (or even `SmallVec<[bool; 16]>`, tho that's silly)
+        per_case_conds: Vec<LazyCond>,
+    },
 }
 
 /// Set of [`DeferredEdgeBundle`]s, uniquely keyed by their `target`s.
@@ -742,10 +763,7 @@ impl<'a> Structurizer<'a> {
         if self.incoming_edge_counts_including_loop_exits[target]
             != edge_bundle.accumulated_count + backedge_count
         {
-            return Err(DeferredEdgeBundle {
-                condition: Value::Const(self.const_true),
-                edge_bundle,
-            });
+            return Err(DeferredEdgeBundle { condition: LazyCond::True, edge_bundle });
         }
 
         let state =
@@ -810,6 +828,7 @@ impl<'a> Structurizer<'a> {
                 })
                 .collect();
 
+            let repeat_condition = self.materialize_lazy_cond(repeat_condition);
             let loop_node = self.func_def_body.control_nodes.define(
                 self.cx,
                 ControlNodeDef {
@@ -987,7 +1006,7 @@ impl<'a> Structurizer<'a> {
                 self.incoming_edge_counts_including_loop_exits
                     .insert(proxy, IncomingEdgeCount::ONE);
                 let deferred_proxy = DeferredEdgeBundle {
-                    condition: Value::Const(self.const_true),
+                    condition: LazyCond::True,
                     edge_bundle: IncomingEdgeBundle {
                         target: proxy,
                         accumulated_count: IncomingEdgeCount::default(),
@@ -1026,10 +1045,13 @@ impl<'a> Structurizer<'a> {
         // going until there's no more deferred edges that can be claimed.
         let try_claim_any_deferred_edge =
             |this: &mut Self, deferred_edges: &mut DeferredEdgeBundleSet| {
+                // FIXME(eddyb) this should try to take as many edges as possible,
+                // and incorporate them all at once, potentially with a switch instead
+                // of N individual branches with their own booleans etc.
                 for (i, deferred) in deferred_edges.target_to_deferred.values_mut().enumerate() {
                     // HACK(eddyb) "take" `deferred.edge_bundle` so it can be
                     // passed to `try_claim_edge_bundle` (and put back if `Err`).
-                    let DeferredEdgeBundle { condition, ref mut edge_bundle } = *deferred;
+                    let DeferredEdgeBundle { condition: _, ref mut edge_bundle } = *deferred;
                     let taken_edge_bundle = IncomingEdgeBundle {
                         target: edge_bundle.target,
                         accumulated_count: edge_bundle.accumulated_count,
@@ -1039,7 +1061,8 @@ impl<'a> Structurizer<'a> {
                     match this.try_claim_edge_bundle(taken_edge_bundle) {
                         Ok(claimed_region) => {
                             // FIXME(eddyb) should this use `swap_remove_index`?
-                            deferred_edges.target_to_deferred.shift_remove_index(i);
+                            let (_, DeferredEdgeBundle { condition, edge_bundle: _ }) =
+                                deferred_edges.target_to_deferred.shift_remove_index(i).unwrap();
                             return Some((condition, claimed_region));
                         }
 
@@ -1061,6 +1084,7 @@ impl<'a> Structurizer<'a> {
             let mut merged_region = if else_is_unreachable {
                 then_region
             } else {
+                let condition = self.materialize_lazy_cond(condition);
                 self.structurize_select(
                     SelectionKind::BoolCond,
                     condition,
@@ -1137,22 +1161,14 @@ impl<'a> Structurizer<'a> {
         }
         let deferred_return_value_count = deferred_return_types.clone().map(|tys| tys.len());
 
-        // Avoid computing deferral conditions when the target isn't ambiguous.
-        let needs_per_deferred_edge_condition =
-            deferred_edges_to_input_count_and_total_edge_count.len() > 1
-                || deferred_return_types.is_some();
-
         // The `Select` outputs are the concatenation of:
-        // * for each unique `deferred_edges` target:
-        //   * condition (only if `needs_per_deferred_edge_condition` - see above)
-        //   * `target_inputs`
+        // * `target_inputs`, for each unique `deferred_edges` target
         // * `deferred_return` values (if needed)
         //
         // FIXME(eddyb) some of this could maybe be generalized to deferred infra.
         enum Deferred {
             Edge {
                 target: ControlRegion,
-                // NOTE(eddyb) not including condition, only `target_inputs`.
                 target_input_count: usize,
 
                 /// Sum of `accumulated_count` for this `target` across all `cases`.
@@ -1177,9 +1193,7 @@ impl<'a> Structurizer<'a> {
         let mut output_decls: SmallVec<[_; 2]> = SmallVec::with_capacity(
             deferreds()
                 .map(|deferred| match deferred {
-                    Deferred::Edge { target_input_count, .. } => {
-                        (needs_per_deferred_edge_condition as usize) + target_input_count
-                    }
+                    Deferred::Edge { target_input_count, .. } => target_input_count,
                     Deferred::Return { value_count } => value_count,
                 })
                 .sum(),
@@ -1191,9 +1205,6 @@ impl<'a> Structurizer<'a> {
                     let target_inputs = &self.func_def_body.at(target).def().inputs;
                     assert_eq!(target_inputs.len(), target_input_count);
 
-                    if needs_per_deferred_edge_condition {
-                        output_decls.push(output_decl_from_ty(self.type_bool));
-                    }
                     output_decls.extend(target_inputs.iter().map(|i| output_decl_from_ty(i.ty)));
                 }
                 Deferred::Return { value_count } => {
@@ -1206,34 +1217,45 @@ impl<'a> Structurizer<'a> {
         }
 
         // Convert the cases into `ControlRegion`s, each outputting the full set
-        // of values described by `outputs` (with undef filling in any gaps).
+        // of values described by `outputs` (with undef filling in any gaps),
+        // while deferred conditions are collected separately (for `LazyCond`).
+        let mut deferred_per_case_conditions: SmallVec<[_; 8]> = deferreds()
+            .map(|deferred| match deferred {
+                Deferred::Edge { .. } => Vec::with_capacity(cases.len()),
+                Deferred::Return { .. } => vec![],
+            })
+            .collect();
         let cases = cases
             .into_iter()
-            .map(|case| {
+            .enumerate()
+            .map(|(case_idx, case)| {
                 let PartialControlRegion { children, mut deferred_edges, mut deferred_return } =
                     case;
 
                 let mut outputs = SmallVec::with_capacity(output_decls.len());
-                for deferred in deferreds() {
+                for (deferred, per_case_conditions) in
+                    deferreds().zip_eq(&mut deferred_per_case_conditions)
+                {
                     let (edge_condition, values_or_count) = match deferred {
-                        Deferred::Edge { target, target_input_count, .. } => match deferred_edges
-                            .target_to_deferred
-                            .swap_remove(&target)
-                        {
-                            Some(DeferredEdgeBundle { condition, edge_bundle }) => {
-                                (Some(condition), Ok(edge_bundle.target_inputs))
-                            }
+                        Deferred::Edge { target, target_input_count, .. } => {
+                            match deferred_edges.target_to_deferred.swap_remove(&target) {
+                                Some(DeferredEdgeBundle { condition, edge_bundle }) => {
+                                    (Some(condition), Ok(edge_bundle.target_inputs))
+                                }
 
-                            None => (Some(Value::Const(self.const_false)), Err(target_input_count)),
-                        },
+                                None => (Some(LazyCond::False), Err(target_input_count)),
+                            }
+                        }
                         Deferred::Return { value_count } => {
                             (None, deferred_return.take().ok_or(value_count))
                         }
                     };
 
-                    if needs_per_deferred_edge_condition {
-                        outputs.extend(edge_condition);
+                    if let Some(edge_condition) = edge_condition {
+                        assert_eq!(per_case_conditions.len(), case_idx);
+                        per_case_conditions.push(edge_condition);
                     }
+
                     match values_or_count {
                         Ok(values) => outputs.extend(values),
                         Err(missing_value_count) => {
@@ -1273,15 +1295,21 @@ impl<'a> Structurizer<'a> {
 
         let mut outputs = (0..)
             .map(|output_idx| Value::ControlNodeOutput { control_node: select_node, output_idx });
-        for deferred in deferreds() {
+        for (deferred, per_case_conditions) in deferreds().zip_eq(deferred_per_case_conditions) {
             match deferred {
                 Deferred::Edge { target, target_input_count, total_edge_count } => {
-                    let condition = if needs_per_deferred_edge_condition {
-                        outputs.next().unwrap()
-                    } else {
-                        Value::Const(self.const_true)
-                    };
                     let target_inputs = outputs.by_ref().take(target_input_count).collect();
+
+                    // Simplify `LazyCond`s eagerly, to reduce costs later on.
+                    let condition =
+                        if per_case_conditions.iter().all(|cond| matches!(cond, LazyCond::True)) {
+                            LazyCond::True
+                        } else {
+                            LazyCond::MergeSelect {
+                                control_node: select_node,
+                                per_case_conds: per_case_conditions,
+                            }
+                        };
 
                     deferred_edges.target_to_deferred.insert(
                         target,
@@ -1305,6 +1333,65 @@ impl<'a> Structurizer<'a> {
         let mut children = EntityList::empty();
         children.insert_last(select_node, &mut self.func_def_body.control_nodes);
         PartialControlRegion { children, deferred_edges, deferred_return }
+    }
+
+    // FIXME(eddyb) this should try to handle as many `LazyCond` as are available,
+    // for incorporating them all at once, ideally with a switch instead
+    // of N individual branches with their own booleans etc.
+    fn materialize_lazy_cond(&mut self, cond: LazyCond) -> Value {
+        match cond {
+            LazyCond::False => Value::Const(self.const_false),
+            LazyCond::True => Value::Const(self.const_true),
+            LazyCond::MergeSelect { control_node, per_case_conds } => {
+                // HACK(eddyb) this should not allocate most of the time, and
+                // avoids complications later below, when mutating the cases.
+                let per_case_conds: SmallVec<[_; 8]> = per_case_conds
+                    .into_iter()
+                    .map(|cond| self.materialize_lazy_cond(cond))
+                    .collect();
+
+                // FIXME(eddyb) this should handle an all-`true` `per_case_conds`
+                // (but `structurize_select` currently takes care of those).
+
+                let ControlNodeDef { kind, outputs: output_decls } =
+                    &mut *self.func_def_body.control_nodes[control_node];
+                let cases = match kind {
+                    ControlNodeKind::Select { kind, scrutinee, cases } => {
+                        assert_eq!(cases.len(), per_case_conds.len());
+
+                        if let SelectionKind::BoolCond = kind {
+                            let [val_false, val_true] =
+                                [self.const_false, self.const_true].map(Value::Const);
+                            if per_case_conds[..] == [val_true, val_false] {
+                                return *scrutinee;
+                            } else if per_case_conds[..] == [val_false, val_true] {
+                                // FIXME(eddyb) this could also be special-cased,
+                                // at least when called from the topmost level,
+                                // where which side is `false`/`true` doesn't
+                                // matter (or we could even generate `!cond`?).
+                                let _not_cond = *scrutinee;
+                            }
+                        }
+
+                        cases
+                    }
+                    _ => unreachable!(),
+                };
+
+                let output_idx = u32::try_from(output_decls.len()).unwrap();
+                output_decls
+                    .push(ControlNodeOutputDecl { attrs: AttrSet::default(), ty: self.type_bool });
+
+                for (&case, cond) in cases.iter().zip_eq(per_case_conds) {
+                    let ControlRegionDef { outputs, .. } =
+                        &mut self.func_def_body.control_regions[case];
+                    outputs.push(cond);
+                    assert_eq!(outputs.len(), output_decls.len());
+                }
+
+                Value::ControlNodeOutput { control_node, output_idx }
+            }
+        }
     }
 
     /// When structurization is only partial, and there remain unclaimed regions,
@@ -1369,7 +1456,9 @@ impl<'a> Structurizer<'a> {
                     Some((new_empty_region, [].into_iter().collect()))
                 };
 
-            let condition = Some(condition).filter(|_| else_target_and_inputs.is_some());
+            let condition = Some(condition)
+                .filter(|_| else_target_and_inputs.is_some())
+                .map(|cond| self.materialize_lazy_cond(cond));
             let branch_control_inst = ControlInst {
                 attrs: AttrSet::default(),
                 kind: if condition.is_some() {
