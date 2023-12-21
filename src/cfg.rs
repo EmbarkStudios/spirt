@@ -571,6 +571,16 @@ struct DeferredEdgeBundleSet {
     target_to_deferred: FxIndexMap<DeferredTarget, DeferredEdgeBundle<()>>,
 }
 
+// TODO(eddyb) track defined values during structurization, and the region scope
+// of their definition, to minimize the need to pass them through control-flow,
+// but also potentially to allow breaking def-use links at region boundaries?
+
+// TODO(eddyb) consider isolating each non-trivial control-flow sibling from eachother,
+// during original lowering, no dominance-based SSA at all!
+
+// TODO(eddyb) consider renaming "deferred" to "dangling"? coalesced? hmmm
+//
+
 /// Partially structurized [`ControlRegion`], the result of combining together
 /// several smaller [`ControlRegion`]s, based on CFG edges between them.
 struct PartialControlRegion {
