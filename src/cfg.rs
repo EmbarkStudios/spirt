@@ -745,6 +745,21 @@ impl<'a> Structurizer<'a> {
             }
             _ => None,
         }));
+
+        // FIXME(eddyb) track a stack of loops, and known loop bodies, and every time
+        // a loop body region *input* is used, outside that loop, refer to the loop node
+        // output instead, but care must be taken that exiting the loop sets the appropriate
+        // noop output=input (instead of undefs like today).
+        // TODO(eddyb) actually that seems trickier than I thought, and may require using
+        // the SCC information to decompose `loop` `break`s ahead of time...
+        // NOTE(eddyb) maybe knowing whether a target is specifically a backedge,
+        // when merging a select and generating undefs, is enough? have to worry
+        // about nested loops and what it means to reach a different target, but
+        // one would assume that all the sibling targets of a loop backedge, would
+        // never need the values *except* when breaking out of the loop.
+        // TODO(eddyb) to avoid additional lookups and statefulness, maybe the
+        // backedgeness should be included in the `DeferredEdgeBundle` etc.?
+        // (though it probably doesn't to care about the loop node/body region distinction)
     }
 
     // FIXME(eddyb) the names `target` and `region` are an issue, they
@@ -849,6 +864,7 @@ impl<'a> Structurizer<'a> {
             assert_eq!(initial_inputs.len(), body_def.inputs.len());
             assert_eq!(body_def.outputs.len(), body_def.inputs.len());
 
+            // FIXME(eddyb) move the repeat condition into the body outputs.
             let repeat_condition = self.materialize_lazy_cond(repeat_condition);
             let loop_node = self.func_def_body.control_nodes.define(
                 self.cx,
