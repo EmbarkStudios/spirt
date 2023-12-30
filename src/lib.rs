@@ -621,9 +621,10 @@ pub struct FuncParam {
 // FIXME(eddyb) `FuncDefBody`/`func_def_body` are too long, find shorter names.
 #[derive(Clone)]
 pub struct FuncDefBody {
-    pub control_regions: EntityDefs<ControlRegion>,
-    pub control_nodes: EntityDefs<ControlNode>,
-    pub data_insts: EntityDefs<DataInst>,
+    // FIXME(eddyb) force access to go through `.at`!!!
+    pub __defs_do_not_use_control_regions: EntityDefs<ControlRegion>,
+    pub __defs_do_not_use_control_nodes: EntityDefs<ControlNode>,
+    pub __defs_do_not_use_data_insts: EntityDefs<DataInst>,
 
     /// The [`ControlRegion`] representing the whole body of the function.
     ///
