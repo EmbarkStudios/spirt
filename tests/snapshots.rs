@@ -80,9 +80,7 @@ fn snapshots() {
             }
         };
         let spirv_bytes = spirv_words.iter().flat_map(|val| val.to_le_bytes()).collect::<Vec<u8>>();
-        if extension != "spvasm" {
-            spv_to_spvasm(&spirv_bytes, &spvasm_in_file);
-        }
+        spv_to_spvasm(&spirv_bytes, &spvasm_in_file);
 
         let mut spirt_module = spirt::Module::lower_from_spv_bytes(
             std::rc::Rc::new(spirt::Context::new()),
