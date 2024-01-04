@@ -24,7 +24,7 @@ arrayvec = "0.7.1"
 bytemuck = "1.12.3"
 derive_more = "0.99.17"
 elsa = { version = "1.6.0", features = ["indexmap"] }
-indexmap = "1.7.0"
+indexmap = "2.0.0"
 internal-iterator = "0.2.0"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
