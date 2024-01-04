@@ -1,5 +1,3 @@
-use rspirv::binary::Disassemble;
-
 const BASE_DIR_IN: &str = "tests/snapshots/in";
 const BASE_DIR_OUT: &str = "tests/snapshots/out-spirt";
 const BASE_DIR_IN_SPVASM: &str = "tests/snapshots/in-spvasm";
@@ -45,6 +43,7 @@ fn snapshots() {
                 let glslang_status = std::process::Command::new("glslangValidator")
                     .args([
                         "-V",
+                        "-g",
                         "--target-env",
                         "spirv1.3",
                         "-g",
@@ -80,10 +79,9 @@ fn snapshots() {
                 panic!("Unsupported file extension: {extension}");
             }
         };
-        let spirv_bytes = spirv_words.iter().flat_map(|val| val.to_be_bytes()).collect();
+        let spirv_bytes = spirv_words.iter().flat_map(|val| val.to_le_bytes()).collect::<Vec<u8>>();
         if extension != "spvasm" {
-            let spvasm_in_txt = rspirv::dr::load_words(spirv_words).unwrap().disassemble();
-            std::fs::write(&spvasm_in_file, spvasm_in_txt).unwrap();
+            spv_to_spvasm(&spirv_bytes, &spvasm_in_file);
         }
 
         let mut spirt_module = spirt::Module::lower_from_spv_bytes(
@@ -97,7 +95,24 @@ fn snapshots() {
         std::fs::write(spirt_file, spirt_pretty.to_string()).unwrap();
 
         let spirv_out_words = &spirt_module.lift_to_spv_module_emitter().unwrap().words;
-        let spvasm_out_txt = rspirv::dr::load_words(spirv_out_words).unwrap().disassemble();
-        std::fs::write(&spvasm_out_file, spvasm_out_txt).unwrap();
+        let spirv_out_bytes =
+            spirv_out_words.iter().flat_map(|val| val.to_le_bytes()).collect::<Vec<u8>>();
+        spv_to_spvasm(&spirv_out_bytes, &spvasm_out_file);
     }
+}
+
+#[cfg(test)]
+fn spv_to_spvasm(spirv_bytes: &[u8], output_path: &str) {
+    use std::io::Write;
+    let output_file = std::fs::File::create(output_path).unwrap();
+    let mut cmd = std::process::Command::new("spirv-dis")
+        .args(["-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(output_file))
+        .spawn()
+        .expect("Couldn't launch spirv-dis");
+
+    let cmd_stdin = cmd.stdin.as_mut().unwrap();
+    cmd_stdin.write_all(spirv_bytes).unwrap();
+    cmd.wait().expect("Error running spirv-dis");
 }

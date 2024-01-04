@@ -36,7 +36,6 @@ smallvec = { version = "1.7.0", features = ["serde", "union"] }
 
 [dev-dependencies]
 naga = { version = "0.14", features = ["wgsl-in", "spv-out"] }
-rspirv = { version = "0.11.0", git = "https://github.com/gfx-rs/rspirv", rev = "a3b41ed9598c0c7c13dc945e66129b7e6f468b77" }
 
 [package.metadata.docs.rs]
 all-features = true

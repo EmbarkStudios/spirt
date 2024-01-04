@@ -70,14 +70,6 @@ jobs:
       - name: Validate snapshots
         run: for file in tests/snapshots/*spvasm/*.spvasm; do echo $file; spirv-as $file -o - | spirv-val; done
         if: ${{ runner.os == 'Linux' }}
-      # FIXME(eddyb) actually flesh this out into a whole testing setup
-      # (see also https://github.com/EmbarkStudios/spirt/issues/7).
-      - name: Minimal glslang -> SPIR-V -> SPIR-T -> SPIR-V testing
-        run: |
-          glslangValidator -V --target-env spirv1.3 -g tests/data/basic.frag.glsl -o tests/data/basic.frag.glsl.dbg.spv
-          glslangValidator -V --target-env spirv1.3 -g tests/data/debug-printf.vert.glsl -o tests/data/debug-printf.vert.glsl.dbg.spv
-          cargo run --release --example spv-lower-link-lift tests/data/basic.frag.glsl.dbg.spv
-          cargo run --release --example spv-lower-link-lift tests/data/debug-printf.vert.glsl.dbg.spv
       - if: ${{ runner.os == 'Linux' }}
         name: Check examples are up to date
         run: .github/workflows/check-examples.sh

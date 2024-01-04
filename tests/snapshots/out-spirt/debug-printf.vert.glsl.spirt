@@ -1,0 +1,34 @@
+module.dialect = spv.Module(version: 1.3, extensions: {"SPV_KHR_non_semantic_info"}, spv.Capability.Shader, spv.MemoryModel.GLSL450)
+
+module.debug_info = spv.Module.DebugInfo(
+  generator: spv.Tool(id: 8, version: 11),
+  source_languages: {
+    spv.SourceLanguage.GLSL(version: 450): {
+      "tests/snapshots/in/debug-printf.vert.glsl":
+         "// `debugPrintfEXT`-using vertex shader, for use with `glslangValidator`, e.g.:\
+        \n// `glslangValidator -V --target-env spirv1.3 debug-printf.vert.glsl -o debug-printf.vert.glsl.spv`\
+        \n\
+        \n#version 450\
+        \n\
+        \n#extension GL_EXT_debug_printf : enable\
+        \n\
+        \nvoid main() {\
+        \n    debugPrintfEXT(\"int=%u float=%f\", 123, 123.456);\
+        \n}\
+        \n"
+      ,
+    },
+  },
+  source_extensions: ["GL_EXT_debug_printf"],
+  module_processes: ["client vulkan100", "target-env spirv1.3", "target-env vulkan1.0", "entry-point main"],
+)
+
+// at tests/snapshots/in/debug-printf.vert.glsl:8:12
+func F`main`() -> spv.OpTypeVoid {
+  // at tests/snapshots/in/debug-printf.vert.glsl:9:1
+  spv.extinst."NonSemantic.DebugPrintf".DebugPrintf(Format: "int=%u float=%f", 123s32, 123.456f32)
+}
+
+export {
+  spv.OpEntryPoint(spv.ExecutionModel.Vertex, Name: "main"): F`main`,
+}

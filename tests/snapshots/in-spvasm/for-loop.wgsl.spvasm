@@ -1,60 +1,61 @@
 ; SPIR-V
 ; Version: 1.5
-; Generator: rspirv
+; Generator: Khronos; 28
 ; Bound: 33
-OpCapability Shader
-%1 = OpExtInstImport "GLSL.std.450"
-OpMemoryModel Logical GLSL450
-OpEntryPoint Vertex %8 "main" %6
-OpName %8 "main"
-OpName %12 "o"
-OpName %14 "i"
-OpDecorate %6 Location 0
-OpDecorate %6 Flat
-%2 = OpTypeVoid
-%3 = OpTypeInt 32 1
-%4 = OpConstant  %3  0
-%7 = OpTypePointer Output %3
-%6 = OpVariable  %7  Output
-%9 = OpTypeFunction %2
-%10 = OpConstant  %3  1
-%11 = OpConstant  %3  10
-%13 = OpTypePointer Function %3
-%21 = OpTypeBool
-%8 = OpFunction  %2  None %9
-%5 = OpLabel
-%12 = OpVariable  %13  Function %10
-%14 = OpVariable  %13  Function %10
-OpBranch %15
-%15 = OpLabel
-OpBranch %16
-%16 = OpLabel
-OpLoopMerge %17 %19 None
-OpBranch %18
-%18 = OpLabel
-%20 = OpLoad  %3  %14
-%22 = OpSLessThan  %21  %20 %11
-OpSelectionMerge %23 None
-OpBranchConditional %22 %23 %24
-%24 = OpLabel
-OpBranch %17
-%23 = OpLabel
-OpBranch %25
-%25 = OpLabel
-%27 = OpLoad  %3  %14
-%28 = OpLoad  %3  %12
-%29 = OpIMul  %3  %28 %27
-OpStore %12 %29
-OpBranch %26
-%26 = OpLabel
-OpBranch %19
-%19 = OpLabel
-%30 = OpLoad  %3  %14
-%31 = OpIAdd  %3  %30 %10
-OpStore %14 %31
-OpBranch %16
-%17 = OpLabel
-%32 = OpLoad  %3  %12
-OpStore %6 %32
-OpReturn
-OpFunctionEnd
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %6
+               OpName %main "main"
+               OpName %o "o"
+               OpName %i "i"
+               OpDecorate %6 Location 0
+               OpDecorate %6 Flat
+       %void = OpTypeVoid
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_Output_int = OpTypePointer Output %int
+          %6 = OpVariable %_ptr_Output_int Output
+          %9 = OpTypeFunction %void
+      %int_1 = OpConstant %int 1
+     %int_10 = OpConstant %int 10
+%_ptr_Function_int = OpTypePointer Function %int
+       %bool = OpTypeBool
+       %main = OpFunction %void None %9
+          %5 = OpLabel
+          %o = OpVariable %_ptr_Function_int Function %int_1
+          %i = OpVariable %_ptr_Function_int Function %int_1
+               OpBranch %15
+         %15 = OpLabel
+               OpBranch %16
+         %16 = OpLabel
+               OpLoopMerge %17 %19 None
+               OpBranch %18
+         %18 = OpLabel
+         %20 = OpLoad %int %i
+         %22 = OpSLessThan %bool %20 %int_10
+               OpSelectionMerge %23 None
+               OpBranchConditional %22 %23 %24
+         %24 = OpLabel
+               OpBranch %17
+         %23 = OpLabel
+               OpBranch %25
+         %25 = OpLabel
+         %27 = OpLoad %int %i
+         %28 = OpLoad %int %o
+         %29 = OpIMul %int %28 %27
+               OpStore %o %29
+               OpBranch %26
+         %26 = OpLabel
+               OpBranch %19
+         %19 = OpLabel
+         %30 = OpLoad %int %i
+         %31 = OpIAdd %int %30 %int_1
+               OpStore %i %31
+               OpBranch %16
+         %17 = OpLabel
+         %32 = OpLoad %int %o
+               OpStore %6 %32
+               OpReturn
+               OpFunctionEnd

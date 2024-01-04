@@ -1,50 +1,51 @@
 ; SPIR-V
 ; Version: 1.3
-; Generator: rspirv
+; Generator: Khronos SPIR-V Tools Assembler; 0
 ; Bound: 30
-OpCapability Shader
-OpMemoryModel Logical GLSL450
-OpEntryPoint Vertex %12 "main" %11
-OpDecorate %11 Flat
-OpDecorate %11 Location 0
-%1 = OpTypeInt 32 1
-%2 = OpTypePointer Output %1
-%3 = OpTypeVoid
-%4 = OpTypeFunction %3
-%5 = OpConstant  %1  1
-%6 = OpTypeBool
-%7 = OpConstant  %1  10
-%8 = OpConstantTrue  %6
-%9 = OpConstantFalse  %6
-%10 = OpUndef  %1
-%11 = OpVariable  %2  Output
-%12 = OpFunction  %3  None %4
-%22 = OpLabel
-OpBranch %23
-%23 = OpLabel
-%13 = OpPhi  %1  %5 %22 %16 %28
-%14 = OpPhi  %1  %5 %22 %17 %28
-OpLoopMerge %29 %28 None
-OpBranch %24
-%24 = OpLabel
-%19 = OpSLessThan  %6  %14 %7
-OpSelectionMerge %27 None
-OpBranchConditional %19 %25 %26
-%25 = OpLabel
-%20 = OpIMul  %1  %13 %14
-%21 = OpIAdd  %1  %14 %5
-OpBranch %27
-%26 = OpLabel
-OpBranch %27
-%27 = OpLabel
-%15 = OpPhi  %6  %8 %25 %9 %26
-%16 = OpPhi  %1  %20 %25 %10 %26
-%17 = OpPhi  %1  %21 %25 %10 %26
-%18 = OpPhi  %6  %9 %25 %8 %26
-OpBranch %28
-%28 = OpLabel
-OpBranchConditional %15 %23 %29
-%29 = OpLabel
-OpStore %11 %13
-OpReturn
-OpFunctionEnd
+; Schema: 0
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %12 "main" %11
+               OpDecorate %11 Flat
+               OpDecorate %11 Location 0
+        %int = OpTypeInt 32 1
+%_ptr_Output_int = OpTypePointer Output %int
+       %void = OpTypeVoid
+          %4 = OpTypeFunction %void
+      %int_1 = OpConstant %int 1
+       %bool = OpTypeBool
+     %int_10 = OpConstant %int 10
+       %true = OpConstantTrue %bool
+      %false = OpConstantFalse %bool
+         %10 = OpUndef %int
+         %11 = OpVariable %_ptr_Output_int Output
+         %12 = OpFunction %void None %4
+         %22 = OpLabel
+               OpBranch %23
+         %23 = OpLabel
+         %13 = OpPhi %int %int_1 %22 %16 %28
+         %14 = OpPhi %int %int_1 %22 %17 %28
+               OpLoopMerge %29 %28 None
+               OpBranch %24
+         %24 = OpLabel
+         %19 = OpSLessThan %bool %14 %int_10
+               OpSelectionMerge %27 None
+               OpBranchConditional %19 %25 %26
+         %25 = OpLabel
+         %20 = OpIMul %int %13 %14
+         %21 = OpIAdd %int %14 %int_1
+               OpBranch %27
+         %26 = OpLabel
+               OpBranch %27
+         %27 = OpLabel
+         %15 = OpPhi %bool %true %25 %false %26
+         %16 = OpPhi %int %20 %25 %10 %26
+         %17 = OpPhi %int %21 %25 %10 %26
+         %18 = OpPhi %bool %false %25 %true %26
+               OpBranch %28
+         %28 = OpLabel
+               OpBranchConditional %15 %23 %29
+         %29 = OpLabel
+               OpStore %11 %13
+               OpReturn
+               OpFunctionEnd
