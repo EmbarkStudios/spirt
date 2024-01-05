@@ -1378,12 +1378,11 @@ impl Module {
 
         // IDs can be allocated once we have the full sets needing them, whether
         // sorted by contents, or ordered by the first occurence in the module.
-        let mut id_bound = NonZeroU32::new(1).unwrap();
+        let mut id_bound = NonZeroU32::MIN;
         let ids = needs_ids_collector.alloc_ids(|| {
             let id = id_bound;
 
-            // FIXME(eddyb) use `id_bound.checked_add(1)` once that's stabilized.
-            match id_bound.get().checked_add(1).and_then(NonZeroU32::new) {
+            match id_bound.checked_add(1) {
                 Some(new_bound) => {
                     id_bound = new_bound;
                     Ok(id)

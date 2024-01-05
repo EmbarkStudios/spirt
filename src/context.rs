@@ -152,16 +152,10 @@ mod sealed {
         pub(super) fn alloc_chunk(&self) -> E {
             let chunk_start = self.0.get();
             let next_chunk_start = E::from_non_zero_u32(
-                // FIXME(eddyb) use `NonZeroU32::checked_add`
-                // when that gets stabilized.
-                NonZeroU32::new(
-                    chunk_start
-                        .to_non_zero_u32()
-                        .get()
-                        .checked_add(E::CHUNK_SIZE)
-                        .expect("entity index overflowed u32"),
-                )
-                .unwrap(),
+                chunk_start
+                    .to_non_zero_u32()
+                    .checked_add(E::CHUNK_SIZE)
+                    .expect("entity index overflowed u32"),
             );
             self.0.set(next_chunk_start);
             chunk_start
