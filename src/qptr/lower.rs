@@ -53,7 +53,7 @@ impl<'a> LowerFromSpvPtrs<'a> {
             Ok(match layout {
                 TypeLayout::Handle(handle) => shapes::GlobalVarShape::Handles {
                     handle: handle_layout_to_handle(handle),
-                    fixed_count: Some(NonZeroU32::MIN),
+                    fixed_count: Some(NonZeroU32::new(1).unwrap()),
                 },
                 TypeLayout::HandleArray(handle, fixed_count) => shapes::GlobalVarShape::Handles {
                     handle: handle_layout_to_handle(handle),
