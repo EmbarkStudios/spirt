@@ -27,6 +27,7 @@ module.debug_info = spv.Module.DebugInfo(
   module_processes: ["client vulkan100", "target-env spirv1.3", "target-env vulkan1.0", "entry-point main"],
 )
 
+#[qptr.usage(f32×4)]
 #[spv.Decoration.Location(Location: 0)]
 global_var GV`output_color` in spv.StorageClass.Output: f32×4
 
@@ -34,7 +35,7 @@ global_var GV`output_color` in spv.StorageClass.Output: f32×4
 // at tests/snapshots/in/basic.frag.glsl:12:12
 func F`main`() -> spv.OpTypeVoid {
   // at tests/snapshots/in/basic.frag.glsl:13:1
-  spv.OpStore(Pointer: &GV`output_color`, Object: spv.OpConstantComposite(1.0f32, 1.0f32, 1.0f32, 1.0f32): f32×4)
+  qptr.store(&GV`output_color`, spv.OpConstantComposite(1.0f32, 1.0f32, 1.0f32, 1.0f32): f32×4)
 }
 
 export {

@@ -82,15 +82,35 @@ fn snapshots() {
         let spirv_bytes = spirv_words.iter().flat_map(|val| val.to_le_bytes()).collect::<Vec<u8>>();
         spv_to_spvasm(&spirv_bytes, &spvasm_in_file);
 
+        let qptr_layout_config = &spirt::qptr::LayoutConfig {
+              abstract_bool_size_align: (1, 1),
+              logical_ptr_size_align: (4, 4),
+              ..spirt::qptr::LayoutConfig::VULKAN_SCALAR_LAYOUT
+        };
+
         let mut spirt_module = spirt::Module::lower_from_spv_bytes(
             std::rc::Rc::new(spirt::Context::new()),
             spirv_bytes,
         )
         .unwrap();
+
         spirt::passes::legalize::structurize_func_cfgs(&mut spirt_module);
+
+        spirt::passes::qptr::lower_from_spv_ptrs(&mut spirt_module, &qptr_layout_config);
+
+        spirt::passes::qptr::analyze_uses(&mut spirt_module, qptr_layout_config);
+
         let spirt_plan = spirt::print::Plan::for_module(&spirt_module);
         let spirt_pretty = spirt_plan.pretty_print();
         std::fs::write(spirt_file, spirt_pretty.to_string()).unwrap();
+
+        spirt::passes::link::minimize_exports(&mut spirt_module, |export_key| {
+            matches!(export_key, spirt::ExportKey::SpvEntryPoint { .. })
+        });
+
+        spirt::passes::link::resolve_imports(&mut spirt_module);
+
+        spirt::passes::qptr::lift_to_spv_ptrs(&mut spirt_module, &qptr_layout_config);
 
         let spirv_out_words = &spirt_module.lift_to_spv_module_emitter().unwrap().words;
         let spirv_out_bytes =

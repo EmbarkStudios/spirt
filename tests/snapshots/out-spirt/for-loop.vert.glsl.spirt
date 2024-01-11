@@ -22,48 +22,49 @@ module.debug_info = spv.Module.DebugInfo(
   module_processes: ["client vulkan100", "target-env spirv1.3", "target-env vulkan1.0", "entry-point main"],
 )
 
-type T0 = spv.OpTypePointer(spv.StorageClass.Function, s32)
-
+#[qptr.usage(s32)]
 #[spv.Decoration.Location(Location: 0)]
 global_var GV`output0` in spv.StorageClass.Output: s32
 
 // at tests/snapshots/in/for-loop.vert.glsl:5:12
 func F`main`() -> spv.OpTypeVoid {
-  v`o` = spv.OpVariable(spv.StorageClass.Function): T0
-  v`i` = spv.OpVariable(spv.StorageClass.Function): T0
+  #[qptr.usage(s32)]
+  v`o` = qptr.func_local_var(size: 4, align: 4): qptr
+  #[qptr.usage(s32)]
+  v`i` = qptr.func_local_var(size: 4, align: 4): qptr
   // at tests/snapshots/in/for-loop.vert.glsl:6:1
-  spv.OpStore(Pointer: v`o`, Object: 1s32)
+  qptr.store(v`o`, 1s32)
   // at tests/snapshots/in/for-loop.vert.glsl:7:1
-  spv.OpStore(Pointer: v`i`, Object: 1s32)
+  qptr.store(v`i`, 1s32)
   loop {
     // at tests/snapshots/in/for-loop.vert.glsl:7:1
-    v1 = spv.OpLoad(Pointer: v`i`): s32
+    v1 = qptr.load(v`i`): s32
     // at tests/snapshots/in/for-loop.vert.glsl:7:1
     v2 = spv.OpSLessThan(v1, 10s32): bool
     (v3: bool, _: bool) = if v2 {
       // at tests/snapshots/in/for-loop.vert.glsl:8:1
-      v4 = spv.OpLoad(Pointer: v`i`): s32
+      v4 = qptr.load(v`i`): s32
       // at tests/snapshots/in/for-loop.vert.glsl:8:1
-      v5 = spv.OpLoad(Pointer: v`o`): s32
+      v5 = qptr.load(v`o`): s32
       // at tests/snapshots/in/for-loop.vert.glsl:8:1
       v6 = spv.OpIMul(v5, v4): s32
       // at tests/snapshots/in/for-loop.vert.glsl:8:1
-      spv.OpStore(Pointer: v`o`, Object: v6)
+      qptr.store(v`o`, v6)
       // at tests/snapshots/in/for-loop.vert.glsl:7:1
-      v7 = spv.OpLoad(Pointer: v`i`): s32
+      v7 = qptr.load(v`i`): s32
       // at tests/snapshots/in/for-loop.vert.glsl:7:1
       v8 = spv.OpIAdd(v7, 1s32): s32
       // at tests/snapshots/in/for-loop.vert.glsl:7:1
-      spv.OpStore(Pointer: v`i`, Object: v8)
+      qptr.store(v`i`, v8)
       (true, false)
     } else {
       (false, true)
     }
   } while v3
   // at tests/snapshots/in/for-loop.vert.glsl:9:1
-  v0 = spv.OpLoad(Pointer: v`o`): s32
+  v0 = qptr.load(v`o`): s32
   // at tests/snapshots/in/for-loop.vert.glsl:9:1
-  spv.OpStore(Pointer: &GV`output0`, Object: v0)
+  qptr.store(&GV`output0`, v0)
 }
 
 export {
