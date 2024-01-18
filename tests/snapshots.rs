@@ -83,9 +83,9 @@ fn snapshots() {
         spv_to_spvasm(&spirv_bytes, &spvasm_in_file);
 
         let qptr_layout_config = &spirt::qptr::LayoutConfig {
-              abstract_bool_size_align: (1, 1),
-              logical_ptr_size_align: (4, 4),
-              ..spirt::qptr::LayoutConfig::VULKAN_SCALAR_LAYOUT
+            abstract_bool_size_align: (1, 1),
+            logical_ptr_size_align: (4, 4),
+            ..spirt::qptr::LayoutConfig::VULKAN_SCALAR_LAYOUT
         };
 
         let mut spirt_module = spirt::Module::lower_from_spv_bytes(
