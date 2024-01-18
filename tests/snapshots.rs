@@ -96,7 +96,7 @@ fn snapshots() {
 
         spirt::passes::legalize::structurize_func_cfgs(&mut spirt_module);
 
-        spirt::passes::qptr::lower_from_spv_ptrs(&mut spirt_module, &qptr_layout_config);
+        spirt::passes::qptr::lower_from_spv_ptrs(&mut spirt_module, qptr_layout_config);
 
         spirt::passes::qptr::analyze_uses(&mut spirt_module, qptr_layout_config);
 
@@ -110,7 +110,7 @@ fn snapshots() {
 
         spirt::passes::link::resolve_imports(&mut spirt_module);
 
-        spirt::passes::qptr::lift_to_spv_ptrs(&mut spirt_module, &qptr_layout_config);
+        spirt::passes::qptr::lift_to_spv_ptrs(&mut spirt_module, qptr_layout_config);
 
         let spirv_out_words = &spirt_module.lift_to_spv_module_emitter().unwrap().words;
         let spirv_out_bytes =
