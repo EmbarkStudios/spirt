@@ -35,7 +35,7 @@ serde_json = "1.0"
 smallvec = { version = "1.7.0", features = ["serde", "union"] }
 
 [dev-dependencies]
-naga = { version = "0.14", features = ["wgsl-in", "spv-out"] }
+naga = { version = "0.19", features = ["wgsl-in", "spv-out"] }
 
 [package.metadata.docs.rs]
 all-features = true
