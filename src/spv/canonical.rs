@@ -258,10 +258,10 @@ impl spv::Inst {
         match imms {
             [] if opcode == mo.OpTypeBool => Some(scalar::Type::Bool),
             &[_, spv::Imm::Short(_, 0)] if opcode == mo.OpTypeInt => {
-                scalar::Type::uint_from_bit_width( self.int_or_float_type_bit_width()?)
+                scalar::Type::uint_from_bit_width(self.int_or_float_type_bit_width()?)
             }
             &[_, spv::Imm::Short(_, 1)] if opcode == mo.OpTypeInt => {
-                scalar::Type::sint_from_bit_width( self.int_or_float_type_bit_width()?)
+                scalar::Type::sint_from_bit_width(self.int_or_float_type_bit_width()?)
             }
             [_] if opcode == mo.OpTypeFloat => {
                 scalar::Type::float_from_bit_width(self.int_or_float_type_bit_width()?)
@@ -275,21 +275,18 @@ impl spv::Inst {
         let mo = MappableOps::get();
 
         match type_kind {
-            &TypeKind::Scalar(ty) => match ty {
-                scalar::Type::Bool => Some(mo.OpTypeBool.into()),
-                _ if ty.is_integer() => Some(spv::Inst {
+            &TypeKind::Scalar(ty) => match ty.kind() {
+                scalar::TypeKind::Bool => Some(mo.OpTypeBool.into()),
+                scalar::TypeKind::UInt | scalar::TypeKind::SInt => Some(spv::Inst {
                     opcode: mo.OpTypeInt,
                     imms: [
                         spv::Imm::Short(wk.LiteralInteger, ty.bit_width()),
-                        spv::Imm::Short(
-                            wk.LiteralInteger,
-                            ty.is_signed_integer() as u32,
-                        ),
+                        spv::Imm::Short(wk.LiteralInteger, ty.is_signed_integer() as u32),
                     ]
                     .into_iter()
                     .collect(),
                 }),
-                _ => Some(spv::Inst {
+                scalar::TypeKind::Float => Some(spv::Inst {
                     opcode: mo.OpTypeFloat,
                     imms: [spv::Imm::Short(wk.LiteralInteger, ty.bit_width())].into_iter().collect(),
                 }),
