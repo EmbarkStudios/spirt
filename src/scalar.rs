@@ -13,9 +13,19 @@ pub enum TypeKind {
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Bool,
-    S8, S16, S32, S64, S128,
-    U8, U16, U32, U64, U128,
-    F16, F32, F64,
+    S8,
+    S16,
+    S32,
+    S64,
+    S128,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    F16,
+    F32,
+    F64,
 }
 
 impl Type {
@@ -78,7 +88,6 @@ impl Type {
         })
     }
 }
-
 
 // FIXME(eddyb) document the 128-bit limitations.
 // HACK(eddyb) `(Type, u128)` would waste almost half its size on padding, and

@@ -265,9 +265,10 @@ impl spv::Inst {
             }
             [_] if opcode == mo.OpTypeFloat => {
                 scalar::Type::float_from_bit_width(self.int_or_float_type_bit_width()?)
-            },
+            }
             _ => None,
-        }.map(|t| t.into())
+        }
+        .map(|t| t.into())
     }
 
     pub(super) fn from_canonical_type(type_kind: &TypeKind) -> Option<Self> {
@@ -288,7 +289,9 @@ impl spv::Inst {
                 }),
                 scalar::TypeKind::Float => Some(spv::Inst {
                     opcode: mo.OpTypeFloat,
-                    imms: [spv::Imm::Short(wk.LiteralInteger, ty.bit_width())].into_iter().collect(),
+                    imms: [spv::Imm::Short(wk.LiteralInteger, ty.bit_width())]
+                        .into_iter()
+                        .collect(),
                 }),
             },
 

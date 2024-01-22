@@ -1259,7 +1259,7 @@ impl Module {
                         let scrutinee_type = input_types[0];
                         let scrutinee_type = scrutinee_type
                             .as_scalar(&cx)
-                            .filter(|ty| ty.is_integer() )
+                            .filter(|ty| ty.is_integer())
                             .ok_or_else(|| {
                                 invalid(
                                     &print::Plan::for_root(
