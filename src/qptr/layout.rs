@@ -329,7 +329,7 @@ impl<'a> LayoutCache<'a> {
         // offsets with "abstract types", it must configure `qptr::layout`?
 
         let (spv_inst, type_and_const_inputs) = match &ty_def.kind {
-            TypeKind::Scalar(scalar::Type::Bool) => {
+            TypeKind::Scalar(scalar::Type::BOOL) => {
                 // FIXME(eddyb) make this properly abstract instead of only configurable.
                 return Ok(scalar_with_size_and_align(self.config.abstract_bool_size_align));
             }

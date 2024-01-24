@@ -11,7 +11,7 @@ pub enum TypeKind {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Type {
+enum TypeInner {
     Bool,
     S8,
     S16,
@@ -28,24 +28,33 @@ pub enum Type {
     F64,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Type(TypeInner);
+
 impl Type {
+    pub const BOOL: Type = Type(TypeInner::Bool);
+
     pub const fn bit_width(self) -> u32 {
-        match self {
-            Type::Bool => 1,
-            Type::S8 | Type::U8 => 8,
-            Type::S16 | Type::U16 | Type::F16 => 16,
-            Type::S32 | Type::U32 | Type::F32 => 32,
-            Type::S64 | Type::U64 | Type::F64 => 64,
-            Type::S128 | Type::U128 => 128,
+        match self.0 {
+            TypeInner::Bool => 1,
+            TypeInner::S8 | TypeInner::U8 => 8,
+            TypeInner::S16 | TypeInner::U16 | TypeInner::F16 => 16,
+            TypeInner::S32 | TypeInner::U32 | TypeInner::F32 => 32,
+            TypeInner::S64 | TypeInner::U64 | TypeInner::F64 => 64,
+            TypeInner::S128 | TypeInner::U128 => 128,
         }
     }
 
     pub const fn kind(self) -> TypeKind {
-        match self {
-            Type::Bool => TypeKind::Bool,
-            Type::S8 | Type::S16 | Type::S32 | Type::S64 | Type::S128 => TypeKind::SInt,
-            Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::U128 => TypeKind::UInt,
-            Type::F16 | Type::F32 | Type::F64 => TypeKind::Float,
+        match self.0 {
+            TypeInner::Bool => TypeKind::Bool,
+            TypeInner::S8 | TypeInner::S16 | TypeInner::S32 | TypeInner::S64 | TypeInner::S128 => {
+                TypeKind::SInt
+            }
+            TypeInner::U8 | TypeInner::U16 | TypeInner::U32 | TypeInner::U64 | TypeInner::U128 => {
+                TypeKind::UInt
+            }
+            TypeInner::F16 | TypeInner::F32 | TypeInner::F64 => TypeKind::Float,
         }
     }
 
@@ -58,34 +67,34 @@ impl Type {
     }
 
     pub const fn uint_from_bit_width(bit_width: u32) -> Option<Self> {
-        Some(match bit_width {
-            8 => Self::U8,
-            16 => Self::U16,
-            32 => Self::U32,
-            64 => Self::U64,
-            128 => Self::U128,
+        Some(Self(match bit_width {
+            8 => TypeInner::U8,
+            16 => TypeInner::U16,
+            32 => TypeInner::U32,
+            64 => TypeInner::U64,
+            128 => TypeInner::U128,
             _ => return None,
-        })
+        }))
     }
 
     pub const fn sint_from_bit_width(bit_width: u32) -> Option<Self> {
-        Some(match bit_width {
-            8 => Self::S8,
-            16 => Self::S16,
-            32 => Self::S32,
-            64 => Self::S64,
-            128 => Self::S128,
+        Some(Self(match bit_width {
+            8 => TypeInner::S8,
+            16 => TypeInner::S16,
+            32 => TypeInner::S32,
+            64 => TypeInner::S64,
+            128 => TypeInner::S128,
             _ => return None,
-        })
+        }))
     }
 
     pub const fn float_from_bit_width(bit_width: u32) -> Option<Self> {
-        Some(match bit_width {
-            16 => Self::F16,
-            32 => Self::F32,
-            64 => Self::F64,
+        Some(Self(match bit_width {
+            16 => TypeInner::F16,
+            32 => TypeInner::F32,
+            64 => TypeInner::F64,
             _ => return None,
-        })
+        }))
     }
 }
 
@@ -128,11 +137,11 @@ impl Const {
     }
 
     pub const fn from_bool(v: bool) -> Const {
-        Const::from_bits(Type::Bool, v as u128)
+        Const::from_bits(Type(TypeInner::Bool), v as u128)
     }
 
     pub const fn from_u32(v: u32) -> Const {
-        Const::from_bits(Type::U32, v as u128)
+        Const::from_bits(Type(TypeInner::U32), v as u128)
     }
 
     /// Returns `Some(ct)` iff `ty` is `{S,U}Int` and can represent `v: i128`

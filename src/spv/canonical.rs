@@ -256,7 +256,7 @@ impl spv::Inst {
         let mo = MappableOps::get();
 
         match imms {
-            [] if opcode == mo.OpTypeBool => Some(scalar::Type::Bool),
+            [] if opcode == mo.OpTypeBool => Some(scalar::Type::BOOL),
             &[_, spv::Imm::Short(_, 0)] if opcode == mo.OpTypeInt => {
                 scalar::Type::uint_from_bit_width(self.int_or_float_type_bit_width()?)
             }

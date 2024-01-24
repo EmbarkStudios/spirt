@@ -591,7 +591,7 @@ struct PartialControlRegion {
 
 impl<'a> Structurizer<'a> {
     pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
-        let type_bool = cx.intern(scalar::Type::Bool);
+        let type_bool = cx.intern(scalar::Type::BOOL);
         let const_true = cx.intern(scalar::Const::TRUE);
         let const_false = cx.intern(scalar::Const::FALSE);
 
