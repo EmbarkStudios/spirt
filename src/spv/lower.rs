@@ -1259,10 +1259,7 @@ impl Module {
                         let scrutinee_type = input_types[0];
                         let scrutinee_type = scrutinee_type
                             .as_scalar(&cx)
-                            .filter(|ty| {
-                                matches!(ty, scalar::Type::UInt(_) | scalar::Type::SInt(_))
-                                    && ty.bit_width() <= 128
-                            })
+                            .filter(|ty| ty.is_integer())
                             .ok_or_else(|| {
                                 invalid(
                                     &print::Plan::for_root(

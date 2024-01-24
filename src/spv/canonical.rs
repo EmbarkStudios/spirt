@@ -191,7 +191,7 @@ impl scalar::Const {
         }
 
         // HACK(eddyb) signed integers are encoded sign-extended into immediates.
-        if let scalar::Type::SInt(_) = ty {
+        if ty.is_signed_integer() {
             let imm_width = imm_words * 32;
             scalar::Const::int_try_from_i128(
                 ty,
@@ -212,7 +212,7 @@ impl scalar::Const {
         let bits = self.bits();
 
         // HACK(eddyb) signed integers are encoded sign-extended into immediates.
-        let bits = if let scalar::Type::SInt(_) = ty {
+        let bits = if ty.is_signed_integer() {
             let imm_width = imm_words * 32;
             (self.int_as_i128().unwrap() as u128) & (!0 >> (128 - imm_width))
         } else {
@@ -255,23 +255,20 @@ impl spv::Inst {
 
         let mo = MappableOps::get();
 
-        let int_width = || scalar::IntWidth::try_from_bits(self.int_or_float_type_bit_width()?);
         match imms {
-            [] if opcode == mo.OpTypeBool => Some(scalar::Type::Bool.into()),
+            [] if opcode == mo.OpTypeBool => Some(scalar::Type::BOOL),
             &[_, spv::Imm::Short(_, 0)] if opcode == mo.OpTypeInt => {
-                Some(scalar::Type::UInt(int_width()?).into())
+                scalar::Type::uint_from_bit_width(self.int_or_float_type_bit_width()?)
             }
             &[_, spv::Imm::Short(_, 1)] if opcode == mo.OpTypeInt => {
-                Some(scalar::Type::SInt(int_width()?).into())
+                scalar::Type::sint_from_bit_width(self.int_or_float_type_bit_width()?)
             }
-            [_] if opcode == mo.OpTypeFloat => Some(
-                scalar::Type::Float(scalar::FloatWidth::try_from_bits(
-                    self.int_or_float_type_bit_width()?,
-                )?)
-                .into(),
-            ),
+            [_] if opcode == mo.OpTypeFloat => {
+                scalar::Type::float_from_bit_width(self.int_or_float_type_bit_width()?)
+            }
             _ => None,
         }
+        .map(|t| t.into())
     }
 
     pub(super) fn from_canonical_type(type_kind: &TypeKind) -> Option<Self> {
@@ -279,23 +276,22 @@ impl spv::Inst {
         let mo = MappableOps::get();
 
         match type_kind {
-            &TypeKind::Scalar(ty) => match ty {
-                scalar::Type::Bool => Some(mo.OpTypeBool.into()),
-                scalar::Type::SInt(w) | scalar::Type::UInt(w) => Some(spv::Inst {
+            &TypeKind::Scalar(ty) => match ty.kind() {
+                scalar::TypeKind::Bool => Some(mo.OpTypeBool.into()),
+                scalar::TypeKind::UInt | scalar::TypeKind::SInt => Some(spv::Inst {
                     opcode: mo.OpTypeInt,
                     imms: [
-                        spv::Imm::Short(wk.LiteralInteger, w.bits()),
-                        spv::Imm::Short(
-                            wk.LiteralInteger,
-                            matches!(ty, scalar::Type::SInt(_)) as u32,
-                        ),
+                        spv::Imm::Short(wk.LiteralInteger, ty.bit_width()),
+                        spv::Imm::Short(wk.LiteralInteger, ty.is_signed_integer() as u32),
                     ]
                     .into_iter()
                     .collect(),
                 }),
-                scalar::Type::Float(w) => Some(spv::Inst {
+                scalar::TypeKind::Float => Some(spv::Inst {
                     opcode: mo.OpTypeFloat,
-                    imms: [spv::Imm::Short(wk.LiteralInteger, w.bits())].into_iter().collect(),
+                    imms: [spv::Imm::Short(wk.LiteralInteger, ty.bit_width())]
+                        .into_iter()
+                        .collect(),
                 }),
             },
 

@@ -2396,11 +2396,11 @@ impl Print for TypeDef {
                 match kind {
                     TypeKind::Scalar(ty) => {
                         let width = ty.bit_width();
-                        kw(match ty {
-                            scalar::Type::Bool => "bool".into(),
-                            scalar::Type::SInt(_) => format!("s{width}"),
-                            scalar::Type::UInt(_) => format!("u{width}"),
-                            scalar::Type::Float(_) => format!("f{width}"),
+                        kw(match ty.kind() {
+                            scalar::TypeKind::Bool => "bool".into(),
+                            scalar::TypeKind::SInt => format!("s{width}"),
+                            scalar::TypeKind::UInt => format!("u{width}"),
+                            scalar::TypeKind::Float => format!("f{width}"),
                         })
                     }
 
@@ -2448,11 +2448,11 @@ impl Print for ConstDef {
             ConstKind::Scalar(ct) => {
                 let ty = ct.ty();
                 let width = ty.bit_width();
-                let (maybe_printed_value, ty_prefix) = match ty {
-                    scalar::Type::Bool => unreachable!(),
-                    scalar::Type::SInt(_) => (ct.int_as_i128().map(|x| x.to_string()), 's'),
-                    scalar::Type::UInt(_) => (ct.int_as_u128().map(|x| x.to_string()), 'u'),
-                    scalar::Type::Float(_) => {
+                let (maybe_printed_value, ty_prefix) = match ty.kind() {
+                    scalar::TypeKind::Bool => unreachable!(),
+                    scalar::TypeKind::SInt => (ct.int_as_i128().map(|x| x.to_string()), 's'),
+                    scalar::TypeKind::UInt => (ct.int_as_u128().map(|x| x.to_string()), 'u'),
+                    scalar::TypeKind::Float => {
                         /// Check that parsing the result of printing produces
                         /// the original bits of the floating-point value, and
                         /// only return `Some` if that is the case.

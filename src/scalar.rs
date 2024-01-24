@@ -2,101 +2,99 @@
 //!
 //! **Note**: pointers are never scalars (like SPIR-V, but unlike other IRs).
 
-// HACK(eddyb) this could be some `struct` with private fields, but this `enum`
-// is only 2 bytes in size, and has better ergonomics overall.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum Type {
+pub enum TypeKind {
     Bool,
-    SInt(IntWidth),
-    UInt(IntWidth),
-    Float(FloatWidth),
+    Float,
+    UInt,
+    SInt,
 }
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum TypeInner {
+    Bool,
+    S8,
+    S16,
+    S32,
+    S64,
+    S128,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    F16,
+    F32,
+    F64,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Type(TypeInner);
 
 impl Type {
-    // HACK(eddyb) only common widths, as a convenience, expand as-needed.
-    pub const S32: Type = Type::SInt(IntWidth::I32);
-    pub const U32: Type = Type::UInt(IntWidth::I32);
-    pub const F32: Type = Type::Float(FloatWidth::F32);
-    pub const F64: Type = Type::Float(FloatWidth::F64);
+    pub const BOOL: Type = Type(TypeInner::Bool);
 
     pub const fn bit_width(self) -> u32 {
-        match self {
-            Type::Bool => 1,
-            Type::SInt(w) | Type::UInt(w) => w.bits(),
-            Type::Float(w) => w.bits(),
-        }
-    }
-}
-
-/// Bit-width of a supported integer type (only power-of-two multiples of a byte).
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct IntWidth {
-    // HACK(eddyb) this is so compact that only 3 bits of this byte are used
-    // to encode integer types from `i8` to `i128`, and so `Type` could all fit
-    // in one byte, but that'd need a new `enum` for `Bool`/`{S,U}Int`/`Float`.
-    log2_bytes: u8,
-}
-
-impl IntWidth {
-    pub const I8: Self = Self::try_from_bits_unwrap(8);
-    pub const I16: Self = Self::try_from_bits_unwrap(16);
-    pub const I32: Self = Self::try_from_bits_unwrap(32);
-    pub const I64: Self = Self::try_from_bits_unwrap(64);
-    pub const I128: Self = Self::try_from_bits_unwrap(128);
-
-    // FIXME(eddyb) remove when `Option::unwrap` is stabilized.
-    const fn try_from_bits_unwrap(bits: u32) -> Self {
-        match Self::try_from_bits(bits) {
-            Some(w) => w,
-            None => unreachable!(),
+        match self.0 {
+            TypeInner::Bool => 1,
+            TypeInner::S8 | TypeInner::U8 => 8,
+            TypeInner::S16 | TypeInner::U16 | TypeInner::F16 => 16,
+            TypeInner::S32 | TypeInner::U32 | TypeInner::F32 => 32,
+            TypeInner::S64 | TypeInner::U64 | TypeInner::F64 => 64,
+            TypeInner::S128 | TypeInner::U128 => 128,
         }
     }
 
-    pub const fn try_from_bits(bits: u32) -> Option<Self> {
-        if bits % 8 != 0 {
-            return None;
-        }
-        let bytes = bits / 8;
-        match bytes.checked_ilog2() {
-            Some(log2_bytes_u32) => {
-                let log2_bytes = log2_bytes_u32 as u8;
-                assert!(log2_bytes as u32 == log2_bytes_u32);
-                Some(Self { log2_bytes })
+    pub const fn kind(self) -> TypeKind {
+        match self.0 {
+            TypeInner::Bool => TypeKind::Bool,
+            TypeInner::S8 | TypeInner::S16 | TypeInner::S32 | TypeInner::S64 | TypeInner::S128 => {
+                TypeKind::SInt
             }
-            None => None,
+            TypeInner::U8 | TypeInner::U16 | TypeInner::U32 | TypeInner::U64 | TypeInner::U128 => {
+                TypeKind::UInt
+            }
+            TypeInner::F16 | TypeInner::F32 | TypeInner::F64 => TypeKind::Float,
         }
     }
 
-    pub const fn bits(self) -> u32 {
-        8 * (1 << self.log2_bytes)
-    }
-}
-
-/// Bit-width of a supported floating-point type (only power-of-two multiples of a byte).
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct FloatWidth(IntWidth);
-
-impl FloatWidth {
-    pub const F32: Self = Self::try_from_bits_unwrap(32);
-    pub const F64: Self = Self::try_from_bits_unwrap(64);
-
-    // FIXME(eddyb) remove when `Option::unwrap` is stabilized.
-    const fn try_from_bits_unwrap(bits: u32) -> Self {
-        match Self::try_from_bits(bits) {
-            Some(w) => w,
-            None => unreachable!(),
-        }
+    pub const fn is_integer(self) -> bool {
+        matches!(self.kind(), TypeKind::UInt | TypeKind::SInt)
     }
 
-    pub const fn try_from_bits(bits: u32) -> Option<Self> {
-        match IntWidth::try_from_bits(bits) {
-            Some(w) => Some(Self(w)),
-            None => None,
-        }
+    pub const fn is_signed_integer(self) -> bool {
+        matches!(self.kind(), TypeKind::SInt)
     }
 
-    pub const fn bits(self) -> u32 {
-        self.0.bits()
+    pub const fn uint_from_bit_width(bit_width: u32) -> Option<Self> {
+        Some(Self(match bit_width {
+            8 => TypeInner::U8,
+            16 => TypeInner::U16,
+            32 => TypeInner::U32,
+            64 => TypeInner::U64,
+            128 => TypeInner::U128,
+            _ => return None,
+        }))
+    }
+
+    pub const fn sint_from_bit_width(bit_width: u32) -> Option<Self> {
+        Some(Self(match bit_width {
+            8 => TypeInner::S8,
+            16 => TypeInner::S16,
+            32 => TypeInner::S32,
+            64 => TypeInner::S64,
+            128 => TypeInner::S128,
+            _ => return None,
+        }))
+    }
+
+    pub const fn float_from_bit_width(bit_width: u32) -> Option<Self> {
+        Some(Self(match bit_width {
+            16 => TypeInner::F16,
+            32 => TypeInner::F32,
+            64 => TypeInner::F64,
+            _ => return None,
+        }))
     }
 }
 
@@ -139,11 +137,11 @@ impl Const {
     }
 
     pub const fn from_bool(v: bool) -> Const {
-        Const::from_bits(Type::Bool, v as u128)
+        Const::from_bits(Type(TypeInner::Bool), v as u128)
     }
 
     pub const fn from_u32(v: u32) -> Const {
-        Const::from_bits(Type::U32, v as u128)
+        Const::from_bits(Type(TypeInner::U32), v as u128)
     }
 
     /// Returns `Some(ct)` iff `ty` is `{S,U}Int` and can represent `v: i128`
@@ -164,23 +162,23 @@ impl Const {
     /// Returns `Some(v)` iff `self` is `{S,U}Int` and representable by `v: i128`
     /// (i.e. `self` has the same sign and absolute value as `v` does).
     pub fn int_as_i128(&self) -> Option<i128> {
-        match self.ty {
-            Type::Bool | Type::Float(_) => None,
-            Type::SInt(_) => {
+        match self.ty.kind() {
+            TypeKind::Bool | TypeKind::Float => None,
+            TypeKind::SInt => {
                 let width = self.ty.bit_width();
                 Some((self.bits as i128) << (128 - width) >> (128 - width))
             }
-            Type::UInt(_) => self.bits.try_into().ok(),
+            TypeKind::UInt => self.bits.try_into().ok(),
         }
     }
 
     /// Returns `Some(v)` iff `self` is `{S,U}Int` and representable by `v: u128`
     /// (i.e. `self` is positive and has the same absolute value as `v` does).
     pub fn int_as_u128(&self) -> Option<u128> {
-        match self.ty {
-            Type::Bool | Type::Float(_) => None,
-            Type::SInt(_) => self.int_as_i128()?.try_into().ok(),
-            Type::UInt(_) => Some(self.bits),
+        match self.ty.kind() {
+            TypeKind::Bool | TypeKind::Float => None,
+            TypeKind::SInt => self.int_as_i128()?.try_into().ok(),
+            TypeKind::UInt => Some(self.bits),
         }
     }
 
