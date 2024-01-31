@@ -1162,7 +1162,8 @@ impl Module {
                                 target_block_id: target_block_details.label_id,
                                 target_phi_idx,
                             };
-                            let phi_value_ids = phi_to_values.remove(&phi_key).unwrap_or_default();
+                            let phi_value_ids =
+                                phi_to_values.swap_remove(&phi_key).unwrap_or_default();
 
                             match phi_value_ids[..] {
                                 [] => Err(invalid(&format!(
