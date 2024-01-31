@@ -24,6 +24,9 @@ jobs:
           toolchain: nightly
           override: true
 
+      # run cargo fetch w/ --locked to verify Cargo.lock is up-to-date
+      - run: cargo fetch --locked
+
       # make sure all code has been formatted with rustfmt
       - name: check rustfmt
         run: |
@@ -31,7 +34,6 @@ jobs:
           cargo fmt -- --check --color always
 
       # run clippy to verify we have no warnings
-      - run: cargo fetch
       - name: cargo clippy
         run: |
           rustup component add clippy
