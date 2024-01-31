@@ -811,7 +811,8 @@ impl Spec {
                         let size = match o.kind {
                             "LiteralInteger"
                             | "LiteralExtInstInteger"
-                            | "LiteralSpecConstantOpInteger" => LiteralSize::Word,
+                            | "LiteralSpecConstantOpInteger"
+                            | "LiteralFloat" => LiteralSize::Word,
                             "LiteralString" => LiteralSize::NulTerminated,
                             "LiteralContextDependentNumber" => LiteralSize::FromContextualType,
                             _ => unreachable!(),

@@ -1,3 +1,4 @@
 [submodule "khronos-spec/SPIRV-Headers"]
 	path = khronos-spec/SPIRV-Headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers
+	branch = vulkan-sdk-1.3.275
