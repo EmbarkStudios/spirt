@@ -726,7 +726,7 @@ pub struct FuncDefBody {
 pub use context::ControlRegion;
 
 /// Definition for a [`ControlRegion`]: a control-flow region.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ControlRegionDef {
     /// Inputs to this [`ControlRegion`]:
     /// * accessed using [`Value::ControlRegionInput`]

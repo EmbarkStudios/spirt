@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#55](https://github.com/EmbarkStudios/spirt/pull/55) fixed CFG structurization
+  "region `children` list desync" assertion failures (e.g. [rust-gpu#1086](https://github.com/EmbarkStudios/rust-gpu/issues/1086))
+  by tracking whole `ControlRegion`s instead of their `children`
+  - also removed a lot of redundant boolean values, thanks to condition propagation
+    becoming always on-demand (instead of relying on less robust special-casing)
 - [PR#51](https://github.com/EmbarkStudios/spirt/pull/51) combined `TypeCtor`/`ConstCtor`
   and their respective "ctor args", into a single unified `TypeKind`/`ConstKind`
 - [PR#48](https://github.com/EmbarkStudios/spirt/pull/48) changed CFG structurization
