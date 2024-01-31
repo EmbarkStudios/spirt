@@ -1075,7 +1075,7 @@ impl<'a> Structurizer<'a> {
         }
 
         // Try to extract (deferred) backedges (which later get turned into loops).
-        let backedge = region.deferred_edges.target_to_deferred.remove(&unstructured_region);
+        let backedge = region.deferred_edges.target_to_deferred.swap_remove(&unstructured_region);
 
         let old_state = self
             .structurize_region_state
@@ -1218,7 +1218,7 @@ impl<'a> Structurizer<'a> {
                     let (edge_condition, values_or_count) = match deferred {
                         Deferred::Edge { target, target_input_count, .. } => match deferred_edges
                             .target_to_deferred
-                            .remove(&target)
+                            .swap_remove(&target)
                         {
                             Some(DeferredEdgeBundle { condition, edge_bundle }) => {
                                 (Some(condition), Ok(edge_bundle.target_inputs))
