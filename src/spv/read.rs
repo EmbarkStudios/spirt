@@ -12,15 +12,14 @@ use std::{fs, io, iter, slice};
 ///
 /// Used currently only to help parsing `LiteralContextDependentNumber`.
 enum KnownIdDef {
-    TypeInt(NonZeroU32),
-    TypeFloat(NonZeroU32),
+    TypeIntOrFloat(NonZeroU32),
     Uncategorized { opcode: spec::Opcode, result_type_id: Option<spv::Id> },
 }
 
 impl KnownIdDef {
     fn result_type_id(&self) -> Option<spv::Id> {
         match *self {
-            Self::TypeInt(_) | Self::TypeFloat(_) => None,
+            Self::TypeIntOrFloat(_) => None,
             Self::Uncategorized { result_type_id, .. } => result_type_id,
         }
     }
@@ -174,11 +173,8 @@ impl InstParser<'_> {
                     .and_then(|id| self.known_ids.get(&id))
                     .ok_or(Error::MissingContextSensitiveLiteralType)?;
 
-                let extra_word_count = match *contextual_type {
-                    KnownIdDef::TypeInt(width) | KnownIdDef::TypeFloat(width) => {
-                        // HACK(eddyb) `(width + 31) / 32 - 1` but without overflow.
-                        (width.get() - 1) / 32
-                    }
+                let word_count = match *contextual_type {
+                    KnownIdDef::TypeIntOrFloat(width) => width.get().div_ceil(32),
                     KnownIdDef::Uncategorized { opcode, .. } => {
                         return Err(Error::UnsupportedContextSensitiveLiteralType {
                             type_opcode: opcode,
@@ -186,11 +182,11 @@ impl InstParser<'_> {
                     }
                 };
 
-                if extra_word_count == 0 {
+                if word_count == 1 {
                     self.inst.imms.push(spv::Imm::Short(kind, word));
                 } else {
                     self.inst.imms.push(spv::Imm::LongStart(kind, word));
-                    for _ in 0..extra_word_count {
+                    for _ in 1..word_count {
                         let word = self.words.next().ok_or(Error::NotEnoughWords)?;
                         self.inst.imms.push(spv::Imm::LongCont(kind, word));
                     }
@@ -304,9 +300,6 @@ impl ModuleParser {
 impl Iterator for ModuleParser {
     type Item = io::Result<spv::InstWithIds>;
     fn next(&mut self) -> Option<Self::Item> {
-        let spv_spec = spec::Spec::get();
-        let wk = &spv_spec.well_known;
-
         let words = &bytemuck::cast_slice::<u8, u32>(&self.word_bytes)[self.next_word..];
         let &opcode = words.first()?;
 
@@ -341,24 +334,11 @@ impl Iterator for ModuleParser {
 
         // HACK(eddyb) `Option::map` allows using `?` for `Result` in the closure.
         let maybe_known_id_result = inst.result_id.map(|id| {
-            let known_id_def = if opcode == wk.OpTypeInt {
-                KnownIdDef::TypeInt(match inst.imms[0] {
-                    spv::Imm::Short(kind, n) => {
-                        assert_eq!(kind, wk.LiteralInteger);
-                        n.try_into().ok().ok_or_else(|| invalid("Width cannot be 0"))?
-                    }
-                    _ => unreachable!(),
-                })
-            } else if opcode == wk.OpTypeFloat {
-                KnownIdDef::TypeFloat(match inst.imms[0] {
-                    spv::Imm::Short(kind, n) => {
-                        assert_eq!(kind, wk.LiteralInteger);
-                        n.try_into().ok().ok_or_else(|| invalid("Width cannot be 0"))?
-                    }
-                    _ => unreachable!(),
-                })
-            } else {
-                KnownIdDef::Uncategorized { opcode, result_type_id: inst.result_type_id }
+            let known_id_def = match inst.int_or_float_type_bit_width() {
+                Some(w) => KnownIdDef::TypeIntOrFloat(
+                    w.try_into().ok().ok_or_else(|| invalid("Width cannot be 0"))?,
+                ),
+                None => KnownIdDef::Uncategorized { opcode, result_type_id: inst.result_type_id },
             };
 
             let old = self.known_ids.insert(id, known_id_def);

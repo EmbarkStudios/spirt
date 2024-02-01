@@ -168,6 +168,7 @@ pub mod passes {
     pub mod qptr;
 }
 pub mod qptr;
+pub mod scalar;
 pub mod spv;
 
 use smallvec::SmallVec;
@@ -453,16 +454,23 @@ impl<T: Eq> Ord for OrdAssertEq<T> {
 pub use context::Type;
 
 /// Definition for a [`Type`].
-//
-// FIXME(eddyb) maybe special-case some basic types like integers.
 #[derive(PartialEq, Eq, Hash)]
 pub struct TypeDef {
     pub attrs: AttrSet,
     pub kind: TypeKind,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum TypeKind {
+    /// Scalar (`bool`, integer, and floating-point) type, with limitations
+    /// on the supported bit-widths (power-of-two multiples of a byte).
+    ///
+    /// **Note**: pointers are never scalars (like SPIR-V, but unlike other IRs).
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    #[from]
+    Scalar(scalar::Type),
+
     /// "Quasi-pointer", an untyped pointer-like abstract scalar that can represent
     /// both memory locations (in any address space) and other kinds of locations
     /// (e.g. SPIR-V `OpVariable`s in non-memory "storage classes").
@@ -490,12 +498,18 @@ pub enum TypeKind {
     SpvStringLiteralForExtInst,
 }
 
-// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`.
-impl context::InternInCx<Type> for TypeKind {
-    fn intern_in_cx(self, cx: &Context) -> Type {
-        cx.intern(TypeDef { attrs: Default::default(), kind: self })
+// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`,
+// and the macro is only used because coherence bans `impl<T: Into<TypeKind>>`.
+macro_rules! impl_intern_type_kind {
+    ($($kind:ty),+ $(,)?) => {
+        $(impl context::InternInCx<Type> for $kind {
+            fn intern_in_cx(self, cx: &Context) -> Type {
+                cx.intern(TypeDef { attrs: Default::default(), kind: self.into() })
+            }
+        })+
     }
 }
+impl_intern_type_kind!(TypeKind, scalar::Type);
 
 // HACK(eddyb) this is like `Either<Type, Const>`, only used in `TypeKind::SpvInst`,
 // and only because SPIR-V type definitions can references both types and consts.
@@ -503,6 +517,16 @@ impl context::InternInCx<Type> for TypeKind {
 pub enum TypeOrConst {
     Type(Type),
     Const(Const),
+}
+
+// HACK(eddyb) on `Type` instead of `TypeDef` for ergonomics reasons.
+impl Type {
+    pub fn as_scalar(self, cx: &Context) -> Option<scalar::Type> {
+        match cx[self].kind {
+            TypeKind::Scalar(ty) => Some(ty),
+            _ => None,
+        }
+    }
 }
 
 /// Interned handle for a [`ConstDef`](crate::ConstDef) (a constant value).
@@ -518,8 +542,26 @@ pub struct ConstDef {
     pub kind: ConstKind,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum ConstKind {
+    /// Undeterminate value (i.e. SPIR-V `OpUndef`, LLVM `undef`).
+    //
+    // FIXME(eddyb) could it be possible to adopt LLVM's newer `poison`+`freeze`
+    // model, without being forced to never lift back to `OpUndef`?
+    Undef,
+
+    /// Scalar (`bool`, integer, and floating-point) constant, which must have
+    /// a type of [`TypeKind::Scalar`] (of the same [`scalar::Type`]).
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    //
+    // FIXME(eddyb) maybe document the 128-bit limitation?.
+    // FIXME(eddyb) this technically makes the `scalar::Type` redundant, could
+    // it get out of sync? (perhaps "forced canonicalization" could be used to
+    // enforce that interning simply doesn't allow such scenarios?).
+    #[from]
+    Scalar(scalar::Const),
+
     PtrToGlobalVar(GlobalVar),
 
     // HACK(eddyb) this is a fallback case that should become increasingly rare
@@ -532,6 +574,34 @@ pub enum ConstKind {
     /// which can't have literals itself - for non-string literals `OpConstant*`
     /// are readily usable, but only `OpString` is supported for string literals.
     SpvStringLiteralForExtInst(InternedStr),
+}
+
+// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`,
+// like the `TypeKind` one, but this one is even weirder because it also interns
+// the inherent type of the constant, as a `Type` (with empty attributes).
+macro_rules! impl_intern_const_kind {
+    ($($kind:ty),+ $(,)?) => {
+        $(impl context::InternInCx<Const> for $kind {
+            fn intern_in_cx(self, cx: &Context) -> Const {
+                cx.intern(ConstDef {
+                    attrs: Default::default(),
+                    ty: cx.intern(self.ty()),
+                    kind: self.into(),
+                })
+            }
+        })+
+    }
+}
+impl_intern_const_kind!(scalar::Const);
+
+// HACK(eddyb) on `Const` instead of `ConstDef` for ergonomics reasons.
+impl Const {
+    pub fn as_scalar(self, cx: &Context) -> Option<&scalar::Const> {
+        match &cx[self].kind {
+            ConstKind::Scalar(ct) => Some(ct),
+            _ => None,
+        }
+    }
 }
 
 /// Declarations ([`GlobalVarDecl`], [`FuncDecl`]) can contain a full definition,
@@ -825,13 +895,24 @@ pub enum ControlNodeKind {
     },
 }
 
+// FIXME(eddyb) consider interning this, perhaps in a similar vein to `DataInstForm`.
 #[derive(Clone)]
 pub enum SelectionKind {
     /// Two-case selection based on boolean condition, i.e. `if`-`else`, with
     /// the two cases being "then" and "else" (in that order).
     BoolCond,
 
-    SpvInst(spv::Inst),
+    /// `N+1`-case selection based on comparing an integer scrutinee against
+    /// `N` constants, i.e. `switch`, with the last case being the "default"
+    /// (making it the only case without a matching entry in `case_consts`).
+    Switch {
+        // FIXME(eddyb) avoid some of the `scalar::Const` overhead here, as there
+        // is only a single type and we shouldn't need to store more bits per case,
+        // than the actual width of the integer type.
+        // FIXME(eddyb) consider storing this more like sorted compressed keyset,
+        // as there can be no duplicates, and in many cases it may be contiguous.
+        case_consts: Vec<scalar::Const>,
+    },
 }
 
 /// Entity handle for a [`DataInstDef`](crate::DataInstDef) (an SSA instruction).
@@ -868,6 +949,12 @@ pub struct DataInstFormDef {
 
 #[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum DataInstKind {
+    /// Scalar (`bool`, integer, and floating-point) pure operations.
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    #[from]
+    Scalar(scalar::Op),
+
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
