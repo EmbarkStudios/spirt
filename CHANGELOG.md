@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] - ReleaseDate
 
 ### Changed 🛠
+- [PR#61](https://github.com/EmbarkStudios/spirt/pull/61) updated `SPIRV-Headers`
+  to match Vulkan SDK 1.3.275
 - [PR#55](https://github.com/EmbarkStudios/spirt/pull/55) fixed CFG structurization
   "region `children` list desync" assertion failures (e.g. [rust-gpu#1086](https://github.com/EmbarkStudios/rust-gpu/issues/1086))
   by tracking whole `ControlRegion`s instead of their `children`
