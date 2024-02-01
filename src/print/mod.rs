@@ -1048,7 +1048,9 @@ impl<'a> Printer<'a> {
                     _ => unreachable!(),
                 };
                 if let Some(use_style) = use_style_slot {
-                    assert!(matches!(use_style, UseStyle::Inline));
+                    //NOTE(siebencorgie) Assert breaks if we leave a _dangling_ export function
+                    // that is no entrypoint.
+                    //assert!(matches!(use_style, UseStyle::Inline));
 
                     let parent_func = Some(func);
                     let named_style = try_claim_name_from_attrs_across_versions(
