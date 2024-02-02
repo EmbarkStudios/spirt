@@ -168,11 +168,13 @@ pub mod passes {
     pub mod qptr;
 }
 pub mod qptr;
+pub mod scalar;
 pub mod spv;
+pub mod vector;
 
 use smallvec::SmallVec;
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 // HACK(eddyb) work around the lack of `FxIndex{Map,Set}` type aliases elsewhere.
@@ -453,16 +455,30 @@ impl<T: Eq> Ord for OrdAssertEq<T> {
 pub use context::Type;
 
 /// Definition for a [`Type`].
-//
-// FIXME(eddyb) maybe special-case some basic types like integers.
 #[derive(PartialEq, Eq, Hash)]
 pub struct TypeDef {
     pub attrs: AttrSet,
     pub kind: TypeKind,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum TypeKind {
+    /// Scalar (`bool`, integer, and floating-point) type, with limitations
+    /// on the supported bit-widths (power-of-two multiples of a byte).
+    ///
+    /// **Note**: pointers are never scalars (like SPIR-V, but unlike other IRs).
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    #[from]
+    Scalar(scalar::Type),
+
+    /// Vector (small array of [`scalar`]s) type, with some limitations on the
+    /// supported component counts (but all standard ones should be included).
+    ///
+    /// See also the [`vector`] module for more documentation and definitions.
+    #[from]
+    Vector(vector::Type),
+
     /// "Quasi-pointer", an untyped pointer-like abstract scalar that can represent
     /// both memory locations (in any address space) and other kinds of locations
     /// (e.g. SPIR-V `OpVariable`s in non-memory "storage classes").
@@ -479,10 +495,12 @@ pub enum TypeKind {
     // separately in e.g. `ControlRegionInputDecl`, might be a better approach?
     QPtr,
 
+    // FIXME(eddyb) consider wrapping all of these in an `Rc` like `ConstKind`.
     SpvInst {
         spv_inst: spv::Inst,
         // FIXME(eddyb) find a better name.
         type_and_const_inputs: SmallVec<[TypeOrConst; 2]>,
+        value_lowering: spv::ValueLowering,
     },
 
     /// The type of a [`ConstKind::SpvStringLiteralForExtInst`] constant, i.e.
@@ -490,12 +508,18 @@ pub enum TypeKind {
     SpvStringLiteralForExtInst,
 }
 
-// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`.
-impl context::InternInCx<Type> for TypeKind {
-    fn intern_in_cx(self, cx: &Context) -> Type {
-        cx.intern(TypeDef { attrs: Default::default(), kind: self })
+// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`,
+// and the macro is only used because coherence bans `impl<T: Into<TypeKind>>`.
+macro_rules! impl_intern_type_kind {
+    ($($kind:ty),+ $(,)?) => {
+        $(impl context::InternInCx<Type> for $kind {
+            fn intern_in_cx(self, cx: &Context) -> Type {
+                cx.intern(TypeDef { attrs: Default::default(), kind: self.into() })
+            }
+        })+
     }
 }
+impl_intern_type_kind!(TypeKind, scalar::Type, vector::Type);
 
 // HACK(eddyb) this is like `Either<Type, Const>`, only used in `TypeKind::SpvInst`,
 // and only because SPIR-V type definitions can references both types and consts.
@@ -505,10 +529,28 @@ pub enum TypeOrConst {
     Const(Const),
 }
 
-/// Interned handle for a [`ConstDef`](crate::ConstDef) (a constant value).
+// HACK(eddyb) on `Type` instead of `TypeDef` for ergonomics reasons.
+impl Type {
+    pub fn as_scalar(self, cx: &Context) -> Option<scalar::Type> {
+        match cx[self].kind {
+            TypeKind::Scalar(ty) => Some(ty),
+            _ => None,
+        }
+    }
+    pub fn as_vector(self, cx: &Context) -> Option<vector::Type> {
+        match cx[self].kind {
+            TypeKind::Vector(ty) => Some(ty),
+            _ => None,
+        }
+    }
+}
+
+/// Interned handle for a [`ConstDef`](crate::ConstDef) (a constant [`Value`](crate::Value)).
 pub use context::Const;
 
-/// Definition for a [`Const`]: a constant value.
+/// Definition for a [`Const`]: a constant [`Value`].
+///
+/// See [`Value`] docs for limitations on the types of values, including [`Const`]s.
 //
 // FIXME(eddyb) maybe special-case some basic consts like integer literals.
 #[derive(PartialEq, Eq, Hash)]
@@ -518,8 +560,38 @@ pub struct ConstDef {
     pub kind: ConstKind,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum ConstKind {
+    /// Undeterminate value (i.e. SPIR-V `OpUndef`, LLVM `undef`).
+    //
+    // FIXME(eddyb) could it be possible to adopt LLVM's newer `poison`+`freeze`
+    // model, without being forced to never lift back to `OpUndef`?
+    Undef,
+
+    /// Scalar (`bool`, integer, and floating-point) constant, which must have
+    /// a type of [`TypeKind::Scalar`] (of the same [`scalar::Type`]).
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    //
+    // FIXME(eddyb) maybe document the 128-bit limitation?.
+    // FIXME(eddyb) this technically makes the `scalar::Type` redundant, could
+    // it get out of sync? (perhaps "forced canonicalization" could be used to
+    // enforce that interning simply doesn't allow such scenarios?).
+    #[from]
+    Scalar(scalar::Const),
+
+    /// Vector (small array of [`scalar`]s) constant, which must have
+    /// a type of [`TypeKind::Vector`] (of the same [`vector::Type`]).
+    ///
+    /// See also the [`vector`] module for more documentation and definitions.
+    //
+    // FIXME(eddyb) maybe document the 128-bit limitation inherited from `scalar::Const`?
+    // FIXME(eddyb) this technically makes the `vector::Type` redundant, could
+    // it get out of sync? (perhaps "forced canonicalization" could be used to
+    // enforce that interning simply doesn't allow such scenarios?).
+    #[from]
+    Vector(vector::Const),
+
     PtrToGlobalVar(GlobalVar),
 
     // HACK(eddyb) this is a fallback case that should become increasingly rare
@@ -532,6 +604,40 @@ pub enum ConstKind {
     /// which can't have literals itself - for non-string literals `OpConstant*`
     /// are readily usable, but only `OpString` is supported for string literals.
     SpvStringLiteralForExtInst(InternedStr),
+}
+
+// HACK(eddyb) this behaves like an implicit conversion for `cx.intern(...)`,
+// like the `TypeKind` one, but this one is even weirder because it also interns
+// the inherent type of the constant, as a `Type` (with empty attributes).
+macro_rules! impl_intern_const_kind {
+    ($($kind:ty),+ $(,)?) => {
+        $(impl context::InternInCx<Const> for $kind {
+            fn intern_in_cx(self, cx: &Context) -> Const {
+                cx.intern(ConstDef {
+                    attrs: Default::default(),
+                    ty: cx.intern(self.ty()),
+                    kind: self.into(),
+                })
+            }
+        })+
+    }
+}
+impl_intern_const_kind!(scalar::Const, vector::Const);
+
+// HACK(eddyb) on `Const` instead of `ConstDef` for ergonomics reasons.
+impl Const {
+    pub fn as_scalar(self, cx: &Context) -> Option<&scalar::Const> {
+        match &cx[self].kind {
+            ConstKind::Scalar(ct) => Some(ct),
+            _ => None,
+        }
+    }
+    pub fn as_vector(self, cx: &Context) -> Option<&vector::Const> {
+        match &cx[self].kind {
+            ConstKind::Vector(ct) => Some(ct),
+            _ => None,
+        }
+    }
 }
 
 /// Declarations ([`GlobalVarDecl`], [`FuncDecl`]) can contain a full definition,
@@ -588,10 +694,32 @@ pub enum AddrSpace {
 }
 
 /// The body of a [`GlobalVar`] definition.
+//
+// FIXME(eddyb) make "interface variables" go through imports, not definitions.
 #[derive(Clone)]
 pub struct GlobalVarDefBody {
-    /// If `Some`, the global variable will start out with the specified value.
-    pub initializer: Option<Const>,
+    pub initializer: Option<GlobalVarInit>,
+}
+
+/// Initial contents for a [`GlobalVar`] definition.
+//
+// FIXME(eddyb) add special cases for for undef/zeroed/etc.
+// FIXME(eddyb) consider renaming this to `ConstData` or `ConstBlob`?
+#[derive(Clone)]
+pub enum GlobalVarInit {
+    /// Single valid (constant) value (see [`Value`] docs for valid types).
+    //
+    // FIXME(eddyb) does this need to be its own case at all?
+    Direct(Const),
+
+    /// SPIR-V "aggregate" (`OpTypeStruct`/`OpTypeArray`), represented as its
+    /// non-aggregate leaves (i.e. it's disaggregated, as per [`Value`] docs).
+    SpvAggregate { ty: Type, leaves: SmallVec<[Const; 4]> },
+
+    /// Non-overlapping multiple values, placed at explicit offsets.
+    //
+    // FIXME(eddyb) use a more efficient representation, like miri's.
+    Composite { offset_to_value: BTreeMap<u32, Const> },
 }
 
 /// Entity handle for a [`FuncDecl`](crate::FuncDecl) (a function).
@@ -602,7 +730,7 @@ pub use context::Func;
 pub struct FuncDecl {
     pub attrs: AttrSet,
 
-    pub ret_type: Type,
+    pub ret_types: SmallVec<[Type; 2]>,
 
     pub params: SmallVec<[FuncParam; 2]>,
 
@@ -825,13 +953,24 @@ pub enum ControlNodeKind {
     },
 }
 
+// FIXME(eddyb) consider interning this, perhaps in a similar vein to `DataInstForm`.
 #[derive(Clone)]
 pub enum SelectionKind {
     /// Two-case selection based on boolean condition, i.e. `if`-`else`, with
     /// the two cases being "then" and "else" (in that order).
     BoolCond,
 
-    SpvInst(spv::Inst),
+    /// `N+1`-case selection based on comparing an integer scrutinee against
+    /// `N` constants, i.e. `switch`, with the last case being the "default"
+    /// (making it the only case without a matching entry in `case_consts`).
+    Switch {
+        // FIXME(eddyb) avoid some of the `scalar::Const` overhead here, as there
+        // is only a single type and we shouldn't need to store more bits per case,
+        // than the actual width of the integer type.
+        // FIXME(eddyb) consider storing this more like sorted compressed keyset,
+        // as there can be no duplicates, and in many cases it may be contiguous.
+        case_consts: Vec<scalar::Const>,
+    },
 }
 
 /// Entity handle for a [`DataInstDef`](crate::DataInstDef) (an SSA instruction).
@@ -863,11 +1002,35 @@ pub use context::DataInstForm;
 pub struct DataInstFormDef {
     pub kind: DataInstKind,
 
-    pub output_type: Option<Type>,
+    /// Types for all the outputs of instructions with this "form".
+    ///
+    /// That is, `output_types[i]` is the type of the [`Value::DataInstOutput`]
+    /// with `output_idx == i` (see also [`Value`] documentation).
+    ///
+    /// Most instructions have `0` or `1` outputs, with these notable exceptions:
+    /// * calls which return multiple values
+    /// * SPIR-V instructions which originally produced SPIR-V "aggregates"
+    ///   (`OpTypeStruct`/`OpTypeArray`) before [`spv::lower`] decomposed them
+    ///   * in the general case, [`spv::InstLowering`] tracks original types
+    //
+    // FIXME(eddyb) change the inline size of this to fit most instructions.
+    pub output_types: SmallVec<[Type; 2]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, derive_more::From)]
 pub enum DataInstKind {
+    /// Scalar (`bool`, integer, and floating-point) pure operations.
+    ///
+    /// See also the [`scalar`] module for more documentation and definitions.
+    #[from]
+    Scalar(scalar::Op),
+
+    /// Vector (small array of [`scalar`]s) pure operations.
+    ///
+    /// See also the [`vector`] module for more documentation and definitions.
+    #[from]
+    Vector(vector::Op),
+
     // FIXME(eddyb) try to split this into recursive and non-recursive calls,
     // to avoid needing special handling for recursion where it's impossible.
     FuncCall(Func),
@@ -877,13 +1040,39 @@ pub enum DataInstKind {
     QPtr(qptr::QPtrOp),
 
     // FIXME(eddyb) should this have `#[from]`?
-    SpvInst(spv::Inst),
+    SpvInst(spv::Inst, spv::InstLowering),
     SpvExtInst {
         ext_set: InternedStr,
         inst: u32,
+        lowering: spv::InstLowering,
     },
 }
 
+/// Use of a value, either constant or defined earlier in the same function.
+///
+/// Each `Value` can only have one of these types:
+/// * [`scalar`] (`bool`, integer, and floating-point), i.e. [`TypeKind::Scalar`]
+/// * vectors (small array of [`scalar`]s)
+///   * these are *not* traditional SIMD vectors, but more a form of "compression"
+///     (i.e. vector ops often applying the equivalent scalar op per-component),
+///     and sometimes also mandated by specs (e.g. some Vulkan `BuiltIn` types)
+/// * matrices (small array of vectors)
+///   * less fundamental than vectors, may be treated like arrays in the future
+/// * pointers and by-value (but still opaque) resource handles
+///   * SPIR-V has both opaque resource handles that behave much like pointers,
+///     even physical ones (e.g. ray-tracing `OpTypeAccelerationStructureKHR`s),
+///     and others that are only loaded from memory just before using them as
+///     operands (e.g. images/samplers), and such mismatches in indirection may
+///     result in SPIR-T making further distinctions here in the future
+///
+/// Notably, "aggregate" types (SPIR-V `OpTypeStruct`/`OpTypeArray`) are excluded,
+/// so they have to be (recursively) disaggregated into their constituents, and
+/// passed around as separate `Value`s (see also [`DataInstFormDef`] docs).
+/// * SPIR-V inherited "by-value aggregates" from LLVM, which supports them under
+///   the name "FCA" ("first-class aggregates"), but other IRs (and LLVM passes)
+///   avoid them because of their (negative) impact on analyses and transforms,
+///   with their main vestigial purpose being to encode multiple return values
+///   from functions, which can be done more directly in other IRs (and SPIR-T)
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum Value {
     Const(Const),
@@ -907,6 +1096,10 @@ pub enum Value {
         output_idx: u32,
     },
 
-    /// The output value of a [`DataInst`].
-    DataInstOutput(DataInst),
+    /// One of the outputs produced by a [`DataInst`], with its type given by
+    /// `cx[data_insts[inst].form].output_types[output_idx]`.
+    DataInstOutput {
+        inst: DataInst,
+        output_idx: u32,
+    },
 }

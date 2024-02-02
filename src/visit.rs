@@ -7,8 +7,8 @@ use crate::{
     ControlNodeDef, ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
     ControlRegionInputDecl, DataInstDef, DataInstForm, DataInstFormDef, DataInstKind, DeclDef,
     DiagMsgPart, EntityListIter, ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam,
-    GlobalVar, GlobalVarDecl, GlobalVarDefBody, Import, Module, ModuleDebugInfo, ModuleDialect,
-    SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
+    GlobalVar, GlobalVarDecl, GlobalVarDefBody, GlobalVarInit, Import, Module, ModuleDebugInfo,
+    ModuleDialect, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
 };
 
 // FIXME(eddyb) `Sized` bound shouldn't be needed but removing it requires
@@ -315,9 +315,12 @@ impl InnerVisit for TypeDef {
 
         visitor.visit_attr_set_use(*attrs);
         match kind {
-            TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => {}
+            TypeKind::Scalar(_)
+            | TypeKind::Vector(_)
+            | TypeKind::QPtr
+            | TypeKind::SpvStringLiteralForExtInst => {}
 
-            TypeKind::SpvInst { spv_inst: _, type_and_const_inputs } => {
+            TypeKind::SpvInst { spv_inst: _, type_and_const_inputs, value_lowering: _ } => {
                 for &ty_or_ct in type_and_const_inputs {
                     match ty_or_ct {
                         TypeOrConst::Type(ty) => visitor.visit_type_use(ty),
@@ -336,6 +339,11 @@ impl InnerVisit for ConstDef {
         visitor.visit_attr_set_use(*attrs);
         visitor.visit_type_use(*ty);
         match kind {
+            ConstKind::Undef
+            | ConstKind::Scalar(_)
+            | ConstKind::Vector(_)
+            | ConstKind::SpvStringLiteralForExtInst(_) => {}
+
             &ConstKind::PtrToGlobalVar(gv) => visitor.visit_global_var_use(gv),
             ConstKind::SpvInst { spv_inst_and_const_inputs } => {
                 let (_spv_inst, const_inputs) = &**spv_inst_and_const_inputs;
@@ -343,7 +351,6 @@ impl InnerVisit for ConstDef {
                     visitor.visit_const_use(ct);
                 }
             }
-            ConstKind::SpvStringLiteralForExtInst(_) => {}
         }
     }
 }
@@ -381,18 +388,39 @@ impl InnerVisit for GlobalVarDefBody {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
         let Self { initializer } = self;
 
-        if let Some(initializer) = *initializer {
-            visitor.visit_const_use(initializer);
+        if let Some(initializer) = initializer {
+            initializer.inner_visit_with(visitor);
+        }
+    }
+}
+
+impl InnerVisit for GlobalVarInit {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        match self {
+            &GlobalVarInit::Direct(ct) => visitor.visit_const_use(ct),
+            GlobalVarInit::SpvAggregate { ty, leaves } => {
+                visitor.visit_type_use(*ty);
+                for &ct in leaves {
+                    visitor.visit_const_use(ct);
+                }
+            }
+            GlobalVarInit::Composite { offset_to_value } => {
+                for &ct in offset_to_value.values() {
+                    visitor.visit_const_use(ct);
+                }
+            }
         }
     }
 }
 
 impl InnerVisit for FuncDecl {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { attrs, ret_type, params, def } = self;
+        let Self { attrs, ret_types, params, def } = self;
 
         visitor.visit_attr_set_use(*attrs);
-        visitor.visit_type_use(*ret_type);
+        for &ty in ret_types {
+            visitor.visit_type_use(ty);
+        }
         for param in params {
             param.inner_visit_with(visitor);
         }
@@ -474,7 +502,7 @@ impl<'a> FuncAt<'a, ControlNode> {
                 }
             }
             ControlNodeKind::Select {
-                kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                kind: SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
                 scrutinee,
                 cases,
             } => {
@@ -520,9 +548,10 @@ impl InnerVisit for DataInstDef {
 
 impl InnerVisit for DataInstFormDef {
     fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
-        let Self { kind, output_type } = self;
+        let Self { kind, output_types } = self;
 
         match kind {
+            DataInstKind::Scalar(_) | DataInstKind::Vector(_) => {}
             &DataInstKind::FuncCall(func) => visitor.visit_func_use(func),
             DataInstKind::QPtr(op) => match *op {
                 QPtrOp::FuncLocalVar(_)
@@ -531,12 +560,28 @@ impl InnerVisit for DataInstFormDef {
                 | QPtrOp::BufferDynLen { .. }
                 | QPtrOp::Offset(_)
                 | QPtrOp::DynOffset { .. }
-                | QPtrOp::Load
-                | QPtrOp::Store => {}
+                | QPtrOp::Load { .. }
+                | QPtrOp::Store { .. } => {}
             },
-            DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {}
+            DataInstKind::SpvInst(_, lowering)
+            | DataInstKind::SpvExtInst { ext_set: _, inst: _, lowering } => {
+                lowering.inner_visit_with(visitor);
+            }
         }
-        if let Some(ty) = *output_type {
+        for &ty in output_types {
+            visitor.visit_type_use(ty);
+        }
+    }
+}
+
+impl InnerVisit for spv::InstLowering {
+    fn inner_visit_with<'a>(&'a self, visitor: &mut impl Visitor<'a>) {
+        let Self { disaggregated_output, disaggregated_inputs } = self;
+
+        if let Some(ty) = *disaggregated_output {
+            visitor.visit_type_use(ty);
+        }
+        for &(_, ty) in disaggregated_inputs {
             visitor.visit_type_use(ty);
         }
     }
@@ -553,7 +598,7 @@ impl InnerVisit for cfg::ControlInst {
             | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
             | cfg::ControlInstKind::Branch
             | cfg::ControlInstKind::SelectBranch(
-                SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
             ) => {}
         }
         for v in inputs {
@@ -573,7 +618,7 @@ impl InnerVisit for Value {
             Self::Const(ct) => visitor.visit_const_use(ct),
             Self::ControlRegionInput { region: _, input_idx: _ }
             | Self::ControlNodeOutput { control_node: _, output_idx: _ }
-            | Self::DataInstOutput(_) => {}
+            | Self::DataInstOutput { inst: _, output_idx: _ } => {}
         }
     }
 }
