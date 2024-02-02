@@ -1,0 +1,20 @@
+[package]
+name = "spirt-vk-layer"
+description = "Vulkan layer injecting SPIR-T passes into the Vulkan CTS/apps/etc."
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = 'VkLayer_spirt_shaders'
+crate-type = ["cdylib"]
+
+[dependencies]
+spirt = { path = ".." }
+
+ash = "0.37.2"
+vulkan-layer = { git = "https://github.com/google/vk-layer-for-rust", rev = "a236360" }
+
+# FIXME(eddyb) deduplicate these by the workspace inheritance feature.
+bytemuck = "1.12.3"
+lazy_static = "1.4.0"

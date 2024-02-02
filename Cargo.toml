@@ -1,3 +1,6 @@
+[workspace]
+members = ["vk-layer"]
+
 [package]
 name = "spirt"
 description = "Shader-focused IR to target, transform and translate from."

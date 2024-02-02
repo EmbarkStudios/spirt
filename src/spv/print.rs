@@ -77,6 +77,9 @@ impl TokensForOperand<String> {
 
 // FIXME(eddyb) keep a `&'static spec::Spec` if that can even speed up anything.
 struct OperandPrinter<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> {
+    // FIXME(eddyb) use a field like this to interpret `Opcode`/`OperandKind`, too.
+    wk: &'static spv::spec::WellKnown,
+
     /// Input immediate operands to print from (may be grouped e.g. into literals).
     imms: iter::Peekable<IMMS>,
 
@@ -123,7 +126,41 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
         let def = kind.def();
         assert!(matches!(def, spec::OperandKindDef::Literal { .. }));
 
-        let literal_token = if kind == spec::Spec::get().well_known.LiteralString {
+        let literal_token = if kind == self.wk.LiteralSpecConstantOpInteger {
+            assert_eq!(words.len(), 1);
+            let (_, inner_name, inner_def) = match u16::try_from(first_word)
+                .ok()
+                .and_then(spec::Opcode::try_from_u16_with_name_and_def)
+            {
+                Some(opcode_name_and_def) => opcode_name_and_def,
+                None => {
+                    self.out.tokens.push(Token::Error(format!(
+                        "/* {first_word} not a valid `OpSpecConstantOp` opcode */"
+                    )));
+                    return;
+                }
+            };
+
+            // FIXME(eddyb) deduplicate this with `enumerant_params`.
+            self.out.tokens.push(Token::EnumerandName(inner_name));
+
+            let mut first = true;
+            for (inner_mode, inner_name_and_kind) in inner_def.all_operands_with_names() {
+                if inner_mode == spec::OperandMode::Optional && self.is_exhausted() {
+                    break;
+                }
+
+                self.out.tokens.push(Token::Punctuation(if first { "(" } else { ", " }));
+                first = false;
+
+                let (inner_name, inner_kind) = inner_name_and_kind.name_and_kind();
+                self.operand(inner_name, inner_kind);
+            }
+            if !first {
+                self.out.tokens.push(Token::Punctuation(")"));
+            }
+            return;
+        } else if kind == self.wk.LiteralString {
             // FIXME(eddyb) deduplicate with `spv::extract_literal_string`.
             let bytes: SmallVec<[u8; 64]> = words
                 .into_iter()
@@ -260,6 +297,7 @@ impl<IMMS: Iterator<Item = spv::Imm>, ID, IDS: Iterator<Item = ID>> OperandPrint
 /// an enumerand with parameters (which consumes more immediates).
 pub fn operand_from_imms<T>(imms: impl IntoIterator<Item = spv::Imm>) -> TokensForOperand<T> {
     let mut printer = OperandPrinter {
+        wk: &spec::Spec::get().well_known,
         imms: imms.into_iter().peekable(),
         ids: iter::empty().peekable(),
         out: TokensForOperand::default(),
@@ -282,6 +320,7 @@ pub fn inst_operands<ID>(
     ids: impl IntoIterator<Item = ID>,
 ) -> impl Iterator<Item = TokensForOperand<ID>> {
     OperandPrinter {
+        wk: &spec::Spec::get().well_known,
         imms: imms.into_iter().peekable(),
         ids: ids.into_iter().peekable(),
         out: TokensForOperand::default(),

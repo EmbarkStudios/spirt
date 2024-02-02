@@ -1,0 +1,15 @@
+{
+    "_comments": [
+        "HACK(eddyb) the weird directory this JSON is in encodes the `library_path` choice",
+        "FIXME(eddyb) these JSON files should be auto-generated instead (via artifact deps?)"
+    ],
+    "file_format_version": "1.2.1",
+    "layer": {
+        "name": "VK_LAYER_SPIRT_shaders",
+        "type": "INSTANCE",
+        "library_path": "../../../target/release/libVkLayer_spirt_shaders.so",
+        "api_version": "1.1.0",
+        "implementation_version": "0",
+        "description": "SPIR-T-based shader rewriter layer"
+    }
+}
