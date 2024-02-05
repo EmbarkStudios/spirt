@@ -1,0 +1,72 @@
+; Simple control-flow example (for `README.md`).
+;
+; NOTE(eddyb) while a version of this is in fact in `README.md`, the full thing
+; couldn't fit, and variable names had to be shortened there (to reduce width).
+;
+; `for-loop.wgsl`, after being passed through:
+; 1. `naga tests/data/for-loop.wgsl{,.spv}`
+; 2. `spirv-opt --eliminate-local-multi-store --eliminate-dead-code-aggressive -o tests/data/for-loop.wgsl{.ssa,}.spv`
+; 3. `spirv-dis tests/data/for-loop.wgsl.ssa.spv`
+; 4. manual renaming, reformatting, commenting, etc.
+
+; Metadata
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %output0
+
+; Decorations
+OpDecorate %output0 Location 0
+OpDecorate %output0 Flat
+
+; Types
+%void = OpTypeVoid
+%bool = OpTypeBool
+%i32 = OpTypeInt 32 1
+
+; Constants
+%1_i32 = OpConstant %i32 1
+%10_i32 = OpConstant %i32 10
+
+; Global variables
+%typeof_output0 = OpTypePointer Output %i32
+%output0 = OpVariable %typeof_output0 Output
+
+; Functions
+%typeof_main = OpTypeFunction %void
+%main = OpFunction %void None %typeof_main
+  %entry = OpLabel
+    OpBranch %bb_before_for
+
+  %bb_before_for = OpLabel
+    OpBranch %bb_for
+
+  %bb_for = OpLabel
+      %o = OpPhi %i32 %1_i32 %bb_before_for %o_next %bb_for_continue
+      %i = OpPhi %i32 %1_i32 %bb_before_for %i_next %bb_for_continue
+      OpLoopMerge %bb_after_for %bb_for_continue None
+    OpBranch %bb_for_cond
+
+    ; if !(i < 10) { break; }
+    %bb_for_cond = OpLabel
+        %cond = OpSLessThan %bool %i %10_i32
+        OpSelectionMerge %bb_for_body None
+      OpBranchConditional %cond %bb_for_body %bb_for_break
+
+      %bb_for_break = OpLabel
+        OpBranch %bb_after_for
+
+    ; o *= i;
+    %bb_for_body = OpLabel
+        %o_next = OpIMul %i32 %o %i
+      OpBranch %bb_for_continue
+
+  ; i++
+  %bb_for_continue = OpLabel
+      %i_next = OpIAdd %i32 %i %1_i32
+    OpBranch %bb_for
+
+  ; return o;
+  %bb_after_for = OpLabel
+      OpStore %output0 %o
+    OpReturn
+OpFunctionEnd

@@ -1,0 +1,49 @@
+; SPIR-V
+; Version: 1.3
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 12
+; Schema: 0
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %output_color
+               OpExecutionMode %main OriginUpperLeft
+          %1 = OpString "tests/snapshots/in/basic.frag.glsl"
+               OpSource GLSL 450 %1 "// Minimal fragment shader, for use with `glslangValidator`, e.g. full command
+// for a debuginfo build (the `--target-env` is to get `OpModuleProcessed`):
+// `glslangValidator -V --target-env spirv1.3 -g basic.frag.glsl -o basic.frag.glsl.dbg.spv`
+
+#version 450
+
+// NOTE(eddyb) some arbitrary extension for `OpSourceExtension`.
+#extension GL_EXT_scalar_block_layout : enable
+
+layout(location = 0) out vec4 output_color;
+
+void main() {
+    output_color = vec4(1.0);
+}
+"
+               OpSourceExtension "GL_EXT_scalar_block_layout"
+               OpName %output_color "output_color"
+               OpName %main "main"
+               OpModuleProcessed "client vulkan100"
+               OpModuleProcessed "target-env spirv1.3"
+               OpModuleProcessed "target-env vulkan1.0"
+               OpModuleProcessed "entry-point main"
+               OpDecorate %output_color Location 0
+      %float = OpTypeFloat 32
+    %v4float = OpTypeVector %float 4
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+       %void = OpTypeVoid
+          %6 = OpTypeFunction %void
+%output_color = OpVariable %_ptr_Output_v4float Output
+    %float_1 = OpConstant %float 1
+          %9 = OpConstantComposite %v4float %float_1 %float_1 %float_1 %float_1
+               OpLine %1 12 11
+       %main = OpFunction %void None %6
+         %11 = OpLabel
+               OpLine %1 13 0
+               OpStore %output_color %9
+               OpNoLine
+               OpReturn
+               OpFunctionEnd

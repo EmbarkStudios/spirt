@@ -63,7 +63,7 @@ jobs:
       - name: Prepare Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.0
         with:
-          vulkan-query-version: 1.3.250.0
+          vulkan-query-version: 1.3.275.0
           vulkan-components: Glslang SPIRV-Tools
           vulkan-use-cache: true
       - run: cargo fetch
@@ -72,14 +72,12 @@ jobs:
         run: cargo build --tests --release --all-targets
       - name: cargo test
         run: cargo test --release --all-targets
-      # FIXME(eddyb) actually flesh this out into a whole testing setup
-      # (see also https://github.com/EmbarkStudios/spirt/issues/7).
-      - name: Minimal glslang -> SPIR-V -> SPIR-T -> SPIR-V testing
-        run: |
-          glslangValidator -V --target-env spirv1.3 -g tests/data/basic.frag.glsl -o tests/data/basic.frag.glsl.dbg.spv
-          glslangValidator -V --target-env spirv1.3 -g tests/data/debug-printf.vert.glsl -o tests/data/debug-printf.vert.glsl.dbg.spv
-          cargo run --release --example spv-lower-link-lift tests/data/basic.frag.glsl.dbg.spv
-          cargo run --release --example spv-lower-link-lift tests/data/debug-printf.vert.glsl.dbg.spv
+      - name: Check snapshots
+        run: git diff --exit-code -- tests/snapshots
+        if: ${{ runner.os == 'Linux' }}
+      - name: Validate snapshots
+        run: for file in tests/snapshots/*spvasm/*.spvasm; do echo $file; spirv-as $file -o - | spirv-val; done
+        if: ${{ runner.os == 'Linux' }}
       - if: ${{ runner.os == 'Linux' }}
         name: Check examples are up to date
         run: .github/workflows/check-examples.sh

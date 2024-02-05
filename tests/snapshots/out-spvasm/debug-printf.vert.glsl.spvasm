@@ -1,0 +1,43 @@
+; SPIR-V
+; Version: 1.3
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 13
+; Schema: 0
+               OpCapability Shader
+               OpExtension "SPV_KHR_non_semantic_info"
+          %1 = OpExtInstImport "NonSemantic.DebugPrintf"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main"
+          %2 = OpString "int=%u float=%f"
+          %3 = OpString "tests/snapshots/in/debug-printf.vert.glsl"
+               OpSource GLSL 450 %3 "// `debugPrintfEXT`-using vertex shader, for use with `glslangValidator`, e.g.:
+// `glslangValidator -V --target-env spirv1.3 debug-printf.vert.glsl -o debug-printf.vert.glsl.spv`
+
+#version 450
+
+#extension GL_EXT_debug_printf : enable
+
+void main() {
+    debugPrintfEXT(\"int=%u float=%f\", 123, 123.456);
+}
+"
+               OpSourceExtension "GL_EXT_debug_printf"
+               OpName %main "main"
+               OpModuleProcessed "client vulkan100"
+               OpModuleProcessed "target-env spirv1.3"
+               OpModuleProcessed "target-env vulkan1.0"
+               OpModuleProcessed "entry-point main"
+       %void = OpTypeVoid
+          %5 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+    %int_123 = OpConstant %int 123
+      %float = OpTypeFloat 32
+%float_123_456001 = OpConstant %float 123.456001
+               OpLine %3 8 11
+       %main = OpFunction %void None %5
+         %12 = OpLabel
+               OpLine %3 9 0
+         %11 = OpExtInst %void %1 1 %2 %int_123 %float_123_456001
+               OpNoLine
+               OpReturn
+               OpFunctionEnd

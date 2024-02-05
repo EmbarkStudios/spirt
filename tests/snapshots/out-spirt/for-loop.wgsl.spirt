@@ -1,0 +1,38 @@
+module.dialect = spv.Module(version: 1.5, spv.Capability.Shader, spv.MemoryModel.GLSL450)
+
+module.debug_info = spv.Module.DebugInfo(generator: spv.Tool(id: 0, version: 28))
+
+#[qptr.usage(f32×4)]
+#[spv.Decoration.BuiltIn(spv.BuiltIn.Position)]
+global_var GV0 in spv.StorageClass.Output: f32×4
+
+func F`main`() -> spv.OpTypeVoid {
+  #[qptr.usage(s32)]
+  v`o` = qptr.func_local_var(size: 4, align: 4, initializer: 1s32): qptr
+  #[qptr.usage(s32)]
+  v`i` = qptr.func_local_var(size: 4, align: 4, initializer: 1s32): qptr
+  loop {
+    v3 = qptr.load(v`i`): s32
+    v4 = spv.OpSLessThan(v3, 10s32): bool
+    (v5: bool, _: bool) = if v4 {
+      v6 = qptr.load(v`i`): s32
+      v7 = qptr.load(v`o`): s32
+      v8 = spv.OpIMul(v7, v6): s32
+      qptr.store(v`o`, v8)
+      v9 = qptr.load(v`i`): s32
+      v10 = spv.OpIAdd(v9, 1s32): s32
+      qptr.store(v`i`, v10)
+      (true, false)
+    } else {
+      (false, true)
+    }
+  } while v5
+  v0 = qptr.load(v`o`): s32
+  v1 = spv.OpConvertSToF(SignedValue: v0): f32
+  v2 = spv.OpCompositeConstruct(v1, 1.0f32, 1.0f32, 1.0f32): f32×4
+  qptr.store(&GV0, v2)
+}
+
+export {
+  spv.OpEntryPoint(spv.ExecutionModel.Vertex, Name: "main"): F`main`,
+}
