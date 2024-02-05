@@ -424,7 +424,10 @@ impl InnerTransform for TypeDef {
         transform!({
             attrs -> transformer.transform_attr_set_use(*attrs),
             kind -> match kind {
-                TypeKind::QPtr | TypeKind::SpvStringLiteralForExtInst => Transformed::Unchanged,
+                TypeKind::Scalar(_)
+                | TypeKind::Vector(_)
+                | TypeKind::QPtr
+                | TypeKind::SpvStringLiteralForExtInst => Transformed::Unchanged,
 
                 TypeKind::SpvInst { spv_inst, type_and_const_inputs } => Transformed::map_iter(
                     type_and_const_inputs.iter(),
@@ -457,6 +460,11 @@ impl InnerTransform for ConstDef {
             attrs -> transformer.transform_attr_set_use(*attrs),
             ty -> transformer.transform_type_use(*ty),
             kind -> match kind {
+                ConstKind::Undef
+                | ConstKind::Scalar(_)
+                | ConstKind::Vector(_)
+                | ConstKind::SpvStringLiteralForExtInst(_) => Transformed::Unchanged,
+
                 ConstKind::PtrToGlobalVar(gv) => transform!({
                     gv -> transformer.transform_global_var_use(*gv),
                 } => ConstKind::PtrToGlobalVar(gv)),
@@ -470,7 +478,6 @@ impl InnerTransform for ConstDef {
                         spv_inst_and_const_inputs: Rc::new((spv_inst.clone(), new_iter.collect())),
                     })
                 }
-                ConstKind::SpvStringLiteralForExtInst(_) => Transformed::Unchanged
             },
         } => Self {
             attrs,
@@ -635,7 +642,7 @@ impl InnerInPlaceTransform for FuncAtMut<'_, ControlNode> {
                 }
             }
             ControlNodeKind::Select {
-                kind: SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                kind: SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
                 scrutinee,
                 cases: _,
             } => {
@@ -713,10 +720,13 @@ impl InnerTransform for DataInstFormDef {
                     | QPtrOp::BufferDynLen { .. }
                     | QPtrOp::Offset(_)
                     | QPtrOp::DynOffset { .. }
-                    | QPtrOp::Load
-                    | QPtrOp::Store => Transformed::Unchanged,
+                    | QPtrOp::Load {..}
+                    | QPtrOp::Store {..} => Transformed::Unchanged,
                 },
-                DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => Transformed::Unchanged,
+                DataInstKind::Scalar(_)
+                | DataInstKind::Vector(_)
+                | DataInstKind::SpvInst(_)
+                | DataInstKind::SpvExtInst { .. } => Transformed::Unchanged,
             },
             // FIXME(eddyb) this should be replaced with an impl of `InnerTransform`
             // for `Option<T>` or some other helper, to avoid "manual transpose".
@@ -740,7 +750,7 @@ impl InnerInPlaceTransform for cfg::ControlInst {
             | cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(_))
             | cfg::ControlInstKind::Branch
             | cfg::ControlInstKind::SelectBranch(
-                SelectionKind::BoolCond | SelectionKind::SpvInst(_),
+                SelectionKind::BoolCond | SelectionKind::Switch { case_consts: _ },
             ) => {}
         }
         for v in inputs {
