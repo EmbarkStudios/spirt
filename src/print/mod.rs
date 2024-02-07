@@ -43,6 +43,7 @@ use std::hash::Hash;
 use std::mem;
 
 mod multiversion;
+#[macro_use]
 mod pretty;
 
 /// "Definitions-before-uses" / "topo-sorted" printing plan.
@@ -1213,10 +1214,10 @@ impl<'a> Printer<'a> {
         opcode_name_style: pretty::Styles,
         opcode: spv::spec::Opcode,
     ) -> pretty::Fragment {
-        pretty::Fragment::new([
+        pretty![
             self.demote_style_for_namespace_prefix(self.spv_base_style()).apply("spv."),
             opcode_name_style.apply(opcode.name()),
-        ])
+        ]
     }
 
     /// Clean up a `spv::print::TokensForOperand` string (common helper used below).
@@ -1266,7 +1267,7 @@ impl<'a> Printer<'a> {
                     .unwrap_or_default(),
                 spv::print::Token::Punctuation(s) => s.into(),
                 spv::print::Token::OperandKindNamespacePrefix(s) => {
-                    pretty::Fragment::new([
+                    pretty![
                         // HACK(eddyb) double-demote to end up with `spv.A.B`,
                         // with increasing size from `spv.` to `A.` to `B`.
                         self.demote_style_for_namespace_prefix(
@@ -1276,7 +1277,7 @@ impl<'a> Printer<'a> {
                         // FIXME(eddyb) avoid the cost of allocating here.
                         self.demote_style_for_namespace_prefix(self.declarative_keyword_style())
                             .apply(format!("{s}.")),
-                    ])
+                    ]
                 }
                 spv::print::Token::EnumerandName(s) => {
                     self.spv_enumerand_name_style().apply(s).into()
@@ -1343,7 +1344,7 @@ impl<'a> Printer<'a> {
         let mut out = self.pretty_spv_opcode(spv_inst_name_style, opcode);
 
         if operands.peek().is_some() {
-            out = pretty::Fragment::new([out, pretty::join_comma_sep("(", operands, ")")]);
+            out = pretty![out, pretty::join_comma_sep("(", operands, ")")];
         }
 
         out
@@ -1374,9 +1375,9 @@ impl AttrsAndDef {
     fn insert_name_before_def(self, name: impl Into<pretty::Fragment>) -> pretty::Fragment {
         let Self { attrs, def_without_name } = self;
 
-        let mut maybe_hoisted_anchor = pretty::Fragment::default();
-        let mut maybe_def_start_anchor = pretty::Fragment::default();
-        let mut maybe_def_end_anchor = pretty::Fragment::default();
+        let mut maybe_hoisted_anchor = pretty![];
+        let mut maybe_def_start_anchor = pretty![];
+        let mut maybe_def_end_anchor = pretty![];
         let mut name = name.into();
         if let [
             pretty::Node::Anchor { is_def: ref mut original_anchor_is_def @ true, anchor, text: _ },
@@ -1422,14 +1423,14 @@ impl AttrsAndDef {
                 }
             }
         }
-        pretty::Fragment::new([
+        pretty![
             maybe_hoisted_anchor,
             attrs,
             name,
             maybe_def_start_anchor,
             def_without_name,
             maybe_def_end_anchor,
-        ])
+        ]
     }
 }
 
@@ -1570,7 +1571,7 @@ impl Use {
             }
             UseStyle::Inline => match *self {
                 Self::CxInterned(interned) => {
-                    interned.print(printer).insert_name_before_def(pretty::Fragment::default())
+                    interned.print(printer).insert_name_before_def(pretty![])
                 }
                 Self::Node(node) => printer
                     .error_style()
@@ -1730,29 +1731,23 @@ impl Print for Module {
     type Output = pretty::Fragment;
     fn print(&self, printer: &Printer<'_>) -> pretty::Fragment {
         if self.exports.is_empty() {
-            return pretty::Fragment::default();
+            return pretty![];
         }
 
-        pretty::Fragment::new([
-            printer.declarative_keyword_style().apply("export").into(),
-            " ".into(),
+        pretty![
+            printer.declarative_keyword_style().apply("export"),
+            " ",
             pretty::join_comma_sep(
                 "{",
                 self.exports
                     .iter()
                     .map(|(export_key, exportee)| {
-                        pretty::Fragment::new([
-                            export_key.print(printer),
-                            ": ".into(),
-                            exportee.print(printer),
-                        ])
+                        pretty![export_key.print(printer), ": ", exportee.print(printer)]
                     })
-                    .map(|entry| {
-                        pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), entry])
-                    }),
+                    .map(|entry| { pretty![pretty::Node::ForceLineSeparation, entry] }),
                 "}",
             ),
-        ])
+        ]
     }
 }
 
@@ -1775,10 +1770,7 @@ impl Print for ModuleDialect {
             Self::Spv(dialect) => dialect.print(printer),
         };
 
-        AttrsAndDef {
-            attrs: pretty::Fragment::default(),
-            def_without_name: pretty::Fragment::new([" = ".into(), dialect]),
-        }
+        AttrsAndDef { attrs: pretty![], def_without_name: pretty![" = ", dialect] }
     }
 }
 impl Print for spv::Dialect {
@@ -1794,30 +1786,27 @@ impl Print for spv::Dialect {
         } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
-        pretty::Fragment::new([
-            printer
-                .demote_style_for_namespace_prefix(printer.spv_base_style())
-                .apply("spv.")
-                .into(),
-            printer.spv_base_style().apply("Module").into(),
+        pretty![
+            printer.demote_style_for_namespace_prefix(printer.spv_base_style()).apply("spv."),
+            printer.spv_base_style().apply("Module"),
             pretty::join_comma_sep(
                 "(",
-                [pretty::Fragment::new([
+                [pretty![
                     printer.pretty_named_argument_prefix("version"),
-                    printer.numeric_literal_style().apply(format!("{version_major}")).into(),
-                    ".".into(),
-                    printer.numeric_literal_style().apply(format!("{version_minor}")).into(),
-                ])]
+                    printer.numeric_literal_style().apply(format!("{version_major}")),
+                    ".",
+                    printer.numeric_literal_style().apply(format!("{version_minor}")),
+                ]]
                 .into_iter()
                 .chain((!extensions.is_empty()).then(|| {
-                    pretty::Fragment::new([
+                    pretty![
                         printer.pretty_named_argument_prefix("extensions"),
                         pretty::join_comma_sep(
                             "{",
                             extensions.iter().map(|ext| printer.pretty_string_literal(ext)),
                             "}",
                         ),
-                    ])
+                    ]
                 }))
                 .chain(
                     // FIXME(eddyb) consider a `spv.Capability.{A,B,C}` style.
@@ -1847,14 +1836,14 @@ impl Print for spv::Dialect {
                             })
                         });
 
-                        pretty::Fragment::new([
+                        pretty![
                             capability_namespace_prefix,
                             if cap_names.len() == 1 {
                                 cap_names.next().unwrap()
                             } else {
                                 pretty::join_comma_sep("{", cap_names, "}")
                             },
-                        ])
+                        ]
                     }),
                 )
                 .chain(
@@ -1864,7 +1853,7 @@ impl Print for spv::Dialect {
                 .chain([printer.pretty_spv_imm(wk.MemoryModel, *memory_model)]),
                 ")",
             ),
-        ])
+        ]
     }
 }
 
@@ -1875,10 +1864,7 @@ impl Print for ModuleDebugInfo {
             Self::Spv(debug_info) => debug_info.print(printer),
         };
 
-        AttrsAndDef {
-            attrs: pretty::Fragment::default(),
-            def_without_name: pretty::Fragment::new([" = ".into(), debug_info]),
-        }
+        AttrsAndDef { attrs: pretty![], def_without_name: pretty![" = ", debug_info] }
     }
 }
 
@@ -1893,56 +1879,47 @@ impl Print for spv::ModuleDebugInfo {
         } = self;
 
         let wk = &spv::spec::Spec::get().well_known;
-        pretty::Fragment::new([
+        pretty![
             printer
                 .demote_style_for_namespace_prefix(
                     printer.demote_style_for_namespace_prefix(printer.spv_base_style()),
                 )
-                .apply("spv.")
-                .into(),
-            printer
-                .demote_style_for_namespace_prefix(printer.spv_base_style())
-                .apply("Module.")
-                .into(),
-            printer.spv_base_style().apply("DebugInfo").into(),
+                .apply("spv."),
+            printer.demote_style_for_namespace_prefix(printer.spv_base_style()).apply("Module."),
+            printer.spv_base_style().apply("DebugInfo"),
             pretty::join_comma_sep(
                 "(",
                 [
                     original_generator_magic.map(|generator_magic| {
                         let (tool_id, tool_version) =
                             (generator_magic.get() >> 16, generator_magic.get() as u16);
-                        pretty::Fragment::new([
+                        pretty![
                             printer.pretty_named_argument_prefix("generator"),
                             printer
                                 .demote_style_for_namespace_prefix(printer.spv_base_style())
-                                .apply("spv.")
-                                .into(),
-                            printer.spv_base_style().apply("Tool").into(),
+                                .apply("spv."),
+                            printer.spv_base_style().apply("Tool"),
                             pretty::join_comma_sep(
                                 "(",
                                 [
-                                    Some(pretty::Fragment::new([
+                                    Some(pretty![
                                         printer.pretty_named_argument_prefix("id"),
-                                        printer
-                                            .numeric_literal_style()
-                                            .apply(format!("{tool_id}"))
-                                            .into(),
-                                    ])),
+                                        printer.numeric_literal_style().apply(format!("{tool_id}")),
+                                    ]),
                                     (tool_version != 0).then(|| {
-                                        pretty::Fragment::new([
+                                        pretty![
                                             printer.pretty_named_argument_prefix("version"),
                                             printer
                                                 .numeric_literal_style()
-                                                .apply(format!("{tool_version}"))
-                                                .into(),
-                                        ])
+                                                .apply(format!("{tool_version}")),
+                                        ]
                                     }),
                                 ]
                                 .into_iter()
                                 .flatten(),
                                 ")",
                             ),
-                        ])
+                        ]
                     }),
                     (!source_languages.is_empty()).then(|| {
                         pretty::Fragment::new([
@@ -1967,7 +1944,7 @@ impl Print for spv::ModuleDebugInfo {
                                                 file_contents
                                                     .iter()
                                                     .map(|(&file, contents)| {
-                                                        pretty::Fragment::new([
+                                                        pretty![
                                                             printer.pretty_string_literal(
                                                                 &printer.cx[file],
                                                             ),
@@ -1977,7 +1954,7 @@ impl Print for spv::ModuleDebugInfo {
                                                                     contents,
                                                                 )],
                                                             ),
-                                                        ])
+                                                        ]
                                                     })
                                                     .map(|entry| {
                                                         pretty::Fragment::new([
@@ -2029,7 +2006,7 @@ impl Print for spv::ModuleDebugInfo {
                 .flatten(),
                 ")",
             ),
-        ])
+        ]
     }
 }
 
@@ -2156,7 +2133,7 @@ impl Print for Attr {
                                     comment_style.apply(format!("[{location}] ")).into()
                                 }
                                 DiagLevel::Error | DiagLevel::Warning => {
-                                    pretty::Fragment::default()
+                                    pretty![]
                                 }
                             };
 
@@ -2742,7 +2719,7 @@ impl Print for GlobalVarDecl {
             ]),
         };
         let addr_space_suffix = match addr_space {
-            AddrSpace::Handles => pretty::Fragment::default(),
+            AddrSpace::Handles => pretty![],
             AddrSpace::SpvStorageClass(_) => {
                 pretty::Fragment::new([" in ".into(), addr_space.print(printer)])
             }
@@ -2835,7 +2812,7 @@ impl Print for FuncDecl {
                                         ")",
                                     )
                                 } else {
-                                    pretty::Fragment::default()
+                                    pretty![]
                                 };
 
                                 // FIXME(eddyb) `:` as used here for C-like "label syntax"
@@ -2848,7 +2825,7 @@ impl Print for FuncDecl {
                                     pretty::Node::ForceLineSeparation.into(),
                                 ])
                             } else {
-                                pretty::Fragment::default()
+                                pretty![]
                             };
 
                             pretty::Fragment::new([
@@ -2903,7 +2880,7 @@ impl Print for FuncAt<'_, ControlRegion> {
             };
             pretty::Fragment::new([pretty::Node::ForceLineSeparation.into(), outputs])
         } else {
-            pretty::Fragment::default()
+            pretty![]
         };
 
         pretty::Fragment::new([
@@ -2947,7 +2924,7 @@ impl Print for FuncAt<'_, ControlNode> {
             };
             pretty::Fragment::new([outputs_lhs, " = ".into()])
         } else {
-            pretty::Fragment::default()
+            pretty![]
         };
 
         // FIXME(eddyb) using `declarative_keyword_style` seems more
@@ -3034,7 +3011,7 @@ impl Print for FuncAt<'_, ControlNode> {
                         }]),
                     )
                 } else {
-                    (pretty::Fragment::default(), pretty::Fragment::default())
+                    (pretty![], pretty![])
                 };
 
                 // FIXME(eddyb) this is a weird mishmash of Rust and C syntax.
@@ -3345,7 +3322,7 @@ impl Print for FuncAt<'_, DataInst> {
                     if printing_debuginfo_as_comment {
                         printer.comment_style().apply("// ").into()
                     } else {
-                        pretty::Fragment::default()
+                        pretty![]
                     },
                     // HACK(eddyb) double/triple-demote to end up with `spv.extinst.A.B`,
                     // with increasing size from `spv.` to `extinst.` to `A.` to `B`.

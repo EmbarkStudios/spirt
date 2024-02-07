@@ -19,6 +19,13 @@ pub struct Fragment {
     pub nodes: SmallVec<[Node; 8]>,
 }
 
+macro_rules! pretty {
+    () => ($crate::print::pretty::Fragment::default());
+    ($($child:expr),+ $(,)?) => {
+        $crate::print::pretty::Fragment::new([$($crate::print::pretty::Fragment::from($child)),+])
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub enum Node {
     Text(Option<Styles>, Cow<'static, str>),
