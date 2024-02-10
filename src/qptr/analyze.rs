@@ -170,7 +170,18 @@ impl UsageMerger<'_> {
         // Decompose the "smaller" and/or "less strict" side (`b`) first.
         match b.kind {
             // `Unused`s are always ignored.
-            QPtrMemUsageKind::Unused => return MergeResult::ok(a),
+            QPtrMemUsageKind::Unused
+                if {
+                    // HACK(eddyb) see similar comment below, but also the comment
+                    // above is invalidated by this condition - the issue is that
+                    // only an unused offset of `0` is a true noop, otherwise
+                    // there is a dead `qptr.offset` instruction which still
+                    // needs a field to reference.
+                    b_offset_in_a == 0
+                } =>
+            {
+                return MergeResult::ok(a);
+            }
 
             QPtrMemUsageKind::OffsetBase(b_entries)
                 if {
@@ -397,12 +408,26 @@ impl UsageMerger<'_> {
                     .range((
                         Bound::Unbounded,
                         b.max_size.map_or(Bound::Unbounded, |b_max_size| {
-                            Bound::Excluded(b_offset_in_a.checked_add(b_max_size).unwrap())
+                            // HACK(eddyb) the unconditional `insert` below, at
+                            // `b_offset_in_a`, can overwrite an existing entry
+                            // if the ZST case isn't correctly handled.
+                            if b_max_size == 0 {
+                                Bound::Included(b_offset_in_a)
+                            } else {
+                                Bound::Excluded(b_offset_in_a.checked_add(b_max_size).unwrap())
+                            }
                         }),
                     ))
                     .rev()
-                    .take_while(|(a_sub_offset, a_sub_usage)| {
+                    .take_while(|&(&a_sub_offset, a_sub_usage)| {
                         a_sub_usage.max_size.map_or(true, |a_sub_max_size| {
+                            // HACK(eddyb) the unconditional `insert` below, at
+                            // `b_offset_in_a`, can overwrite an existing entry
+                            // if the ZST case isn't correctly handled.
+                            if b.max_size == Some(0) && a_sub_offset == b_offset_in_a {
+                                return true;
+                            }
+
                             a_sub_offset.checked_add(a_sub_max_size).unwrap() > b_offset_in_a
                         })
                     });
@@ -780,7 +805,7 @@ impl<'a> InferUsage<'a> {
                         DeclDef::Imported(_) => continue,
                     };
 
-                    for (v, usage) in usage_or_err_attrs_to_attach {
+                    for (v, mut usage) in usage_or_err_attrs_to_attach {
                         let attrs = match v {
                             Value::Const(_) => unreachable!(),
                             Value::ControlRegionInput { region, input_idx } => {
@@ -792,8 +817,45 @@ impl<'a> InferUsage<'a> {
                                     [output_idx as usize]
                                     .attrs
                             }
-                            Value::DataInstOutput(data_inst) => {
-                                &mut func_def_body.at_mut(data_inst).def().attrs
+                            Value::DataInstOutput { inst, output_idx } => {
+                                let data_inst_def = func_def_body.at_mut(inst).def();
+
+                                // HACK(eddyb) there are no legal multiple-output
+                                // instructions, where one of the outputs is a
+                                // pointer, and there are no per-output attributes,
+                                // so guard against misunderstandings herhe.
+                                if output_idx != 0
+                                    || self.cx[data_inst_def.form].output_types.len() != 1
+                                {
+                                    usage = Err(AnalysisError(match usage {
+                                        Ok(usage) => {
+                                            let attr: AttrSet = self.cx.intern(AttrSetDef {
+                                                attrs: [Attr::QPtr(QPtrAttr::Usage(OrdAssertEq(
+                                                    usage,
+                                                )))]
+                                                .into(),
+                                            });
+                                            Diag::bug([
+                                                format!(
+                                                    "cannot attach attribute to \
+                                                     output #{output_idx} of \
+                                                     multi-output instruction:\n"
+                                                )
+                                                .into(),
+                                                attr.into(),
+                                            ])
+                                        }
+                                        Err(AnalysisError(mut diag)) => {
+                                            diag.message.insert(
+                                                0,
+                                                format!("output #{output_idx}: ").into(),
+                                            );
+                                            diag
+                                        }
+                                    }));
+                                }
+
+                                &mut data_inst_def.attrs
                             }
                         };
                         match usage {
@@ -862,13 +924,28 @@ impl<'a> InferUsage<'a> {
         let mut all_data_insts = CollectAllDataInsts::default();
         func_def_body.inner_visit_with(&mut all_data_insts);
 
-        let mut data_inst_output_usages = FxHashMap::default();
+        let mut data_inst_to_per_output_usage: FxHashMap<_, SmallVec<[Option<_>; 2]>> =
+            FxHashMap::default();
         for insts in all_data_insts.0.into_iter().rev() {
             for func_at_inst in func_def_body.at(insts).into_iter().rev() {
                 let data_inst = func_at_inst.position;
                 let data_inst_def = func_at_inst.def();
                 let data_inst_form_def = &cx[data_inst_def.form];
-                let output_usage = data_inst_output_usages.remove(&data_inst).flatten();
+
+                // FIXME(eddyb) should remaining `Some`s in `per_output_usage`
+                // be attached to the instruction, after all the handling below?
+                let mut per_output_usage =
+                    data_inst_to_per_output_usage.remove(&data_inst).unwrap_or_default();
+
+                // HACK(eddyb) this may be a bit wasteful, but it avoids
+                // complicating acessing `per_output_usage` below, and
+                // most instructions should only have at most two outputs.
+                {
+                    let expected = data_inst_form_def.output_types.len();
+                    if per_output_usage.len() < expected {
+                        per_output_usage.extend((per_output_usage.len()..expected).map(|_| None));
+                    }
+                }
 
                 let mut generate_usage = |this: &mut Self, ptr: Value, new_usage| {
                     let slot = match ptr {
@@ -876,8 +953,24 @@ impl<'a> InferUsage<'a> {
                             ConstKind::PtrToGlobalVar(gv) => {
                                 this.global_var_usages.entry(gv).or_default()
                             }
-                            // FIXME(eddyb) may be relevant?
-                            _ => unreachable!(),
+                            // FIXME(eddyb) attach on the `Const` by replacing
+                            // it with a copy that also has an extra attribute,
+                            // or actually support by adding the usage attribute
+                            // in the same manner (if it makes sense to do so).
+                            _ => {
+                                // FIXME(eddyb) this output may not even exist,
+                                // there should be a different way to have a
+                                // `Diag` get attached to a whole `DataInst`.
+                                usage_or_err_attrs_to_attach.push((
+                                    Value::DataInstOutput { inst: data_inst, output_idx: 0 },
+                                    Err(AnalysisError(Diag::bug([
+                                        "unsupported pointer constant `".into(),
+                                        ct.into(),
+                                        "`".into(),
+                                    ]))),
+                                ));
+                                return;
+                            }
                         },
                         Value::ControlRegionInput { region, input_idx }
                             if region == func_def_body.body =>
@@ -892,8 +985,13 @@ impl<'a> InferUsage<'a> {
                             ));
                             return;
                         }
-                        Value::DataInstOutput(ptr_inst) => {
-                            data_inst_output_usages.entry(ptr_inst).or_default()
+                        Value::DataInstOutput { inst: ptr_inst, output_idx } => {
+                            let i = output_idx as usize;
+                            let slots = data_inst_to_per_output_usage.entry(ptr_inst).or_default();
+                            if i >= slots.len() {
+                                slots.extend((slots.len()..=i).map(|_| None));
+                            }
+                            &mut slots[i]
                         }
                     };
                     *slot = Some(match slot.take() {
@@ -906,6 +1004,8 @@ impl<'a> InferUsage<'a> {
                     });
                 };
                 match &data_inst_form_def.kind {
+                    DataInstKind::Scalar(_) | DataInstKind::Vector(_) => {}
+
                     &DataInstKind::FuncCall(callee) => {
                         match self.infer_usage_in_func(module, callee) {
                             FuncInferUsageState::Complete(callee_results) => {
@@ -918,33 +1018,48 @@ impl<'a> InferUsage<'a> {
                                 }
                             }
                             FuncInferUsageState::InProgress => {
+                                // FIXME(eddyb) this output may not even exist,
+                                // there should be a different way to have a
+                                // `Diag` get attached to a whole `DataInst`.
                                 usage_or_err_attrs_to_attach.push((
-                                    Value::DataInstOutput(data_inst),
+                                    Value::DataInstOutput { inst: data_inst, output_idx: 0 },
                                     Err(AnalysisError(Diag::bug([
                                         "unsupported recursive call".into()
                                     ]))),
                                 ));
                             }
                         };
-                        if data_inst_form_def.output_type.map_or(false, is_qptr) {
-                            if let Some(usage) = output_usage {
-                                usage_or_err_attrs_to_attach
-                                    .push((Value::DataInstOutput(data_inst), usage));
+                        for (i, &ty) in data_inst_form_def.output_types.iter().enumerate() {
+                            if is_qptr(ty) {
+                                if let Some(usage) = per_output_usage[i].take() {
+                                    usage_or_err_attrs_to_attach.push((
+                                        Value::DataInstOutput {
+                                            inst: data_inst,
+                                            output_idx: i.try_into().unwrap(),
+                                        },
+                                        usage,
+                                    ));
+                                }
                             }
                         }
                     }
 
                     DataInstKind::QPtr(QPtrOp::FuncLocalVar(_)) => {
-                        if let Some(usage) = output_usage {
-                            usage_or_err_attrs_to_attach
-                                .push((Value::DataInstOutput(data_inst), usage));
+                        assert_eq!(per_output_usage.len(), 1);
+                        if let Some(usage) = per_output_usage[0].take() {
+                            usage_or_err_attrs_to_attach.push((
+                                Value::DataInstOutput { inst: data_inst, output_idx: 0 },
+                                usage,
+                            ));
                         }
                     }
                     DataInstKind::QPtr(QPtrOp::HandleArrayIndex) => {
+                        assert_eq!(per_output_usage.len(), 1);
                         generate_usage(
                             self,
                             data_inst_def.inputs[0],
-                            output_usage
+                            per_output_usage[0]
+                                .take()
                                 .unwrap_or_else(|| {
                                     Err(AnalysisError(Diag::bug([
                                         "HandleArrayIndex: unknown element".into(),
@@ -959,10 +1074,12 @@ impl<'a> InferUsage<'a> {
                         );
                     }
                     DataInstKind::QPtr(QPtrOp::BufferData) => {
+                        assert_eq!(per_output_usage.len(), 1);
                         generate_usage(
                             self,
                             data_inst_def.inputs[0],
-                            output_usage
+                            per_output_usage[0]
+                                .take()
                                 .unwrap_or(Ok(QPtrUsage::Memory(QPtrMemUsage::UNUSED)))
                                 .and_then(|usage| {
                                     let usage = match usage {
@@ -1011,10 +1128,11 @@ impl<'a> InferUsage<'a> {
                         );
                     }
                     &DataInstKind::QPtr(QPtrOp::Offset(offset)) => {
+                        assert_eq!(per_output_usage.len(), 1);
                         generate_usage(
                             self,
                             data_inst_def.inputs[0],
-                            output_usage
+                            per_output_usage[0].take()
                                 .unwrap_or(Ok(QPtrUsage::Memory(QPtrMemUsage::UNUSED)))
                                 .and_then(|usage| {
                                     let usage = match usage {
@@ -1053,10 +1171,11 @@ impl<'a> InferUsage<'a> {
                         );
                     }
                     DataInstKind::QPtr(QPtrOp::DynOffset { stride, index_bounds }) => {
+                        assert_eq!(per_output_usage.len(), 1);
                         generate_usage(
                             self,
                             data_inst_def.inputs[0],
-                            output_usage
+                            per_output_usage[0].take()
                                 .unwrap_or(Ok(QPtrUsage::Memory(QPtrMemUsage::UNUSED)))
                                 .and_then(|usage| {
                                     let usage = match usage {
@@ -1107,10 +1226,12 @@ impl<'a> InferUsage<'a> {
                                 }),
                         );
                     }
-                    DataInstKind::QPtr(op @ (QPtrOp::Load | QPtrOp::Store)) => {
+                    DataInstKind::QPtr(
+                        op @ (QPtrOp::Load { offset } | QPtrOp::Store { offset }),
+                    ) => {
                         let (op_name, access_type) = match op {
-                            QPtrOp::Load => ("Load", data_inst_form_def.output_type.unwrap()),
-                            QPtrOp::Store => {
+                            QPtrOp::Load { .. } => ("Load", data_inst_form_def.output_types[0]),
+                            QPtrOp::Store { .. } => {
                                 ("Store", func_at_inst.at(data_inst_def.inputs[1]).type_of(&cx))
                             }
                             _ => unreachable!(),
@@ -1122,7 +1243,7 @@ impl<'a> InferUsage<'a> {
                                 .layout_of(access_type)
                                 .map_err(|LayoutError(e)| AnalysisError(e))
                                 .and_then(|layout| match layout {
-                                    TypeLayout::Handle(shapes::Handle::Opaque(ty)) => {
+                                    TypeLayout::Handle(shapes::Handle::Opaque(ty)) if *offset == 0 => {
                                         Ok(QPtrUsage::Handles(shapes::Handle::Opaque(ty)))
                                     }
                                     TypeLayout::Handle(shapes::Handle::Buffer(..)) => {
@@ -1130,6 +1251,11 @@ impl<'a> InferUsage<'a> {
                                             "{op_name}: cannot access whole Buffer"
                                         )
                                         .into()])))
+                                    }
+                                    TypeLayout::Handle(_) => {
+                                        Err(AnalysisError(Diag::bug([format!(
+                                            "{op_name} {{ offset: {offset} }}: cannot offset Handles"
+                                        ).into()])))
                                     }
                                     TypeLayout::HandleArray(..) => {
                                         Err(AnalysisError(Diag::bug([format!(
@@ -1146,16 +1272,41 @@ impl<'a> InferUsage<'a> {
                                         .into()])))
                                     }
                                     TypeLayout::Concrete(concrete) => {
-                                        Ok(QPtrUsage::Memory(QPtrMemUsage {
+                                        let usage = QPtrMemUsage {
                                             max_size: Some(concrete.mem_layout.fixed_base.size),
                                             kind: QPtrMemUsageKind::DirectAccess(access_type),
+                                        };
+
+                                        // FIXME(eddyb) deduplicate this with
+                                        // `QPtrOp::Offset` above.
+                                        let offset = u32::try_from(*offset).ok().ok_or_else(|| {
+                                            AnalysisError(Diag::bug([format!("{op_name} {{ offset: {offset} }}: negative offset").into()]))
+                                        })?;
+
+                                        if offset == 0 {
+                                            return Ok(QPtrUsage::Memory(usage));
+                                        }
+
+                                        Ok(QPtrUsage::Memory(QPtrMemUsage {
+                                            max_size: usage
+                                                .max_size
+                                                .map(|max_size| offset.checked_add(max_size).ok_or_else(|| {
+                                                    AnalysisError(Diag::bug([format!("{op_name} {{ offset: {offset} }}: size overflow ({offset}+{max_size})").into()]))
+                                                })).transpose()?,
+                                            // FIXME(eddyb) allocating `Rc<BTreeMap<_, _>>`
+                                            // to represent the one-element case, seems
+                                            // quite wasteful when it's likely consumed.
+                                            kind: QPtrMemUsageKind::OffsetBase(Rc::new(
+                                                [(offset, usage)].into(),
+                                            )),
                                         }))
                                     }
                                 }),
                         );
                     }
 
-                    DataInstKind::SpvInst(_) | DataInstKind::SpvExtInst { .. } => {
+                    DataInstKind::SpvInst(_, lowering)
+                    | DataInstKind::SpvExtInst { lowering, .. } => {
                         let mut has_from_spv_ptr_output_attr = false;
                         for attr in &cx[data_inst_def.attrs].attrs {
                             match *attr {
@@ -1180,7 +1331,8 @@ impl<'a> InferUsage<'a> {
                                                         // since it would conflict with our
                                                         // own `Block`-annotated wrapper.
                                                         shapes::Handle::Buffer(..) => {
-                                                            return Err(AnalysisError(Diag::bug(["ToSpvPtrInput: whole Buffer ambiguous (handle vs buffer data)".into()])
+                                                            return Err(AnalysisError(
+                                                                Diag::bug(["ToSpvPtrInput: whole Buffer ambiguous (handle vs buffer data)".into()])
                                                             ));
                                                         }
                                                     };
@@ -1193,7 +1345,8 @@ impl<'a> InferUsage<'a> {
                                                 // a generated type that matches the
                                                 // desired `pointee` type.
                                                 TypeLayout::HandleArray(..) => {
-                                                    Err(AnalysisError(Diag::bug(["ToSpvPtrInput: whole handle array unrepresentable".into()])
+                                                    Err(AnalysisError(
+                                                        Diag::bug(["ToSpvPtrInput: whole handle array unrepresentable".into()])
                                                     ))
                                                 }
                                                 TypeLayout::Concrete(concrete) => {
@@ -1226,10 +1379,14 @@ impl<'a> InferUsage<'a> {
                         }
 
                         if has_from_spv_ptr_output_attr {
+                            assert!(lowering.disaggregated_output.is_none());
+                            assert_eq!(per_output_usage.len(), 1);
                             // FIXME(eddyb) merge with `FromSpvPtrOutput`'s `pointee`.
-                            if let Some(usage) = output_usage {
-                                usage_or_err_attrs_to_attach
-                                    .push((Value::DataInstOutput(data_inst), usage));
+                            if let Some(usage) = per_output_usage[0].take() {
+                                usage_or_err_attrs_to_attach.push((
+                                    Value::DataInstOutput { inst: data_inst, output_idx: 0 },
+                                    usage,
+                                ));
                             }
                         }
                     }
