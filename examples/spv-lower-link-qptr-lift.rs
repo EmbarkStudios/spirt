@@ -53,18 +53,21 @@ fn main() -> std::io::Result<()> {
                 eprint_duration(|| spirt::Module::lower_from_spv_file(cx.clone(), in_file_path))?;
             eprintln!("Module::lower_from_spv_file({})", in_file_path.display());
 
-            let original_export_count = module.exports.len();
-            eprint_duration(|| {
-                spirt::passes::link::minimize_exports(&mut module, |export_key| {
-                    matches!(export_key, spirt::ExportKey::SpvEntryPoint { .. })
-                })
-            });
-            eprintln!(
-                "link::minimize_exports: {} -> {} exports",
-                original_export_count,
-                module.exports.len()
-            );
-            //after_pass("minimize_exports", &module)?;
+            // FIXME(eddyb) DO NOT KEEP THIS
+            if true {
+                let original_export_count = module.exports.len();
+                eprint_duration(|| {
+                    spirt::passes::link::minimize_exports(&mut module, |export_key| {
+                        matches!(export_key, spirt::ExportKey::SpvEntryPoint { .. })
+                    })
+                });
+                eprintln!(
+                    "link::minimize_exports: {} -> {} exports",
+                    original_export_count,
+                    module.exports.len()
+                );
+                //after_pass("minimize_exports", &module)?;
+            }
 
             // HACK(eddyb) do this late enough to avoid spending time on unused
             // functions, which `link::minimize_exports` makes unreachable.
@@ -92,13 +95,17 @@ fn main() -> std::io::Result<()> {
             eprintln!("qptr::lower_from_spv_ptrs");
             after_pass("qptr::lower_from_spv_ptrs", &module)?;
 
-            eprint_duration(|| spirt::passes::qptr::analyze_uses(&mut module, layout_config));
-            eprintln!("qptr::analyze_uses");
-            after_pass("qptr::analyze_uses", &module)?;
+            if true {
+                eprint_duration(|| spirt::passes::qptr::analyze_uses(&mut module, layout_config));
+                eprintln!("qptr::analyze_uses");
+                after_pass("qptr::analyze_uses", &module)?;
 
-            eprint_duration(|| spirt::passes::qptr::lift_to_spv_ptrs(&mut module, layout_config));
-            eprintln!("qptr::lift_to_spv_ptrs");
-            after_pass("qptr::lift_to_spv_ptrs", &module)?;
+                eprint_duration(|| {
+                    spirt::passes::qptr::lift_to_spv_ptrs(&mut module, layout_config)
+                });
+                eprintln!("qptr::lift_to_spv_ptrs");
+                after_pass("qptr::lift_to_spv_ptrs", &module)?;
+            }
 
             if multi_version_printing {
                 // FIXME(eddyb) use a better suffix than `qptr` (or none).
