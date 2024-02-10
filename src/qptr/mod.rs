@@ -13,6 +13,7 @@ use std::rc::Rc;
 // NOTE(eddyb) all the modules are declared here, but they're documented "inside"
 // (i.e. using inner doc comments).
 pub mod analyze;
+pub mod const_data;
 mod layout;
 pub mod lift;
 pub mod lower;
@@ -35,7 +36,7 @@ pub enum QPtrAttr {
     // FIXME(eddyb) reduce usage by modeling more of SPIR-V inside SPIR-T.
     ToSpvPtrInput { input_idx: u32, pointee: OrdAssertEq<Type> },
 
-    /// When applied to a `DataInst` with a `QPtr`-typed output value,
+    /// When applied to a `DataInst` with a single `QPtr`-typed output value,
     /// this describes the original `OpTypePointer` produced by an unknown
     /// SPIR-V instruction (likely creating it, without deriving from an input).
     ///
@@ -193,16 +194,19 @@ pub enum QPtrOp {
         index_bounds: Option<Range<i32>>,
     },
 
-    /// Read a single value from a `QPtr` (`inputs[0]`).
+    /// Read a single value from a `QPtr` (`inputs[0]`) at `offset`.
     //
     // FIXME(eddyb) limit this to memory, and scalars, maybe vectors at most.
-    Load,
+    Load {
+        offset: i32,
+    },
 
-    /// Write a single value (`inputs[1]`) to a `QPtr` (`inputs[0]`).
+    /// Write a single value (`inputs[1]`) to a `QPtr` (`inputs[0]`) at `offset`.
     //
     // FIXME(eddyb) limit this to memory, and scalars, maybe vectors at most.
-    Store,
+    Store {
+        offset: i32,
+    },
     //
-    // FIXME(eddyb) implement more ops! at the very least copying!
-    // (and lowering could ignore pointercasts, I guess?)
+    // FIXME(eddyb) implement more ops (e.g. copies).
 }

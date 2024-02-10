@@ -1,15 +1,13 @@
 //! Control-flow graph (CFG) abstractions and utilities.
 
 use crate::{
-    spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
+    scalar, spv, AttrSet, Const, ConstDef, ConstKind, Context, ControlNode, ControlNodeDef,
     ControlNodeKind, ControlNodeOutputDecl, ControlRegion, ControlRegionDef,
-    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, TypeKind,
-    Value,
+    EntityOrientedDenseMap, FuncDefBody, FxIndexMap, FxIndexSet, SelectionKind, Type, Value,
 };
 use itertools::{Either, Itertools};
 use smallvec::SmallVec;
 use std::mem;
-use std::rc::Rc;
 
 /// The control-flow graph (CFG) of a function, as control-flow instructions
 /// ([`ControlInst`]s) attached to [`ControlRegion`]s, as an "action on exit", i.e.
@@ -53,7 +51,8 @@ pub enum ControlInstKind {
     /// necessary preconditions for reaching this point, are never met.
     Unreachable,
 
-    /// Leave the current function, optionally returning a value.
+    /// Leave the current function, returning some number of [`Value`]s, as per
+    /// the function's signature (`ret_types` in [`FuncDecl`](crate::FuncDecl)).
     Return,
 
     /// Leave the current invocation, similar to returning from every function
@@ -571,6 +570,16 @@ struct DeferredEdgeBundleSet {
     target_to_deferred: FxIndexMap<DeferredTarget, DeferredEdgeBundle<()>>,
 }
 
+// TODO(eddyb) track defined values during structurization, and the region scope
+// of their definition, to minimize the need to pass them through control-flow,
+// but also potentially to allow breaking def-use links at region boundaries?
+
+// TODO(eddyb) consider isolating each non-trivial control-flow sibling from eachother,
+// during original lowering, no dominance-based SSA at all!
+
+// TODO(eddyb) consider renaming "deferred" to "dangling"? coalesced? hmmm
+//
+
 /// Partially structurized [`ControlRegion`], the result of combining together
 /// several smaller [`ControlRegion`]s, based on CFG edges between them.
 struct PartialControlRegion {
@@ -593,32 +602,9 @@ struct PartialControlRegion {
 
 impl<'a> Structurizer<'a> {
     pub fn new(cx: &'a Context, func_def_body: &'a mut FuncDefBody) -> Self {
-        // FIXME(eddyb) SPIR-T should have native booleans itself.
-        let wk = &spv::spec::Spec::get().well_known;
-        let type_bool = cx.intern(TypeKind::SpvInst {
-            spv_inst: wk.OpTypeBool.into(),
-            type_and_const_inputs: [].into_iter().collect(),
-        });
-        let const_true = cx.intern(ConstDef {
-            attrs: AttrSet::default(),
-            ty: type_bool,
-            kind: ConstKind::SpvInst {
-                spv_inst_and_const_inputs: Rc::new((
-                    wk.OpConstantTrue.into(),
-                    [].into_iter().collect(),
-                )),
-            },
-        });
-        let const_false = cx.intern(ConstDef {
-            attrs: AttrSet::default(),
-            ty: type_bool,
-            kind: ConstKind::SpvInst {
-                spv_inst_and_const_inputs: Rc::new((
-                    wk.OpConstantFalse.into(),
-                    [].into_iter().collect(),
-                )),
-            },
-        });
+        let type_bool = cx.intern(scalar::Type::Bool);
+        let const_true = cx.intern(scalar::Const::TRUE);
+        let const_false = cx.intern(scalar::Const::FALSE);
 
         let (loop_header_to_exit_targets, incoming_edge_counts_including_loop_exits) =
             func_def_body
@@ -745,6 +731,21 @@ impl<'a> Structurizer<'a> {
             }
             _ => None,
         }));
+
+        // FIXME(eddyb) track a stack of loops, and known loop bodies, and every time
+        // a loop body region *input* is used, outside that loop, refer to the loop node
+        // output instead, but care must be taken that exiting the loop sets the appropriate
+        // noop output=input (instead of undefs like today).
+        // TODO(eddyb) actually that seems trickier than I thought, and may require using
+        // the SCC information to decompose `loop` `break`s ahead of time...
+        // NOTE(eddyb) maybe knowing whether a target is specifically a backedge,
+        // when merging a select and generating undefs, is enough? have to worry
+        // about nested loops and what it means to reach a different target, but
+        // one would assume that all the sibling targets of a loop backedge, would
+        // never need the values *except* when breaking out of the loop.
+        // TODO(eddyb) to avoid additional lookups and statefulness, maybe the
+        // backedgeness should be included in the `DeferredEdgeBundle` etc.?
+        // (though it probably doesn't to care about the loop node/body region distinction)
     }
 
     // FIXME(eddyb) the names `target` and `region` are an issue, they
@@ -849,6 +850,7 @@ impl<'a> Structurizer<'a> {
             assert_eq!(initial_inputs.len(), body_def.inputs.len());
             assert_eq!(body_def.outputs.len(), body_def.inputs.len());
 
+            // FIXME(eddyb) move the repeat condition into the body outputs.
             let repeat_condition = self.materialize_lazy_cond(repeat_condition);
             let loop_node = self.func_def_body.control_nodes.define(
                 self.cx,
@@ -1568,14 +1570,6 @@ impl<'a> Structurizer<'a> {
     /// Create an undefined constant (as a placeholder where a value needs to be
     /// present, but won't actually be used), of type `ty`.
     fn const_undef(&self, ty: Type) -> Const {
-        // FIXME(eddyb) SPIR-T should have native undef itself.
-        let wk = &spv::spec::Spec::get().well_known;
-        self.cx.intern(ConstDef {
-            attrs: AttrSet::default(),
-            ty,
-            kind: ConstKind::SpvInst {
-                spv_inst_and_const_inputs: Rc::new((wk.OpUndef.into(), [].into_iter().collect())),
-            },
-        })
+        self.cx.intern(ConstDef { attrs: AttrSet::default(), ty, kind: ConstKind::Undef })
     }
 }
