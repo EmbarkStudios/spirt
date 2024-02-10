@@ -92,6 +92,12 @@ fn main() -> std::io::Result<()> {
             eprintln!("qptr::lower_from_spv_ptrs");
             after_pass("qptr::lower_from_spv_ptrs", &module)?;
 
+            eprint_duration(|| {
+                spirt::passes::qptr::partition_and_propagate(&mut module, layout_config)
+            });
+            eprintln!("qptr::partition_and_propagate");
+            after_pass("qptr::partition_and_propagate", &module)?;
+
             eprint_duration(|| spirt::passes::qptr::analyze_uses(&mut module, layout_config));
             eprintln!("qptr::analyze_uses");
             after_pass("qptr::analyze_uses", &module)?;

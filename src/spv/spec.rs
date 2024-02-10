@@ -117,10 +117,6 @@ def_well_known! {
         OpNoLine,
 
         OpTypeVoid,
-        OpTypeBool,
-        OpTypeInt,
-        OpTypeFloat,
-        OpTypeVector,
         OpTypeMatrix,
         OpTypeArray,
         OpTypeRuntimeArray,
@@ -133,10 +129,9 @@ def_well_known! {
         OpTypeSampledImage,
         OpTypeAccelerationStructureKHR,
 
-        OpConstantFalse,
-        OpConstantTrue,
-        OpConstant,
-        OpUndef,
+        // FIXME(eddyb) hide these from code, lowering should handle most cases.
+        OpConstantComposite,
+        OpSpecConstantComposite,
 
         OpVariable,
 
@@ -158,14 +153,22 @@ def_well_known! {
 
         OpFunctionCall,
 
+        OpImageTexelPointer,
+
         OpLoad,
         OpStore,
+        OpCopyMemory,
         OpArrayLength,
         OpAccessChain,
         OpInBoundsAccessChain,
         OpPtrAccessChain,
         OpInBoundsPtrAccessChain,
         OpBitcast,
+
+        // FIXME(eddyb) hide these from code, lowering should handle most cases.
+        OpCompositeInsert,
+        OpCompositeExtract,
+        OpCompositeConstruct,
     ],
     operand_kind: OperandKind = [
         Capability,
@@ -183,6 +186,7 @@ def_well_known! {
         LiteralExtInstInteger,
         LiteralString,
         LiteralContextDependentNumber,
+        LiteralSpecConstantOpInteger,
     ],
     // FIXME(eddyb) find a way to namespace these to avoid conflicts.
     addressing_model: u32 = [
@@ -194,6 +198,8 @@ def_well_known! {
         UniformConstant,
         Input,
         Output,
+
+        Image,
 
         IncomingRayPayloadKHR,
         IncomingCallableDataKHR,
