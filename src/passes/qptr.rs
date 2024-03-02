@@ -1,7 +1,7 @@
 //! [`QPtr`](crate::TypeKind::QPtr) transforms.
 
 use crate::visit::{InnerVisit, Visitor};
-use crate::{qptr, DataInstForm};
+use crate::{qptr, DataInstForm, DeclDef};
 use crate::{AttrSet, Const, Context, Func, FxIndexSet, GlobalVar, Module, Type};
 
 pub fn lower_from_spv_ptrs(module: &mut Module, layout_config: &qptr::LayoutConfig) {
@@ -32,6 +32,58 @@ pub fn lower_from_spv_ptrs(module: &mut Module, layout_config: &qptr::LayoutConf
     }
     for &func in &seen_funcs {
         lowerer.lower_func(&mut module.funcs[func]);
+    }
+}
+
+// FIXME(eddyb) split this into separate passes, but the looping complicates things.
+pub fn partition_and_propagate(module: &mut Module, layout_config: &qptr::LayoutConfig) {
+    let cx = &module.cx();
+
+    let (_seen_global_vars, seen_funcs) = {
+        // FIXME(eddyb) reuse this collection work in some kind of "pass manager".
+        let mut collector = ReachableUseCollector {
+            cx,
+            module,
+
+            seen_types: FxIndexSet::default(),
+            seen_consts: FxIndexSet::default(),
+            seen_data_inst_forms: FxIndexSet::default(),
+            seen_global_vars: FxIndexSet::default(),
+            seen_funcs: FxIndexSet::default(),
+        };
+        for (export_key, &exportee) in &module.exports {
+            export_key.inner_visit_with(&mut collector);
+            exportee.inner_visit_with(&mut collector);
+        }
+        (collector.seen_global_vars, collector.seen_funcs)
+    };
+
+    for func in seen_funcs {
+        if let DeclDef::Present(func_def_body) = &mut module.funcs[func].def {
+            // FIXME(eddyb) reuse `LayoutCache` and whatnot, between functions,
+            // or at least iterations of this loop.
+            loop {
+                qptr::simplify::partition_local_vars_in_func(
+                    cx.clone(),
+                    layout_config,
+                    func_def_body,
+                );
+
+                if true {
+                    crate::flow::flow_func(cx.clone(), func_def_body);
+                    break;
+                }
+
+                let report = qptr::simplify::propagate_contents_of_local_vars_in_func(
+                    cx.clone(),
+                    layout_config,
+                    func_def_body,
+                );
+                if !report.any_qptrs_propagated {
+                    break;
+                }
+            }
+        }
     }
 }
 

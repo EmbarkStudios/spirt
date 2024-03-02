@@ -3,16 +3,19 @@
 use crate::spv::{self, spec};
 // FIXME(eddyb) import more to avoid `crate::` everywhere.
 use crate::{
-    cfg, print, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context, ControlNodeDef,
-    ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl, DataInstDef,
-    DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList, ExportKey, Exportee,
-    Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl, GlobalVarDefBody, Import,
-    InternedStr, Module, SelectionKind, Type, TypeDef, TypeKind, TypeOrConst, Value,
+    cfg, print, scalar, AddrSpace, Attr, AttrSet, Const, ConstDef, ConstKind, Context,
+    ControlNodeDef, ControlNodeKind, ControlRegion, ControlRegionDef, ControlRegionInputDecl,
+    DataInst, DataInstDef, DataInstFormDef, DataInstKind, DeclDef, Diag, EntityDefs, EntityList,
+    ExportKey, Exportee, Func, FuncDecl, FuncDefBody, FuncParam, FxIndexMap, GlobalVarDecl,
+    GlobalVarDefBody, GlobalVarInit, Import, InternedStr, Module, SelectionKind, Type, TypeDef,
+    TypeKind, TypeOrConst, Value,
 };
+use itertools::Either;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 use std::{io, mem};
@@ -21,6 +24,15 @@ use std::{io, mem};
 enum IdDef {
     Type(Type),
     Const(Const),
+
+    /// Like `Const`, but for SPIR-V "aggregate" (`OpTypeStruct`/`OpTypeArray`)
+    /// constants (e.g. `OpConstantComposite`s of those types, but also more
+    /// general constants like `OpUndef`/`OpConstantNull` etc.).
+    AggregateConst {
+        whole_type: Type,
+
+        leaves: SmallVec<[Const; 4]>,
+    },
 
     Func(Func),
 
@@ -33,8 +45,10 @@ impl IdDef {
         match *self {
             // FIXME(eddyb) print these with some kind of "maximum depth",
             // instead of just describing the kind of definition.
+            // FIXME(eddyb) replace these with the `Diag` embedding system.
             IdDef::Type(_) => "a type".into(),
             IdDef::Const(_) => "a constant".into(),
+            IdDef::AggregateConst { .. } => "an aggregate constant".into(),
 
             IdDef::Func(_) => "a function".into(),
 
@@ -45,6 +59,43 @@ impl IdDef {
         }
     }
 }
+
+impl Type {
+    // HACK(eddyb) `indices` is a `&mut` because it specifically only consumes
+    // the indices it needs, so when this function returns `Some`, all remaining
+    // indices will be left over for the caller to process itself.
+    fn aggregate_component_path_type_and_leaf_range(
+        self,
+        cx: &Context,
+        indices: &mut impl Iterator<Item = u32>,
+    ) -> Option<(Type, Range<usize>)> {
+        let (mut leaf_type, mut leaf_range) =
+            self.aggregate_component_type_and_leaf_range(cx, indices.next()?)?;
+
+        while let spv::ValueLowering::Disaggregate(_) = cx[leaf_type].spv_value_lowering() {
+            let (sub_leaf_type, sub_leaf_range) = match indices.next() {
+                Some(i) => leaf_type.aggregate_component_type_and_leaf_range(cx, i)?,
+                None => break,
+            };
+
+            assert!(sub_leaf_range.end <= leaf_range.len());
+            leaf_range.end = leaf_range.start + sub_leaf_range.end;
+            leaf_range.start += sub_leaf_range.start;
+            leaf_type = sub_leaf_type;
+        }
+
+        Some((leaf_type, leaf_range))
+    }
+}
+
+/// Error type for when a SPIR-V type cannot have a `spv::ValueLowering`, i.e.
+/// this type can only be used behind a pointer. Disaggregation won't be
+/// performed, so illegal attempts at constructing values of this type will
+/// be kept intact, but annotated with an error [`Diag`]nostic.
+//
+// FIXME(eddyb) include an actual error message in here, maybe a whole `Diag`.
+#[derive(Clone)]
+struct TypeIsIndirectOnly;
 
 /// Deferred export, needed because the IDs are initially forward refs.
 enum Export {
@@ -80,17 +131,32 @@ struct IntraFuncInst {
     ids: SmallVec<[spv::Id; 4]>,
 }
 
-// FIXME(eddyb) stop abusing `io::Error` for error reporting.
+// FIXME(eddyb) stop abusing `io::Error` for error reporting and switch to `Diag`.
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("malformed SPIR-V ({reason})"))
+}
+
+fn invalid_factory_for_spv_inst(
+    inst: &spv::Inst,
+    result_id: Option<spv::Id>,
+    ids: &[spv::Id],
+) -> impl Fn(&str) -> io::Error {
+    let opcode = inst.opcode;
+    let first_id_operand = ids.first().copied();
+    move |msg: &str| {
+        let result_prefix = result_id.map(|id| format!("%{id} = ")).unwrap_or_default();
+        let operand_suffix = first_id_operand.map(|id| format!(" %{id} ...")).unwrap_or_default();
+        invalid(&format!("in {result_prefix}{}{operand_suffix}: {msg}", opcode.name()))
+    }
 }
 
 // FIXME(eddyb) provide more information about any normalization that happened:
 // * stats about deduplication that occured through interning
 // * sets of unused global vars and functions (and types+consts only they use)
-// FIXME(eddyb) consider introducing a "deferred error" system, where `spv::lower`
-// (and more directproducers) can keep around errors in the SPIR-T IR, and still
-// have the opportunity of silencing them e.g. by removing dead code.
+// FIXME(eddyb) use `Diag` instead of `io::Error`, maybe with a return type like
+// `Result<Module, IncompletelyLoweredModule>` where `IncompletelyLoweredModule`
+// contains a `Module`, maps of all the SPIR-V IDs (to the SPIR-T definitions),
+// global `Diag`s (where they can't be attached to specific `AttrSet`s), etc.
 impl Module {
     pub fn lower_from_spv_file(cx: Rc<Context>, path: impl AsRef<Path>) -> io::Result<Self> {
         Self::lower_from_spv_module_parser(cx, spv::read::ModuleParser::read_from_spv_file(path)?)
@@ -195,7 +261,7 @@ impl Module {
         while let Some(mut inst) = spv_insts.next().transpose()? {
             let opcode = inst.opcode;
 
-            let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+            let invalid = invalid_factory_for_spv_inst(&inst, inst.result_id, &inst.ids);
 
             // Handle line debuginfo early, as it doesn't have its own section,
             // but rather can go almost anywhere among globals and functions.
@@ -549,6 +615,7 @@ impl Module {
                     kind: TypeKind::SpvInst {
                         spv_inst: spv::Inst { opcode, imms: [sc].into_iter().collect() },
                         type_and_const_inputs: [].into_iter().collect(),
+                        value_lowering: Default::default(),
                     },
                 });
                 id_defs.insert(id, IdDef::Type(ty));
@@ -557,7 +624,7 @@ impl Module {
             } else if inst_category == spec::InstructionCategory::Type {
                 assert!(inst.result_type_id.is_none());
                 let id = inst.result_id.unwrap();
-                let type_and_const_inputs = inst
+                let type_and_const_inputs: SmallVec<_> = inst
                     .ids
                     .iter()
                     .map(|&id| match id_defs.get(&id) {
@@ -575,38 +642,189 @@ impl Module {
 
                 let ty = cx.intern(TypeDef {
                     attrs: mem::take(&mut attrs),
-                    kind: TypeKind::SpvInst { spv_inst: inst.without_ids, type_and_const_inputs },
+                    kind: inst.without_ids.into_canonical_type_with(&cx, type_and_const_inputs),
                 });
                 id_defs.insert(id, IdDef::Type(ty));
 
                 Seq::TypeConstOrGlobalVar
-            } else if inst_category == spec::InstructionCategory::Const || opcode == wk.OpUndef {
+            } else if inst_category == spec::InstructionCategory::Const
+                || inst.always_lower_as_const()
+            {
                 let id = inst.result_id.unwrap();
-                let const_inputs = inst
-                    .ids
-                    .iter()
-                    .map(|&id| match id_defs.get(&id) {
-                        Some(&IdDef::Const(ct)) => Ok(ct),
-                        Some(id_def) => Err(id_def.descr(&cx)),
-                        None => Err(format!("a forward reference to %{id}")),
-                    })
-                    .map(|result| {
-                        result.map_err(|descr| {
-                            invalid(&format!("unsupported use of {descr} in a constant"))
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
 
-                let ct = cx.intern(ConstDef {
-                    attrs: mem::take(&mut attrs),
-                    ty: result_type.unwrap(),
-                    kind: ConstKind::SpvInst {
-                        spv_inst_and_const_inputs: Rc::new((inst.without_ids, const_inputs)),
+                let ty = result_type.unwrap();
+
+                // HACK(eddyb) while creating constants of unsized array types
+                // is *technically* illegal in SPIR-V, array semantics always
+                // are length-independent, so we can pretend this is an array
+                // of the right length (as long as we track the error on it).
+                let maybe_fixup_unsized_array_type = |ty: Type| {
+                    if ![wk.OpConstantComposite, wk.OpSpecConstantComposite].contains(&opcode) {
+                        return None;
+                    };
+                    let actual_component_count = u32::try_from(inst.ids.len()).ok()?;
+
+                    let ty_def = &cx[ty];
+                    let elem_type_of_unsized_array = match &ty_def.kind {
+                        TypeKind::SpvInst { spv_inst: ty_inst, type_and_const_inputs, .. } => {
+                            match type_and_const_inputs[..] {
+                                [TypeOrConst::Type(elem_type), TypeOrConst::Const(len)]
+                                    if ty_inst.opcode == wk.OpTypeArray
+                                        && len.as_scalar(&cx).is_none() =>
+                                {
+                                    elem_type
+                                }
+                                [TypeOrConst::Type(elem_type)]
+                                    if ty_inst.opcode == wk.OpTypeRuntimeArray =>
+                                {
+                                    elem_type
+                                }
+                                _ => return None,
+                            }
+                        }
+                        _ => return None,
+                    };
+                    Some(
+                        cx.intern(TypeDef {
+                            attrs: ty_def.attrs.append_diag(
+                                &cx,
+                                Diag::err([
+                                    "illegal constant: values of type `".into(),
+                                    ty.into(),
+                                    "` should only be accessed through pointers".into(),
+                                ]),
+                            ),
+                            kind: spv::Inst::from(wk.OpTypeArray).into_canonical_type_with(
+                                &cx,
+                                [
+                                    TypeOrConst::Type(elem_type_of_unsized_array),
+                                    TypeOrConst::Const(
+                                        cx.intern(scalar::Const::from_u32(actual_component_count)),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ),
+                        }),
+                    )
+                };
+                let ty = maybe_fixup_unsized_array_type(ty).unwrap_or(ty);
+
+                let mut all_leaves = SmallVec::new();
+                match cx[ty].spv_value_lowering() {
+                    spv::ValueLowering::Direct => {
+                        all_leaves.reserve(inst.ids.len());
+                    }
+                    spv::ValueLowering::Disaggregate(_) => {
+                        // HACK(eddyb) this expands `OpUndef`/`OpConstantNull`.
+                        // FIXME(eddyb) this could potentially create a very
+                        // inefficient large array, even when the intent can
+                        // be expressed much more compactly in theory.
+                        if inst.lower_const_by_distributing_to_aggregate_leaves() {
+                            assert_eq!(inst.ids.len(), 0);
+                            all_leaves.extend(ty.disaggregated_leaf_types(&cx).map(|leaf_type| {
+                                cx.intern(ConstDef {
+                                    attrs: Default::default(),
+                                    ty: leaf_type,
+                                    kind: inst
+                                        .as_canonical_const(&cx, leaf_type, &[])
+                                        .unwrap_or_else(|| ConstKind::SpvInst {
+                                            spv_inst_and_const_inputs: Rc::new((
+                                                inst.without_ids.clone(),
+                                                [].into_iter().collect(),
+                                            )),
+                                        }),
+                                })
+                            }));
+                        } else if [wk.OpConstantComposite, wk.OpSpecConstantComposite]
+                            .contains(&opcode)
+                        {
+                            all_leaves.reserve(cx[ty].disaggregated_leaf_count());
+                        } else {
+                            attrs.push_diag(
+                                &cx,
+                                Diag::bug(["unsupported aggregate-producing constant".into()]),
+                            );
+                        }
+                    }
+                }
+
+                let invalid = |descr| invalid(&format!("unsupported use of {descr} in a constant"));
+                for &id in &inst.ids {
+                    match id_defs.get(&id) {
+                        Some(&IdDef::Const(ct)) => {
+                            all_leaves.push(ct);
+                        }
+                        Some(IdDef::AggregateConst { whole_type, leaves }) => {
+                            all_leaves.extend(leaves.iter().copied());
+
+                            match cx[ty].spv_value_lowering() {
+                                // FIXME(eddyb) this also covers invalid consts
+                                // of e.g. unsized aggregate types, as well.
+                                spv::ValueLowering::Direct => {
+                                    attrs.push_diag(
+                                        &cx,
+                                        Diag::err([
+                                            "unexpected aggregate constant of type `".into(),
+                                            (*whole_type).into(),
+                                            "`".into(),
+                                        ]),
+                                    );
+                                }
+                                spv::ValueLowering::Disaggregate(_) => {}
+                            }
+                        }
+                        Some(id_def) => return Err(invalid(&id_def.descr(&cx))),
+                        None => return Err(invalid(&format!("a forward reference to %{id}"))),
+                    }
+                }
+
+                let lowering = &cx[ty].spv_value_lowering();
+                let lowering = match lowering {
+                    spv::ValueLowering::Disaggregate(_)
+                        if cx[ty].disaggregated_leaf_count() != all_leaves.len() =>
+                    {
+                        attrs.push_diag(
+                            &cx,
+                            Diag::err([format!(
+                                "aggregate leaf count mismatch (expected {}, found {})",
+                                cx[ty].disaggregated_leaf_count(),
+                                all_leaves.len()
+                            )
+                            .into()]),
+                        );
+                        // HACK(eddyb) pretend the type isn't an aggregate, so
+                        // that it doesn't end up using `IdDef::AggregateConst`,
+                        // which requires having the exact number of leaves.
+                        &spv::ValueLowering::Direct
+                    }
+                    _ => lowering,
+                };
+
+                let attrs = mem::take(&mut attrs);
+                id_defs.insert(
+                    id,
+                    match lowering {
+                        spv::ValueLowering::Direct => IdDef::Const(cx.intern(ConstDef {
+                            attrs,
+                            ty,
+                            kind: inst.as_canonical_const(&cx, ty, &all_leaves).unwrap_or_else(
+                                || ConstKind::SpvInst {
+                                    spv_inst_and_const_inputs: Rc::new((
+                                        inst.without_ids,
+                                        all_leaves,
+                                    )),
+                                },
+                            ),
+                        })),
+                        spv::ValueLowering::Disaggregate(_) => {
+                            // FIXME(eddyb) this may lose semantic `attrs`.
+                            IdDef::AggregateConst { whole_type: ty, leaves: all_leaves }
+                        }
                     },
-                });
-                id_defs.insert(id, IdDef::Const(ct));
+                );
 
-                if opcode == wk.OpUndef {
+                if inst_category != spec::InstructionCategory::Const {
                     // `OpUndef` can appear either among constants, or in a
                     // function, so at most advance `seq` to globals.
                     seq.max(Some(Seq::TypeConstOrGlobalVar)).unwrap()
@@ -636,7 +854,13 @@ impl Module {
 
                 let initializer = initializer
                     .map(|id| match id_defs.get(&id) {
-                        Some(&IdDef::Const(ct)) => Ok(ct),
+                        Some(&IdDef::Const(ct)) => Ok(GlobalVarInit::Direct(ct)),
+                        Some(IdDef::AggregateConst { whole_type, leaves }) => {
+                            Ok(GlobalVarInit::SpvAggregate {
+                                ty: *whole_type,
+                                leaves: leaves.clone(),
+                            })
+                        }
                         Some(id_def) => Err(id_def.descr(&cx)),
                         None => Err(format!("a forward reference to %{id}")),
                     })
@@ -684,8 +908,6 @@ impl Module {
                 }
 
                 let func_id = inst.result_id.unwrap();
-                // FIXME(eddyb) hide this from SPIR-T, it's the function return
-                // type, *not* the function type, which is in `func_type`.
                 let func_ret_type = result_type.unwrap();
 
                 let func_type_id = match (&inst.imms[..], &inst.ids[..]) {
@@ -698,7 +920,7 @@ impl Module {
                 let (func_type_ret_type, func_type_param_types) =
                     match id_defs.get(&func_type_id) {
                         Some(&IdDef::Type(ty)) => match &cx[ty].kind {
-                            TypeKind::SpvInst { spv_inst, type_and_const_inputs }
+                            TypeKind::SpvInst { spv_inst, type_and_const_inputs, .. }
                                 if spv_inst.opcode == wk.OpTypeFunction =>
                             {
                                 let mut types =
@@ -752,17 +974,30 @@ impl Module {
                     }
                 };
 
-                let func = module.funcs.define(
-                    &cx,
-                    FuncDecl {
-                        attrs: mem::take(&mut attrs),
-                        ret_type: func_ret_type,
-                        params: func_type_param_types
-                            .map(|ty| FuncParam { attrs: AttrSet::default(), ty })
-                            .collect(),
-                        def,
-                    },
-                );
+                // Always flatten aggregates in param and return types.
+                let ret_types = match &cx[func_ret_type].kind {
+                    // HACK(eddyb) `OpTypeVoid` special-cased here as if it were
+                    // an aggregate with `0` leaves.
+                    TypeKind::SpvInst { spv_inst: func_ret_type_spv_inst, .. }
+                        if func_ret_type_spv_inst.opcode == wk.OpTypeVoid =>
+                    {
+                        [].into_iter().collect()
+                    }
+
+                    _ => func_ret_type.disaggregated_leaf_types(&cx).collect(),
+                };
+                let mut params = SmallVec::with_capacity(func_type_param_types.len());
+                for param_type in func_type_param_types {
+                    params.extend(
+                        param_type
+                            .disaggregated_leaf_types(&cx)
+                            .map(|ty| FuncParam { attrs: AttrSet::default(), ty }),
+                    );
+                }
+
+                let func = module
+                    .funcs
+                    .define(&cx, FuncDecl { attrs: mem::take(&mut attrs), ret_types, params, def });
                 id_defs.insert(func_id, IdDef::Func(func));
 
                 current_func_body = Some(FuncBody { func_id, func, insts: vec![] });
@@ -823,34 +1058,19 @@ impl Module {
             return Err(invalid("OpFunction without matching OpFunctionEnd"));
         }
 
-        // HACK(eddyb) `OpNop` is useful for defining `DataInst`s before they're
-        // actually lowered (to be able to refer to their outputs `Value`s).
-        let mut cached_op_nop_form = None;
-        let mut get_op_nop_form = || {
-            *cached_op_nop_form.get_or_insert_with(|| {
-                cx.intern(DataInstFormDef {
-                    kind: DataInstKind::SpvInst(wk.OpNop.into()),
-                    output_type: None,
-                })
-            })
-        };
-
         // Process function bodies, having seen the whole module.
         for func_body in pending_func_bodies {
             let FuncBody { func_id, func, insts: raw_insts } = func_body;
 
             let func_decl = &mut module.funcs[func];
 
-            #[derive(Copy, Clone)]
-            enum LocalIdDef {
-                Value(Value),
-                BlockLabel(ControlRegion),
-            }
-
             #[derive(PartialEq, Eq, Hash)]
             struct PhiKey {
                 source_block_id: spv::Id,
                 target_block_id: spv::Id,
+                // FIXME(eddyb) remove this, key phis only by the edge, and keep
+                // a per-edge list of phi input `spv::Id`s (with validation for
+                // missing entries/duplicates).
                 target_phi_idx: u32,
             }
 
@@ -859,14 +1079,11 @@ impl Module {
                 phi_count: u32,
             }
 
-            // Index IDs declared within the function, first.
-            let mut local_id_defs = FxIndexMap::default();
-            // `OpPhi`s are also collected here, to assign them per-edge.
+            // Gather `OpLabel`s and `OpPhi`s early (so they can be random-accessed).
             let mut phi_to_values = FxIndexMap::<PhiKey, SmallVec<[spv::Id; 1]>>::default();
             let mut block_details = FxIndexMap::<ControlRegion, BlockDetails>::default();
             let mut has_blocks = false;
             {
-                let mut next_param_idx = 0u32;
                 for raw_inst in &raw_insts {
                     let IntraFuncInst {
                         without_ids: spv::Inst { opcode, ref imms },
@@ -874,92 +1091,56 @@ impl Module {
                         ..
                     } = *raw_inst;
 
-                    if let Some(id) = result_id {
-                        let local_id_def = if opcode == wk.OpFunctionParameter {
-                            let idx = next_param_idx;
-                            next_param_idx = idx.checked_add(1).unwrap();
+                    if opcode == wk.OpFunctionParameter {
+                        continue;
+                    }
 
-                            let body = match &func_decl.def {
-                                // `LocalIdDef`s not needed for declarations.
-                                DeclDef::Imported(_) => continue,
+                    let is_entry_block = !has_blocks;
+                    has_blocks = true;
 
-                                DeclDef::Present(def) => def.body,
-                            };
-                            LocalIdDef::Value(Value::ControlRegionInput {
-                                region: body,
-                                input_idx: idx,
-                            })
+                    let func_def_body = match &mut func_decl.def {
+                        // Error will be emitted later, below.
+                        DeclDef::Imported(_) => continue,
+                        DeclDef::Present(def) => def,
+                    };
+
+                    if opcode == wk.OpLabel {
+                        let block = if is_entry_block {
+                            // A `ControlRegion` was defined earlier,
+                            // to be able to create the `FuncDefBody`.
+                            func_def_body.body
                         } else {
-                            let is_entry_block = !has_blocks;
-                            has_blocks = true;
-
-                            let func_def_body = match &mut func_decl.def {
-                                // Error will be emitted later, below.
-                                DeclDef::Imported(_) => continue,
-                                DeclDef::Present(def) => def,
-                            };
-
-                            if opcode == wk.OpLabel {
-                                let block = if is_entry_block {
-                                    // A `ControlRegion` was defined earlier,
-                                    // to be able to create the `FuncDefBody`.
-                                    func_def_body.body
-                                } else {
-                                    func_def_body
-                                        .control_regions
-                                        .define(&cx, ControlRegionDef::default())
-                                };
-                                block_details
-                                    .insert(block, BlockDetails { label_id: id, phi_count: 0 });
-                                LocalIdDef::BlockLabel(block)
-                            } else if opcode == wk.OpPhi {
-                                let (&current_block, block_details) = match block_details.last_mut()
-                                {
-                                    Some(entry) => entry,
-                                    // Error will be emitted later, below.
-                                    None => continue,
-                                };
-
-                                let phi_idx = block_details.phi_count;
-                                block_details.phi_count = phi_idx.checked_add(1).unwrap();
-
-                                assert!(imms.is_empty());
-                                // FIXME(eddyb) use `array_chunks` when that's stable.
-                                for value_and_source_block_id in raw_inst.ids.chunks(2) {
-                                    let &[value_id, source_block_id]: &[_; 2] =
-                                        value_and_source_block_id.try_into().unwrap();
-
-                                    phi_to_values
-                                        .entry(PhiKey {
-                                            source_block_id,
-                                            target_block_id: block_details.label_id,
-                                            target_phi_idx: phi_idx,
-                                        })
-                                        .or_default()
-                                        .push(value_id);
-                                }
-
-                                LocalIdDef::Value(Value::ControlRegionInput {
-                                    region: current_block,
-                                    input_idx: phi_idx,
-                                })
-                            } else {
-                                // HACK(eddyb) can't get a `DataInst` without
-                                // defining it (as a dummy) first.
-                                let inst = func_def_body.data_insts.define(
-                                    &cx,
-                                    DataInstDef {
-                                        attrs: AttrSet::default(),
-                                        // FIXME(eddyb) cache this form locally.
-                                        form: get_op_nop_form(),
-                                        inputs: [].into_iter().collect(),
-                                    }
-                                    .into(),
-                                );
-                                LocalIdDef::Value(Value::DataInstOutput(inst))
-                            }
+                            func_def_body.control_regions.define(&cx, ControlRegionDef::default())
                         };
-                        local_id_defs.insert(id, local_id_def);
+                        block_details.insert(
+                            block,
+                            BlockDetails { label_id: result_id.unwrap(), phi_count: 0 },
+                        );
+                    } else if opcode == wk.OpPhi {
+                        let (_, block_details) = match block_details.last_mut() {
+                            Some(entry) => entry,
+                            // Error will be emitted later, below.
+                            None => continue,
+                        };
+
+                        let phi_idx = block_details.phi_count;
+                        block_details.phi_count = phi_idx.checked_add(1).unwrap();
+
+                        assert!(imms.is_empty());
+                        // FIXME(eddyb) use `array_chunks` when that's stable.
+                        for value_and_source_block_id in raw_inst.ids.chunks(2) {
+                            let &[value_id, source_block_id]: &[_; 2] =
+                                value_and_source_block_id.try_into().unwrap();
+
+                            phi_to_values
+                                .entry(PhiKey {
+                                    source_block_id,
+                                    target_block_id: block_details.label_id,
+                                    target_phi_idx: phi_idx,
+                                })
+                                .or_default()
+                                .push(value_id);
+                        }
                     }
                 }
             }
@@ -992,6 +1173,37 @@ impl Module {
                 None
             };
 
+            // HACK(eddyb) this is generic to allow `IdDef::AggregateConst`s
+            // to be converted to `LocalIdDef::Value`s, inside `lookup_id`.
+            enum LocalIdDef<VL = Either<ValueRange, SmallVec<[Value; 4]>>> {
+                Value { whole_type: Type, leaves: VL },
+                BlockLabel(ControlRegion),
+            }
+
+            struct ValueRange {
+                region_or_data_inst: Either<ControlRegion, DataInst>,
+                range: Range<u32>,
+            }
+
+            impl ValueRange {
+                fn iter(&self) -> impl ExactSizeIterator<Item = Value> + Clone {
+                    let region_or_data_inst = self.region_or_data_inst;
+                    self.range.clone().map(move |i| match region_or_data_inst {
+                        Either::Left(region) => Value::ControlRegionInput { region, input_idx: i },
+                        Either::Right(inst) => Value::DataInstOutput { inst, output_idx: i },
+                    })
+                }
+            }
+
+            let mut local_id_defs = FxIndexMap::<spv::Id, LocalIdDef>::default();
+
+            // Labels can be forward-referenced, so always have them present.
+            local_id_defs.extend(
+                block_details
+                    .iter()
+                    .map(|(&region, details)| (details.label_id, LocalIdDef::BlockLabel(region))),
+            );
+
             let mut current_block_control_region_and_details = None;
             for (raw_inst_idx, raw_inst) in raw_insts.iter().enumerate() {
                 let lookahead_raw_inst =
@@ -1005,52 +1217,128 @@ impl Module {
                     ref ids,
                 } = *raw_inst;
 
-                let invalid = |msg: &str| invalid(&format!("in {}: {}", opcode.name(), msg));
+                let invalid = invalid_factory_for_spv_inst(&raw_inst.without_ids, result_id, ids);
 
-                // FIXME(eddyb) find a more compact name and/or make this a method.
+                let is_last_in_block = lookahead_raw_inst(1)
+                    .map_or(true, |next_raw_inst| next_raw_inst.without_ids.opcode == wk.OpLabel);
+
+                // HACK(eddyb) this is handled early because it's the only case
+                // where a `result_id` isn't a value, and `OpFunctionParameter`
+                // wants to be able to use common value result helpers.
+                if opcode == wk.OpLabel {
+                    if is_last_in_block {
+                        return Err(invalid("block lacks terminator instruction"));
+                    }
+
+                    // An empty `ControlRegion` was defined earlier,
+                    // to be able to have an entry in `local_id_defs`.
+                    let control_region = match local_id_defs[&result_id.unwrap()] {
+                        LocalIdDef::BlockLabel(control_region) => control_region,
+                        LocalIdDef::Value { .. } => unreachable!(),
+                    };
+                    let current_block_details = &block_details[&control_region];
+                    assert_eq!(current_block_details.label_id, result_id.unwrap());
+                    current_block_control_region_and_details =
+                        Some((control_region, current_block_details));
+                    continue;
+                }
+
                 // FIXME(eddyb) this returns `LocalIdDef` even for global values.
-                let lookup_global_or_local_id_for_data_or_control_inst_input =
-                    |id| match id_defs.get(&id) {
-                        Some(&IdDef::Const(ct)) => Ok(LocalIdDef::Value(Value::Const(ct))),
-                        Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
-                            "unsupported use of {} as an operand for \
-                             an instruction in a function",
-                            id_def.descr(&cx),
-                        ))),
-                        Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
-                            "unsupported use of {} outside `OpFunctionCall`",
-                            id_def.descr(&cx),
-                        ))),
-                        Some(id_def @ IdDef::SpvDebugString(s)) => {
-                            if opcode == wk.OpExtInst {
-                                // HACK(eddyb) intern `OpString`s as `Const`s on
-                                // the fly, as it's a less likely usage than the
-                                // `OpLine` one.
-                                let ct = cx.intern(ConstDef {
-                                    attrs: AttrSet::default(),
-                                    ty: cx.intern(TypeKind::SpvStringLiteralForExtInst),
-                                    kind: ConstKind::SpvStringLiteralForExtInst(*s),
-                                });
-                                Ok(LocalIdDef::Value(Value::Const(ct)))
-                            } else {
-                                Err(invalid(&format!(
-                                    "unsupported use of {} outside `OpSource`, \
-                                     `OpLine`, or `OpExtInst`",
-                                    id_def.descr(&cx),
-                                )))
-                            }
+                let lookup_id = |id| match id_defs.get(&id) {
+                    None => {
+                        let local_id_def = local_id_defs.get(&id).ok_or_else(|| {
+                            // FIXME(eddyb) scan the rest of the function for any
+                            // instructions returning this ID, to report an invalid
+                            // forward reference (use before def).
+                            invalid(&format!("undefined ID %{id}"))
+                        })?;
+                        // HACK(eddyb) change the type of `leaves` within
+                        // `LocalIdDef::Value` to support consts
+                        // (see `IdDef::AggregateConst` case just below).
+                        Ok(match local_id_def {
+                            LocalIdDef::Value { whole_type, leaves } => LocalIdDef::Value {
+                                whole_type: *whole_type,
+                                leaves: Either::Left(
+                                    leaves
+                                        .as_ref()
+                                        .map_left(|leaves| leaves.iter())
+                                        .map_right(|leaves| leaves.iter().copied()),
+                                ),
+                            },
+                            &LocalIdDef::BlockLabel(label) => LocalIdDef::BlockLabel(label),
+                        })
+                    }
+                    Some(&IdDef::Const(ct)) => Ok(LocalIdDef::Value {
+                        whole_type: cx[ct].ty,
+                        leaves: Either::Right(Either::Left([Value::Const(ct)].into_iter())),
+                    }),
+                    Some(IdDef::AggregateConst { whole_type, leaves }) => Ok(LocalIdDef::Value {
+                        whole_type: *whole_type,
+                        leaves: Either::Right(Either::Right(
+                            leaves.iter().copied().map(Value::Const),
+                        )),
+                    }),
+                    Some(id_def @ IdDef::Type(_)) => Err(invalid(&format!(
+                        "unsupported use of {} as an operand for \
+                         an instruction in a function",
+                        id_def.descr(&cx),
+                    ))),
+                    Some(id_def @ IdDef::Func(_)) => Err(invalid(&format!(
+                        "unsupported use of {} outside `OpFunctionCall`",
+                        id_def.descr(&cx),
+                    ))),
+                    Some(id_def @ IdDef::SpvDebugString(s)) => {
+                        if opcode == wk.OpExtInst {
+                            // HACK(eddyb) intern `OpString`s as `Const`s on
+                            // the fly, as it's a less likely usage than the
+                            // `OpLine` one.
+                            let ty = cx.intern(TypeKind::SpvStringLiteralForExtInst);
+                            let ct = cx.intern(ConstDef {
+                                attrs: AttrSet::default(),
+                                ty,
+                                kind: ConstKind::SpvStringLiteralForExtInst(*s),
+                            });
+                            Ok(LocalIdDef::Value {
+                                whole_type: ty,
+                                leaves: Either::Right(Either::Left([Value::Const(ct)].into_iter())),
+                            })
+                        } else {
+                            Err(invalid(&format!(
+                                "unsupported use of {} outside `OpSource`, \
+                                 `OpLine`, or `OpExtInst`",
+                                id_def.descr(&cx),
+                            )))
                         }
-                        Some(id_def @ IdDef::SpvExtInstImport(_)) => Err(invalid(&format!(
-                            "unsupported use of {} outside `OpExtInst`",
-                            id_def.descr(&cx),
-                        ))),
-                        None => local_id_defs
-                            .get(&id)
-                            .copied()
-                            .ok_or_else(|| invalid(&format!("undefined ID %{id}",))),
+                    }
+                    Some(id_def @ IdDef::SpvExtInstImport(_)) => Err(invalid(&format!(
+                        "unsupported use of {} outside `OpExtInst`",
+                        id_def.descr(&cx),
+                    ))),
+                };
+
+                // FIXME(eddyb) is this even necessary anymore?
+                let value_from_region_inputs_or_data_inst_outputs =
+                    |region_or_data_inst, disaggregated_leaf_range| LocalIdDef::Value {
+                        whole_type: result_type.unwrap(),
+                        leaves: Either::Left(ValueRange {
+                            region_or_data_inst,
+                            range: disaggregated_leaf_range,
+                        }),
                     };
 
+                // Helper shared by `OpFunctionParameter` and `OpPhi`.
+                let attrs_for_result_leaf = |leaf_type: Type| {
+                    if result_type == Some(leaf_type) {
+                        attrs
+                    } else {
+                        // FIXME(eddyb) this may lose semantic `attrs`.
+                        AttrSet::default()
+                    }
+                };
+
                 if opcode == wk.OpFunctionParameter {
+                    let result_type = result_type.unwrap();
+
                     if current_block_control_region_and_details.is_some() {
                         return Err(invalid(
                             "out of order: `OpFunctionParameter`s should come \
@@ -1060,40 +1348,36 @@ impl Module {
 
                     assert!(imms.is_empty() && ids.is_empty());
 
-                    let ty = result_type.unwrap();
-                    params.push(FuncParam { attrs, ty });
+                    let param_start = params.len();
+                    params.extend(
+                        result_type
+                            .disaggregated_leaf_types(&cx)
+                            .map(|ty| FuncParam { attrs: attrs_for_result_leaf(ty), ty }),
+                    );
+                    let param_end = params.len();
+
                     if let Some(func_def_body) = &mut func_def_body {
-                        func_def_body
-                            .at_mut_body()
-                            .def()
-                            .inputs
-                            .push(ControlRegionInputDecl { attrs, ty });
+                        let body_inputs = &mut func_def_body.at_mut_body().def().inputs;
+                        let start = u32::try_from(body_inputs.len()).unwrap();
+                        body_inputs.extend(
+                            params[param_start..param_end].iter().map(
+                                |&FuncParam { attrs, ty }| ControlRegionInputDecl { attrs, ty },
+                            ),
+                        );
+                        let end = u32::try_from(body_inputs.len()).unwrap();
+
+                        local_id_defs.insert(
+                            result_id.unwrap(),
+                            value_from_region_inputs_or_data_inst_outputs(
+                                Either::Left(func_def_body.body),
+                                start..end,
+                            ),
+                        );
                     }
                     continue;
                 }
                 let func_def_body = func_def_body.as_deref_mut().unwrap();
 
-                let is_last_in_block = lookahead_raw_inst(1)
-                    .map_or(true, |next_raw_inst| next_raw_inst.without_ids.opcode == wk.OpLabel);
-
-                if opcode == wk.OpLabel {
-                    if is_last_in_block {
-                        return Err(invalid("block lacks terminator instruction"));
-                    }
-
-                    // A `ControlRegion` (using an empty `Block` `ControlNode`
-                    // as its sole child) was defined earlier,
-                    // to be able to have an entry in `local_id_defs`.
-                    let control_region = match local_id_defs[&result_id.unwrap()] {
-                        LocalIdDef::BlockLabel(control_region) => control_region,
-                        LocalIdDef::Value(_) => unreachable!(),
-                    };
-                    let current_block_details = &block_details[&control_region];
-                    assert_eq!(current_block_details.label_id, result_id.unwrap());
-                    current_block_control_region_and_details =
-                        Some((control_region, current_block_details));
-                    continue;
-                }
                 let (current_block_control_region, current_block_details) =
                     current_block_control_region_and_details.ok_or_else(|| {
                         invalid("out of order: not expected before the function's blocks")
@@ -1112,23 +1396,6 @@ impl Module {
                     }
 
                     let mut target_inputs = FxIndexMap::default();
-                    let descr_phi_case = |phi_key: &PhiKey| {
-                        format!(
-                            "`OpPhi` (#{} in %{})'s case for source block %{}",
-                            phi_key.target_phi_idx,
-                            phi_key.target_block_id,
-                            phi_key.source_block_id,
-                        )
-                    };
-                    let phi_value_id_to_value = |phi_key: &PhiKey, id| {
-                        match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
-                            LocalIdDef::Value(v) => Ok(v),
-                            LocalIdDef::BlockLabel { .. } => Err(invalid(&format!(
-                                "unsupported use of block label as the value for {}",
-                                descr_phi_case(phi_key)
-                            ))),
-                        }
-                    };
                     let mut record_cfg_edge = |target_block| -> io::Result<()> {
                         use indexmap::map::Entry;
 
@@ -1144,28 +1411,55 @@ impl Module {
                             Entry::Vacant(entry) => entry,
                         };
 
-                        let inputs = (0..target_block_details.phi_count).map(|target_phi_idx| {
+                        let mut target_inputs = SmallVec::new();
+                        for target_phi_idx in 0..target_block_details.phi_count {
                             let phi_key = PhiKey {
                                 source_block_id: current_block_details.label_id,
                                 target_block_id: target_block_details.label_id,
                                 target_phi_idx,
                             };
+                            let descr_phi_case = || {
+                                format!(
+                                    "`OpPhi` (#{} in %{})'s case for source block %{}",
+                                    phi_key.target_phi_idx,
+                                    phi_key.target_block_id,
+                                    phi_key.source_block_id,
+                                )
+                            };
+
                             let phi_value_ids =
                                 phi_to_values.swap_remove(&phi_key).unwrap_or_default();
 
-                            match phi_value_ids[..] {
-                                [] => Err(invalid(&format!(
-                                    "{} is missing",
-                                    descr_phi_case(&phi_key)
-                                ))),
-                                [id] => phi_value_id_to_value(&phi_key, id),
-                                [..] => Err(invalid(&format!(
-                                    "{} is duplicated",
-                                    descr_phi_case(&phi_key)
-                                ))),
+                            let phi_value_id = match phi_value_ids[..] {
+                                [] => {
+                                    return Err(invalid(&format!(
+                                        "{} is missing",
+                                        descr_phi_case()
+                                    )));
+                                }
+                                [id] => id,
+                                [..] => {
+                                    return Err(invalid(&format!(
+                                        "{} is duplicated",
+                                        descr_phi_case()
+                                    )));
+                                }
+                            };
+
+                            match lookup_id(phi_value_id)? {
+                                LocalIdDef::Value { leaves, .. } => {
+                                    target_inputs.extend(leaves);
+                                }
+                                LocalIdDef::BlockLabel(_) => {
+                                    return Err(invalid(&format!(
+                                        "unsupported use of block label as the value for {}",
+                                        descr_phi_case()
+                                    )));
+                                }
                             }
-                        });
-                        target_inputs_entry.insert(inputs.collect::<Result<_, _>>()?);
+                        }
+
+                        target_inputs_entry.insert(target_inputs);
 
                         Ok(())
                     };
@@ -1173,17 +1467,36 @@ impl Module {
                     // Split the operands into value inputs (e.g. a branch's
                     // condition or an `OpSwitch`'s selector) and target blocks.
                     let mut inputs = SmallVec::new();
+                    let mut input_types = SmallVec::<[_; 2]>::new();
                     let mut targets = SmallVec::new();
                     for &id in ids {
-                        match lookup_global_or_local_id_for_data_or_control_inst_input(id)? {
-                            LocalIdDef::Value(v) => {
+                        match lookup_id(id)? {
+                            LocalIdDef::Value { whole_type, leaves, .. } => {
                                 if !targets.is_empty() {
                                     return Err(invalid(
                                         "out of order: value operand \
                                          after target label ID",
                                     ));
                                 }
-                                inputs.push(v);
+
+                                match cx[whole_type].spv_value_lowering() {
+                                    spv::ValueLowering::Direct => {}
+
+                                    // Returns are "lossily" disaggregated, just like
+                                    // function's signatures and calls to them.
+                                    spv::ValueLowering::Disaggregate(_)
+                                        if opcode == wk.OpReturnValue => {}
+
+                                    spv::ValueLowering::Disaggregate(_) => {
+                                        return Err(invalid(
+                                            "unsupported aggregate value operand, \
+                                             in non-return terminator instruction",
+                                        ));
+                                    }
+                                }
+
+                                inputs.extend(leaves);
+                                input_types.push(whole_type);
                             }
                             LocalIdDef::BlockLabel(target) => {
                                 record_cfg_edge(target)?;
@@ -1192,11 +1505,12 @@ impl Module {
                         }
                     }
 
+                    // FIXME(eddyb) move some of this to `spv::canonical`.
                     let kind = if opcode == wk.OpUnreachable {
                         assert!(targets.is_empty() && inputs.is_empty());
                         cfg::ControlInstKind::Unreachable
                     } else if [wk.OpReturn, wk.OpReturnValue].contains(&opcode) {
-                        assert!(targets.is_empty() && inputs.len() <= 1);
+                        assert!(targets.is_empty());
                         cfg::ControlInstKind::Return
                     } else if targets.is_empty() {
                         cfg::ControlInstKind::ExitInvocation(cfg::ExitInvocationKind::SpvInst(
@@ -1209,9 +1523,62 @@ impl Module {
                         assert_eq!((targets.len(), inputs.len()), (2, 1));
                         cfg::ControlInstKind::SelectBranch(SelectionKind::BoolCond)
                     } else if opcode == wk.OpSwitch {
-                        cfg::ControlInstKind::SelectBranch(SelectionKind::SpvInst(
-                            raw_inst.without_ids.clone(),
-                        ))
+                        assert_eq!(inputs.len(), 1);
+
+                        // HACK(eddyb) `spv::read` has to "redundantly" validate
+                        // that such a type is `OpTypeInt`/`OpTypeFloat`, but
+                        // there is still a limitation when it comes to `scalar::Const`.
+                        // FIXME(eddyb) don't hardcode the 128-bit limitation,
+                        // but query `scalar::Const` somehow instead.
+                        let scrutinee_type = input_types[0];
+                        let scrutinee_type = scrutinee_type
+                            .as_scalar(&cx)
+                            .filter(|ty| {
+                                matches!(ty, scalar::Type::UInt(_) | scalar::Type::SInt(_))
+                                    && ty.bit_width() <= 128
+                            })
+                            .ok_or_else(|| {
+                                invalid(
+                                    &print::Plan::for_root(
+                                        &cx,
+                                        &Diag::err([
+                                            "unsupported `OpSwitch` scrutinee type `".into(),
+                                            scrutinee_type.into(),
+                                            "`".into(),
+                                        ])
+                                        .message,
+                                    )
+                                    .pretty_print()
+                                    .to_string(),
+                                )
+                            })?;
+
+                        // FIXME(eddyb) move some of this to `spv::canonical`.
+                        let imm_words_per_case =
+                            usize::try_from(scrutinee_type.bit_width().div_ceil(32)).unwrap();
+
+                        // NOTE(eddyb) these sanity-checks are redundant with `spv::read`.
+                        assert_eq!(imms.len() % imm_words_per_case, 0);
+                        assert_eq!(targets.len(), 1 + imms.len() / imm_words_per_case);
+
+                        let case_consts = imms
+                            .chunks(imm_words_per_case)
+                            .map(|case_imms| {
+                                scalar::Const::try_decode_from_spv_imms(scrutinee_type, case_imms)
+                                    .ok_or_else(|| {
+                                        invalid(&format!(
+                                            "invalid {}-bit `OpSwitch` case constant",
+                                            scrutinee_type.bit_width()
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?;
+
+                        // HACK(eddyb) move the default case from first to last.
+                        let default_target = targets.remove(0);
+                        targets.push(default_target);
+
+                        cfg::ControlInstKind::SelectBranch(SelectionKind::Switch { case_consts })
                     } else {
                         return Err(invalid("unsupported control-flow instruction"));
                     };
@@ -1225,7 +1592,12 @@ impl Module {
                             current_block_control_region,
                             cfg::ControlInst { attrs, kind, inputs, targets, target_inputs },
                         );
-                } else if opcode == wk.OpPhi {
+                    continue;
+                }
+
+                if opcode == wk.OpPhi {
+                    let result_type = result_type.unwrap();
+
                     if !current_block_control_region_def.children.is_empty() {
                         return Err(invalid(
                             "out of order: `OpPhi`s should come before \
@@ -1233,10 +1605,26 @@ impl Module {
                         ));
                     }
 
-                    current_block_control_region_def
-                        .inputs
-                        .push(ControlRegionInputDecl { attrs, ty: result_type.unwrap() });
-                } else if [wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode) {
+                    let inputs = &mut current_block_control_region_def.inputs;
+                    let start = u32::try_from(inputs.len()).unwrap();
+                    inputs.extend(
+                        result_type.disaggregated_leaf_types(&cx).map(|ty| {
+                            ControlRegionInputDecl { attrs: attrs_for_result_leaf(ty), ty }
+                        }),
+                    );
+                    let end = u32::try_from(inputs.len()).unwrap();
+
+                    local_id_defs.insert(
+                        result_id.unwrap(),
+                        value_from_region_inputs_or_data_inst_outputs(
+                            Either::Left(current_block_control_region),
+                            start..end,
+                        ),
+                    );
+                    continue;
+                }
+
+                if [wk.OpSelectionMerge, wk.OpLoopMerge].contains(&opcode) {
                     let is_second_to_last_in_block = lookahead_raw_inst(2)
                         .map_or(true, |next_raw_inst| {
                             next_raw_inst.without_ids.opcode == wk.OpLabel
@@ -1253,12 +1641,10 @@ impl Module {
                     // impact on the shape of a loop, for restructurization.
                     if opcode == wk.OpLoopMerge {
                         assert_eq!(ids.len(), 2);
-                        let loop_merge_target =
-                            match lookup_global_or_local_id_for_data_or_control_inst_input(ids[0])?
-                            {
-                                LocalIdDef::Value(_) => return Err(invalid("expected label ID")),
-                                LocalIdDef::BlockLabel(target) => target,
-                            };
+                        let loop_merge_target = match lookup_id(ids[0])? {
+                            LocalIdDef::Value { .. } => return Err(invalid("expected label ID")),
+                            LocalIdDef::BlockLabel(target) => target,
+                        };
 
                         func_def_body
                             .unstructured_cfg
@@ -1272,105 +1658,14 @@ impl Module {
                     // especially wrt the `SelectionControl` and `LoopControl`
                     // operands, but it's not obvious how they should map to
                     // some "structured regions" replacement for the CFG.
-                } else {
-                    let mut ids = &ids[..];
-                    let kind = if opcode == wk.OpFunctionCall {
-                        assert!(imms.is_empty());
-                        let callee_id = ids[0];
-                        let maybe_callee = id_defs
-                            .get(&callee_id)
-                            .map(|id_def| match *id_def {
-                                IdDef::Func(func) => Ok(func),
-                                _ => Err(id_def.descr(&cx)),
-                            })
-                            .transpose()
-                            .map_err(|descr| {
-                                invalid(&format!(
-                                    "unsupported use of {descr} as the `OpFunctionCall` callee"
-                                ))
-                            })?;
+                    continue;
+                }
 
-                        match maybe_callee {
-                            Some(callee) => {
-                                ids = &ids[1..];
-                                DataInstKind::FuncCall(callee)
-                            }
+                // All control-flow instructions have been handled above.
+                // Only `DataInst`s get generated below here.
 
-                            // HACK(eddyb) this should be an error, but it shows
-                            // up in Rust-GPU output (likely a zombie?).
-                            None => DataInstKind::SpvInst(raw_inst.without_ids.clone()),
-                        }
-                    } else if opcode == wk.OpExtInst {
-                        let ext_set_id = ids[0];
-                        ids = &ids[1..];
-
-                        let inst = match imms[..] {
-                            [spv::Imm::Short(kind, inst)] => {
-                                assert_eq!(kind, wk.LiteralExtInstInteger);
-                                inst
-                            }
-                            _ => unreachable!(),
-                        };
-
-                        let ext_set = match id_defs.get(&ext_set_id) {
-                            Some(&IdDef::SpvExtInstImport(name)) => Ok(name),
-                            Some(id_def) => Err(id_def.descr(&cx)),
-                            None => Err(format!("unknown ID %{ext_set_id}")),
-                        }
-                        .map_err(|descr| {
-                            invalid(&format!(
-                                "unsupported use of {descr} as the `OpExtInst` \
-                                 extended instruction set ID"
-                            ))
-                        })?;
-
-                        DataInstKind::SpvExtInst { ext_set, inst }
-                    } else {
-                        DataInstKind::SpvInst(raw_inst.without_ids.clone())
-                    };
-
-                    let data_inst_def = DataInstDef {
-                        attrs,
-                        form: cx.intern(DataInstFormDef {
-                            kind,
-                            output_type: result_id
-                                .map(|_| {
-                                    result_type.ok_or_else(|| {
-                                        invalid(
-                                            "expected value-producing instruction, \
-                                             with a result type",
-                                        )
-                                    })
-                                })
-                                .transpose()?,
-                        }),
-                        inputs: ids
-                            .iter()
-                            .map(|&id| {
-                                match lookup_global_or_local_id_for_data_or_control_inst_input(id)?
-                                {
-                                    LocalIdDef::Value(v) => Ok(v),
-                                    LocalIdDef::BlockLabel { .. } => Err(invalid(
-                                        "unsupported use of block label as a value, \
-                                         in non-terminator instruction",
-                                    )),
-                                }
-                            })
-                            .collect::<io::Result<_>>()?,
-                    };
-                    let inst = match result_id {
-                        Some(id) => match local_id_defs[&id] {
-                            LocalIdDef::Value(Value::DataInstOutput(inst)) => {
-                                // A dummy was defined earlier, to be able to
-                                // have an entry in `local_id_defs`.
-                                func_def_body.data_insts[inst] = data_inst_def.into();
-
-                                inst
-                            }
-                            _ => unreachable!(),
-                        },
-                        None => func_def_body.data_insts.define(&cx, data_inst_def.into()),
-                    };
+                let mut append_data_inst = |data_inst_def: DataInstDef| {
+                    let inst = func_def_body.data_insts.define(&cx, data_inst_def.into());
 
                     let current_block_control_node = current_block_control_region_def
                         .children
@@ -1402,6 +1697,333 @@ impl Module {
                         }
                         _ => unreachable!(),
                     }
+
+                    inst
+                };
+
+                let lookup_value_id = |id| match lookup_id(id)? {
+                    LocalIdDef::Value { whole_type, leaves } => Ok((whole_type, leaves)),
+                    LocalIdDef::BlockLabel(_) => Err(invalid(
+                        "unsupported use of block label as a value, \
+                         in non-terminator instruction",
+                    )),
+                };
+
+                // Special-case instructions which deal with aggregates as
+                // "containers" for their leaves, and so have an effect which
+                // can be interpreted eagerly on the disaggregated form.
+                // FIXME(eddyb) this may lose semantic `attrs`
+                let eagerly_lowered_result = if opcode == wk.OpCompositeConstruct {
+                    let result_type = result_type.unwrap();
+
+                    match cx[result_type].spv_value_lowering() {
+                        spv::ValueLowering::Direct => None,
+                        spv::ValueLowering::Disaggregate(_) => {
+                            let mut all_leaves =
+                                SmallVec::with_capacity(cx[result_type].disaggregated_leaf_count());
+                            for &id in ids {
+                                let (_, leaves) = lookup_value_id(id)?;
+                                all_leaves.extend(leaves);
+                            }
+                            if all_leaves.len() == cx[result_type].disaggregated_leaf_count() {
+                                Some(LocalIdDef::Value {
+                                    whole_type: result_type,
+                                    leaves: Either::Right(all_leaves),
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                } else if [wk.OpCompositeExtract, wk.OpCompositeInsert].contains(&opcode) {
+                    let result_type = result_type.unwrap();
+
+                    let (&composite_id, ids_without_last) = ids.split_last().unwrap();
+                    let (composite_type, leaves) = lookup_value_id(composite_id)?;
+
+                    // HACK(eddyb) `replace_component` and `rebuild_composite`
+                    // are always both `None` or both `Some`, but splitting the
+                    // two aspects of `OpCompositeInsert` makes it easier later.
+                    let (component_type, replace_component, rebuild_composite);
+                    match ids_without_last[..] {
+                        [] => {
+                            component_type = result_type;
+                            replace_component = None;
+                            rebuild_composite = None;
+                        }
+                        [replacement_component_id] => {
+                            let (replacement_component_type, replacement_component_leaves) =
+                                lookup_value_id(replacement_component_id)?;
+
+                            component_type = replacement_component_type;
+                            replace_component = Some(replacement_component_leaves);
+                            rebuild_composite = Some(result_type);
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    // HACK(eddyb) this is a `try {...}`-like use of a closure.
+                    (|| {
+                        if let Some(expected_type) = rebuild_composite {
+                            if composite_type != expected_type {
+                                return None;
+                            }
+                        }
+
+                        let mut imms = imms.iter();
+                        let (leaf_type, leaf_range) = match cx[composite_type].spv_value_lowering()
+                        {
+                            spv::ValueLowering::Direct => return None,
+                            spv::ValueLowering::Disaggregate(_) => composite_type
+                                .aggregate_component_path_type_and_leaf_range(
+                                    &cx,
+                                    &mut imms.by_ref().map(|&imm| match imm {
+                                        spv::Imm::Short(_, i) => i,
+                                        _ => unreachable!(),
+                                    }),
+                                )?,
+                        };
+                        let non_aggregate_indexing_imms = imms.as_slice();
+
+                        if non_aggregate_indexing_imms.is_empty() && leaf_type != component_type {
+                            return None;
+                        }
+
+                        let mut component_leaves =
+                            leaves.clone().skip(leaf_range.start).take(leaf_range.len());
+
+                        // If there's any leftover indices they must be indexing
+                        // into a vector/matrix, which requires separate handling.
+                        let component_leaves = if !non_aggregate_indexing_imms.is_empty() {
+                            assert_eq!(component_leaves.len(), 1);
+                            let non_aggregate_composite = component_leaves.next().unwrap();
+
+                            let leaf_spv_inst = spv::Inst {
+                                opcode,
+                                imms: non_aggregate_indexing_imms.iter().copied().collect(),
+                            };
+                            let leaf_output_types = [match rebuild_composite {
+                                Some(_) => leaf_type,
+                                None => component_type,
+                            }];
+                            let leaf_inst = append_data_inst(DataInstDef {
+                                attrs,
+                                form: cx.intern(DataInstFormDef {
+                                    kind: leaf_spv_inst
+                                        .as_canonical_data_inst_kind(&cx, &leaf_output_types)
+                                        .unwrap_or(DataInstKind::SpvInst(
+                                            leaf_spv_inst,
+                                            spv::InstLowering::default(),
+                                        )),
+                                    output_types: leaf_output_types.into_iter().collect(),
+                                }),
+                                inputs: replace_component
+                                    .map(|mut replacement_leaves| {
+                                        assert_eq!(replacement_leaves.len(), 1);
+                                        replacement_leaves.next().unwrap()
+                                    })
+                                    .into_iter()
+                                    .chain([non_aggregate_composite])
+                                    .collect(),
+                            });
+                            Either::Left(
+                                [Value::DataInstOutput { inst: leaf_inst, output_idx: 0 }]
+                                    .into_iter(),
+                            )
+                        } else {
+                            Either::Right(
+                                replace_component
+                                    .map_or(Either::Left(component_leaves), Either::Right),
+                            )
+                        };
+
+                        assert_eq!(
+                            component_leaves.len(),
+                            cx[component_type].disaggregated_leaf_count()
+                        );
+
+                        let leaves = match rebuild_composite {
+                            Some(_) => leaves
+                                .clone()
+                                .take(leaf_range.start)
+                                .chain(component_leaves)
+                                .chain(leaves.skip(leaf_range.end))
+                                .collect(),
+                            None => component_leaves.collect(),
+                        };
+
+                        Some(LocalIdDef::Value {
+                            whole_type: result_type,
+                            // FIXME(eddyb) avoid allocating somehow, like
+                            // try "recompressing" into a `ValueRange`, or
+                            // preserving that form throughout above?
+                            leaves: Either::Right(leaves),
+                        })
+                    })()
+                } else {
+                    None
+                };
+                if let Some(def) = eagerly_lowered_result {
+                    local_id_defs.insert(result_id.unwrap(), def);
+                    continue;
+                }
+
+                let mut ids = &ids[..];
+                let mut kind = if opcode == wk.OpFunctionCall {
+                    assert!(imms.is_empty());
+                    let callee_id = ids[0];
+                    let maybe_callee = id_defs
+                        .get(&callee_id)
+                        .map(|id_def| match *id_def {
+                            IdDef::Func(func) => Ok(func),
+                            _ => Err(id_def.descr(&cx)),
+                        })
+                        .transpose()
+                        .map_err(|descr| {
+                            invalid(&format!(
+                                "unsupported use of {descr} as the `OpFunctionCall` callee"
+                            ))
+                        })?;
+
+                    match maybe_callee {
+                        Some(callee) => {
+                            ids = &ids[1..];
+                            DataInstKind::FuncCall(callee)
+                        }
+
+                        // HACK(eddyb) this should be an error, but it shows
+                        // up in Rust-GPU output (likely a zombie?).
+                        None => DataInstKind::SpvInst(
+                            raw_inst.without_ids.clone(),
+                            spv::InstLowering::default(),
+                        ),
+                    }
+                } else if opcode == wk.OpExtInst {
+                    let ext_set_id = ids[0];
+                    ids = &ids[1..];
+
+                    let inst = match imms[..] {
+                        [spv::Imm::Short(kind, inst)] => {
+                            assert_eq!(kind, wk.LiteralExtInstInteger);
+                            inst
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    let ext_set = match id_defs.get(&ext_set_id) {
+                        Some(&IdDef::SpvExtInstImport(name)) => Ok(name),
+                        Some(id_def) => Err(id_def.descr(&cx)),
+                        None => Err(format!("unknown ID %{ext_set_id}")),
+                    }
+                    .map_err(|descr| {
+                        invalid(&format!(
+                            "unsupported use of {descr} as the `OpExtInst` \
+                                 extended instruction set ID"
+                        ))
+                    })?;
+
+                    DataInstKind::SpvExtInst {
+                        ext_set,
+                        inst,
+                        lowering: spv::InstLowering::default(),
+                    }
+                } else {
+                    DataInstKind::SpvInst(
+                        raw_inst.without_ids.clone(),
+                        spv::InstLowering::default(),
+                    )
+                };
+
+                // HACK(eddyb) only factored out due to `kind`'s mutable borrow.
+                let call_ret_type = match kind {
+                    DataInstKind::FuncCall(_) => Some(result_type.unwrap()),
+                    _ => None,
+                };
+
+                let mut spv_inst_lowering = match &mut kind {
+                    DataInstKind::SpvInst(_, lowering)
+                    | DataInstKind::SpvExtInst { lowering, .. } => Some(lowering),
+
+                    // NOTE(eddyb) function signatures and calls keep their
+                    // disaggregation even when lifting back to SPIR-V, so
+                    // no `spv::InstLowering` is tracked for them.
+                    DataInstKind::FuncCall(_) => None,
+
+                    DataInstKind::Scalar(_) | DataInstKind::Vector(_) | DataInstKind::QPtr(_) => {
+                        unreachable!()
+                    }
+                };
+
+                let output_types: SmallVec<_> = result_id
+                    .map(|_| {
+                        let result_type = result_type.unwrap();
+                        if let Some(spv_inst_lowering) = &mut spv_inst_lowering {
+                            spv_inst_lowering.disaggregated_output =
+                                match cx[result_type].spv_value_lowering() {
+                                    spv::ValueLowering::Direct => None,
+                                    spv::ValueLowering::Disaggregate(_) => Some(result_type),
+                                };
+                        }
+
+                        // HACK(eddyb) `OpTypeVoid` special-cased for calls
+                        // as if it were an aggregate with `0` leaves.
+                        let ret_void = call_ret_type.is_some_and(|ty| match &cx[ty].kind {
+                            TypeKind::SpvInst { spv_inst: ret_type_spv_inst, .. } => {
+                                ret_type_spv_inst.opcode == wk.OpTypeVoid
+                            }
+                            _ => false,
+                        });
+                        if ret_void {
+                            [].into_iter().collect()
+                        } else {
+                            result_type.disaggregated_leaf_types(&cx).collect()
+                        }
+                    })
+                    .unwrap_or_default();
+                let output_types_len = output_types.len();
+
+                let mut inputs = SmallVec::with_capacity(ids.len());
+                for &id in ids {
+                    let (whole_input_type, leaves) = lookup_value_id(id)?;
+
+                    let start = u32::try_from(inputs.len()).unwrap();
+                    inputs.extend(leaves);
+                    let end = u32::try_from(inputs.len()).unwrap();
+
+                    if let spv::ValueLowering::Disaggregate(_) =
+                        cx[whole_input_type].spv_value_lowering()
+                    {
+                        if let Some(lowering) = &mut spv_inst_lowering {
+                            lowering.disaggregated_inputs.push((start..end, whole_input_type));
+                        }
+                    }
+                }
+
+                if let DataInstKind::SpvInst(spv_inst, lowering) = &kind {
+                    if lowering.disaggregated_inputs.is_empty() {
+                        if let Some(canonical_kind) =
+                            spv_inst.as_canonical_data_inst_kind(&cx, &output_types)
+                        {
+                            // FIXME(eddyb) sanity-check the number/types of inputs.
+                            kind = canonical_kind;
+                        }
+                    }
+                }
+
+                let inst = append_data_inst(DataInstDef {
+                    attrs,
+                    form: cx.intern(DataInstFormDef { kind, output_types }),
+                    inputs,
+                });
+
+                if let Some(result_id) = result_id {
+                    local_id_defs.insert(
+                        result_id,
+                        value_from_region_inputs_or_data_inst_outputs(
+                            Either::Right(inst),
+                            0..u32::try_from(output_types_len).unwrap(),
+                        ),
+                    );
                 }
             }
 
